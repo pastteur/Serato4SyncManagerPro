@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers } from 'lucide-react';
+import { ConfirmModal } from './ConfirmModal';
 
 export interface TagDoctorItem {
   id: string;
@@ -75,6 +76,21 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   const pageSize = 50;
 
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+
+  // Modal de Confirmação em Tela
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
 
   // Subcrates da Crate selecionada atualmente
   const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
@@ -235,7 +251,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   };
 
   // Aplicação de tags para as faixas selecionadas da página
-  const handleApplyCleanPage = async () => {
+  const handleApplyCleanPage = () => {
     const selectedItems = items
       .filter(it => selectedIds.has(it.id))
       .map(it => ({
@@ -244,45 +260,60 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
       }));
 
     if (selectedItems.length === 0) {
-      alert('Selecione ao menos uma música para aplicar as correções.');
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Música Selecionada',
+        message: 'Por favor, selecione ao menos uma música na tabela para aplicar as correções.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
       return;
     }
 
     const msg = renameFilesOnDisk
       ? `Deseja regravar as tags ID3 e RENOMEAR os ${selectedItems.length} arquivos selecionados no disco?`
-      : `Deseja regravar as tags ID3 oficiais dos ${selectedItems.length} arquivos selecionados? (Os nomes físicos no HD não serão alterados)`;
+      : `Deseja regravar as tags ID3 oficiais dos ${selectedItems.length} arquivos selecionados?\n\n(Os nomes físicos no HD não serão alterados)`;
 
-    if (!confirm(msg)) return;
+    setModalConfig({
+      isOpen: true,
+      title: 'Aplicar Correções na Página',
+      message: msg,
+      confirmText: `Aplicar em ${selectedItems.length} Faixas`,
+      variant: 'info',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsApplying(true);
+        onAddLog(`✍️ Gravando tags higienizadas em ${selectedItems.length} arquivo(s)...`);
 
-    setIsApplying(true);
-    onAddLog(`✍️ Gravando tags higienizadas em ${selectedItems.length} arquivo(s)...`);
+        try {
+          const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const resJson = await invoke<string>('apply_tags_doctor', {
+              itemsJson: JSON.stringify(selectedItems),
+              renameFiles: renameFilesOnDisk
+            });
+            const data = JSON.parse(resJson);
 
-    try {
-      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const resJson = await invoke<string>('apply_tags_doctor', {
-          itemsJson: JSON.stringify(selectedItems),
-          renameFiles: renameFilesOnDisk
-        });
-        const data = JSON.parse(resJson);
-
-        if (data.sucesso) {
-          onAddLog(`🎯 Concluído! ${data.atualizados} música(s) atualizadas com sucesso nas tags oficiais.`);
-          loadScan(page, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
-        } else {
-          onAddLog(`❌ Erro ao gravar tags: ${data.erro}`);
+            if (data.sucesso) {
+              onAddLog(`🎯 Concluído! ${data.atualizados} música(s) atualizadas com sucesso nas tags oficiais.`);
+              loadScan(page, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+            } else {
+              onAddLog(`❌ Erro ao gravar tags: ${data.erro}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha ao gravar tags: ${e}`);
+        } finally {
+          setIsApplying(false);
         }
       }
-    } catch (e) {
-      onAddLog(`❌ Falha ao gravar tags: ${e}`);
-    } finally {
-      setIsApplying(false);
-    }
+    });
   };
 
   // Aplicação em Lote (Crate inteira com subcrates, ou Subcrate específica, ou Toda a Biblioteca)
-  const handleBatchApplyCrate = async () => {
+  const handleBatchApplyCrate = () => {
     const targetLabel = selectedSubcrate
       ? `Subcrate "${selectedCrate} -> ${selectedSubcrate}"`
       : selectedCrate
@@ -295,38 +326,46 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
       ? `⚡ Deseja aplicar a higienização de tags ID3 e RENOMEAR FISICAMENTE no disco em:\n\n📂 ${targetLabel}\n🎯 Faixas: ${countLabel}\n\nO Serato continuará lendo normalmente os Beatgrids e Cues.`
       : `⚡ Deseja regravar as tags ID3 oficiais (preservando Serato Markers) em:\n\n📂 ${targetLabel}\n🎯 Faixas: ${countLabel}\n\n(Os nomes dos arquivos no HD não serão alterados)`;
 
-    if (!confirm(msg)) return;
-
-    setIsBatchApplying(true);
-    setBatchProgress({
-      processados: 0,
-      total: totalFound,
-      percentual: 0,
-      atualizados: 0,
-      faixa_atual: 'Iniciando varredura e gravação em lote...'
-    });
-
-    onAddLog(`⚡ Disparando processamento em lote para ${targetLabel}...`);
-
-    try {
-      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('batch_apply_tags_doctor', {
-          mp3Path,
-          crateRaiz: selectedCrate || null,
-          subcrate: selectedSubcrate || null,
-          includeSubcrates,
-          namingMode,
-          renameFiles: renameFilesOnDisk,
-          search: searchTerm || null
+    setModalConfig({
+      isOpen: true,
+      title: 'Higienização de Tags em Lote',
+      message: msg,
+      confirmText: 'Sim, Executar Lote',
+      variant: 'warning',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsBatchApplying(true);
+        setBatchProgress({
+          processados: 0,
+          total: totalFound,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando varredura e gravação em lote...'
         });
+
+        onAddLog(`⚡ Disparando processamento em lote para ${targetLabel}...`);
+
+        try {
+          const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('batch_apply_tags_doctor', {
+              mp3Path,
+              crateRaiz: selectedCrate || null,
+              subcrate: selectedSubcrate || null,
+              includeSubcrates,
+              namingMode,
+              renameFiles: renameFilesOnDisk,
+              search: searchTerm || null
+            });
+          }
+        } catch (e) {
+          setIsBatchApplying(false);
+          setBatchProgress(null);
+          onAddLog(`❌ Erro ao disparar lote: ${e}`);
+        }
       }
-    } catch (e) {
-      setIsBatchApplying(false);
-      setBatchProgress(null);
-      onAddLog(`❌ Erro ao disparar lote: ${e}`);
-    }
+    });
   };
 
   // Mudança de Crate Raiz
@@ -765,6 +804,16 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         </div>
       </div>
 
+      {/* Modal de Confirmação em Tela Integrado */}
+      <ConfirmModal
+        isOpen={modalConfig.isOpen}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        confirmText={modalConfig.confirmText}
+        variant={modalConfig.variant}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

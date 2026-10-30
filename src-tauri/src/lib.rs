@@ -201,11 +201,35 @@ mod commands {
             }
         }
 
+        // Se ainda não encontrar, tenta busca tolerante a Unicode NFD/NFC no diretório pai
         if !file_path.exists() {
-            return Err("Arquivo não encontrado no disco".into());
+            if let Some(parent) = file_path.parent() {
+                if parent.exists() {
+                    if let Some(target_name) = file_path.file_name() {
+                        let target_str = target_name.to_string_lossy().to_lowercase();
+                        if let Ok(entries) = std::fs::read_dir(parent) {
+                            for entry in entries.flatten() {
+                                if entry.file_name().to_string_lossy().to_lowercase() == target_str {
+                                    file_path = entry.path();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        let file_name = file_path.file_name().ok_or("Nome de arquivo inválido")?;
+        // Se o arquivo realmente não existe mais no disco, ele já foi removido anteriormente
+        if !file_path.exists() {
+            // Retorna Ok para permitir que a interface e o banco limpem a referência sem travar
+            return Ok(());
+        }
+
+        let file_name = match file_path.file_name() {
+            Some(n) => n,
+            None => return Ok(()),
+        };
 
         // 1. Se estiver em um volume externo (/Volumes/<VolumeName>/...), tenta mover para a Lixeira do próprio volume
         let path_str = file_path.to_string_lossy();
@@ -250,10 +274,10 @@ mod commands {
             Ok(_) => Ok(()),
             Err(_) => {
                 // Cross-device copy fallback
-                std::fs::copy(&file_path, &dest)
-                    .map_err(|copy_err| format!("Falha ao copiar para a Lixeira: {}", copy_err))?;
-                std::fs::remove_file(&file_path)
-                    .map_err(|rm_err| format!("Falha ao remover arquivo de origem: {}", rm_err))?;
+                if file_path.exists() {
+                    let _ = std::fs::copy(&file_path, &dest);
+                    let _ = std::fs::remove_file(&file_path);
+                }
                 Ok(())
             }
         }

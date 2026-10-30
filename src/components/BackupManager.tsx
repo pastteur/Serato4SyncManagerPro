@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Database, ShieldCheck, History, RotateCcw, CheckCircle2, AlertTriangle, FileArchive, FolderOpen } from 'lucide-react';
+import { ConfirmModal } from './ConfirmModal';
 
 interface BackupManagerProps {
   onAddLog: (message: string) => void;
@@ -13,6 +14,22 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
   const [backups, setBackups] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isRestoring, setIsRestoring] = useState<boolean>(false);
+
+  // Modal de Confirmação em Tela
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    detail?: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -45,42 +62,47 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
         onAddLog(`✅ Novo snapshot criado: ${data.arquivo} (${data.tamanho_mb} MB)`);
         loadBackups();
       } else {
-        alert(`Erro ao criar backup: ${data.erro}`);
+        onAddLog(`❌ Erro ao criar backup: ${data.erro}`);
       }
     } catch (e) {
-      alert(`Erro: ${e}`);
+      onAddLog(`❌ Erro: ${e}`);
     }
   };
 
-  const handleRestore = async (backupItem: any) => {
-    const confirmed = window.confirm(
-      `⚠️ CONFIRMAÇÃO DE RESTAURAÇÃO:\n\nDeseja restaurar a base de dados do Serato para a versão de:\n${backupItem.data} (${backupItem.nome})?\n\nO Serato será retornado para o estado desta data.\nUma cópia do banco atual será salva por segurança.`
-    );
-    if (!confirmed) return;
+  const handleRestore = (backupItem: any) => {
+    setModalConfig({
+      isOpen: true,
+      title: 'Restaurar Snapshot da Base de Dados',
+      message: `Deseja restaurar a base de dados do Serato para a versão de ${backupItem.data}?`,
+      detail: `Arquivo: ${backupItem.nome}\nO banco master.sqlite atual será substituído pelo conteúdo deste snapshot. Uma cópia do banco atual será salva automaticamente por segurança.`,
+      confirmText: 'Restaurar Versão',
+      variant: 'warning',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRestoring(true);
+        onAddLog(`⏪ Restaurando banco do Serato a partir de ${backupItem.nome}...`);
 
-    setIsRestoring(true);
-    onAddLog(`⏪ Restaurando banco do Serato a partir de ${backupItem.nome}...`);
-
-    try {
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const res = await invoke<string>('restore_serato_db', {
-          backupPath: backupItem.caminho
-        });
-        const data = JSON.parse(res);
-        if (data.sucesso) {
-          onAddLog(`🎯 ${data.mensagem}`);
-          alert(`Banco restaurado com sucesso!`);
-          loadBackups();
-        } else {
-          alert(`Erro na restauração: ${data.erro}`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const res = await invoke<string>('restore_serato_db', {
+              backupPath: backupItem.caminho
+            });
+            const data = JSON.parse(res);
+            if (data.sucesso) {
+              onAddLog(`🎯 ${data.mensagem}`);
+              loadBackups();
+            } else {
+              onAddLog(`❌ Erro na restauração: ${data.erro}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha: ${e}`);
+        } finally {
+          setIsRestoring(false);
         }
       }
-    } catch (e) {
-      alert(`Falha: ${e}`);
-    } finally {
-      setIsRestoring(false);
-    }
+    });
   };
 
   return (
@@ -166,6 +188,17 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
           )}
         </div>
       </div>
+
+      <ConfirmModal
+        isOpen={modalConfig.isOpen}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        detail={modalConfig.detail}
+        confirmText={modalConfig.confirmText}
+        variant={modalConfig.variant}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

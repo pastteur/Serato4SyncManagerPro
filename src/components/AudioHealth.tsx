@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2, Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
+import { ConfirmModal } from './ConfirmModal';
 
 interface AudioHealthProps {
   mp3Path: string;
@@ -45,6 +46,22 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     faixa_atual: string;
   } | null>(null);
 
+  // Modal de Confirmação em Tela (sem popups nativos que travam)
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    detail?: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
+
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
 
@@ -68,7 +85,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   // Carrega Auditoria
   const loadHealthScan = async (cat: string = selectedCategory, dur: number = maxDuration) => {
     if (!mp3Path) {
-      alert('Selecione a pasta MP3 antes de escanear.');
+      onAddLog('⚠️ Selecione a pasta MP3 antes de escanear.');
       return;
     }
 
@@ -161,45 +178,61 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   }, []);
 
   // Mover faixa individual para lixeira
-  const handleTrashSingle = async (item: any) => {
+  const handleTrashSingle = (item: any) => {
     if (!onMoveToTrash) return;
-    const confirmed = window.confirm(`Deseja mover esta faixa com problema para a Lixeira?\n\nArquivo: ${item.arquivo}\nMotivo: ${item.detalhes}`);
-    if (!confirmed) return;
-
-    const ok = await onMoveToTrash(item.caminho, item.id);
-    if (ok) {
-      setItems(prev => prev.filter(i => i.id !== item.id));
-      setSelectedIds(prev => {
-        const next = new Set(prev);
-        next.delete(item.id);
-        return next;
-      });
-    }
+    setModalConfig({
+      isOpen: true,
+      title: 'Mover Faixa Danificada para a Lixeira',
+      message: `Deseja mover esta faixa com problema para a Lixeira?`,
+      detail: `Arquivo: ${item.arquivo}\nMotivo: ${item.detalhes}`,
+      confirmText: 'Mover para Lixeira',
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        const ok = await onMoveToTrash(item.caminho, item.id);
+        if (ok) {
+          setItems(prev => prev.filter(i => i.id !== item.id));
+          setSelectedIds(prev => {
+            const next = new Set(prev);
+            next.delete(item.id);
+            return next;
+          });
+        }
+      }
+    });
   };
 
   // Mover selecionadas em massa para lixeira
-  const handleTrashBatch = async () => {
+  const handleTrashBatch = () => {
     if (!onMoveToTrash) return;
     const selectedItems = items.filter(i => selectedIds.has(i.id));
     if (selectedItems.length === 0) {
-      alert('Selecione ao menos uma faixa para mover para a Lixeira.');
+      onAddLog('⚠️ Selecione ao menos uma faixa para mover para a Lixeira.');
       return;
     }
 
-    const msg = `Deseja mover as ${selectedItems.length} faixas com problemas selecionadas para a Lixeira?`;
-    if (!confirm(msg)) return;
+    setModalConfig({
+      isOpen: true,
+      title: 'Mover Faixas Danificadas para a Lixeira',
+      message: `Deseja mover as ${selectedItems.length} faixas com problemas selecionadas para a Lixeira?`,
+      detail: 'As faixas selecionadas serão enviadas com segurança para o Lixo do macOS.',
+      confirmText: `Mover ${selectedItems.length} faixas`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        onAddLog(`🗑️ Movendo lote de ${selectedItems.length} faixas comprometidas para a Lixeira...`);
+        let deletedCount = 0;
 
-    onAddLog(`🗑️ Movendo lote de ${selectedItems.length} faixas comprometidas para a Lixeira...`);
-    let deletedCount = 0;
+        for (const item of selectedItems) {
+          const ok = await onMoveToTrash(item.caminho, item.id);
+          if (ok) deletedCount++;
+        }
 
-    for (const item of selectedItems) {
-      const ok = await onMoveToTrash(item.caminho, item.id);
-      if (ok) deletedCount++;
-    }
-
-    onAddLog(`✅ Concluído: ${deletedCount} faixas removidas para a Lixeira.`);
-    setItems(prev => prev.filter(i => !selectedIds.has(i.id)));
-    setSelectedIds(new Set());
+        onAddLog(`✅ Concluído: ${deletedCount} faixas removidas para a Lixeira.`);
+        setItems(prev => prev.filter(i => !selectedIds.has(i.id)));
+        setSelectedIds(new Set());
+      }
+    });
   };
 
   // Correção online de uma única música
@@ -225,40 +258,48 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   };
 
   // Correção online em massa das selecionadas
-  const handleRepairBatchOnline = async () => {
+  const handleRepairBatchOnline = () => {
     const selectedItems = items.filter(i => selectedIds.has(i.id));
     if (selectedItems.length === 0) {
-      alert('Selecione ao menos uma música para reparar online.');
+      onAddLog('⚠️ Selecione ao menos uma música para reparar online.');
       return;
     }
 
-    const msg = `🌐 Deseja buscar e substituir automaticamente as ${selectedItems.length} faixas selecionadas por versões completas em 320kbps?\n\nOs arquivos originais serão guardados em segurança na pasta de quarentena.`;
-    if (!confirm(msg)) return;
-
-    setIsRepairingOnline(true);
-    setRepairProgress({
-      processados: 0,
-      total: selectedItems.length,
-      percentual: 0,
-      atualizados: 0,
-      faixa_atual: 'Iniciando downloads em alta qualidade...'
-    });
-
-    onAddLog(`🌐 Disparando correção online em massa de ${selectedItems.length} faixas via yt-dlp...`);
-
-    try {
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const filepaths = selectedItems.map(i => i.caminho);
-        await invoke('batch_repair_online', {
-          filepathsJson: JSON.stringify(filepaths)
+    setModalConfig({
+      isOpen: true,
+      title: 'Correção Online e Substituição Automática',
+      message: `Deseja buscar e substituir automaticamente as ${selectedItems.length} faixas selecionadas por versões completas em 320kbps?`,
+      detail: 'Os arquivos originais corrompidos ou incompletos serão guardados em segurança na pasta de quarentena (~/SeratoSync/quarantine/).',
+      confirmText: `Reparar ${selectedItems.length} faixas`,
+      variant: 'warning',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRepairingOnline(true);
+        setRepairProgress({
+          processados: 0,
+          total: selectedItems.length,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando downloads em alta qualidade...'
         });
+
+        onAddLog(`🌐 Disparando correção online em massa de ${selectedItems.length} faixas via yt-dlp...`);
+
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const filepaths = selectedItems.map(i => i.caminho);
+            await invoke('batch_repair_online', {
+              filepathsJson: JSON.stringify(filepaths)
+            });
+          }
+        } catch (e) {
+          setIsRepairingOnline(false);
+          setRepairProgress(null);
+          onAddLog(`❌ Falha na chamada da correção online: ${e}`);
+        }
       }
-    } catch (e) {
-      setIsRepairingOnline(false);
-      setRepairProgress(null);
-      onAddLog(`❌ Erro ao disparar lote online: ${e}`);
-    }
+    });
   };
 
   // Alterna seleção
@@ -645,6 +686,17 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           )}
         </div>
       </div>
+
+      <ConfirmModal
+        isOpen={modalConfig.isOpen}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        detail={modalConfig.detail}
+        confirmText={modalConfig.confirmText}
+        variant={modalConfig.variant}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { Copy, Search, FileSpreadsheet, FolderOpen, BarChart3, Database, Eye, Trash2, CheckCircle2, CheckSquare, Square, AlertTriangle } from 'lucide-react';
 import { DuplicateItem } from '../types';
+import { ConfirmModal } from './ConfirmModal';
 
 interface DuplicatesAuditProps {
   duplicates: DuplicateItem[];
@@ -26,6 +27,21 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(new Set());
   const [isBatchDeleting, setIsBatchDeleting] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
+
+  // Modal de Confirmação em Tela
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
 
   // Filtra itens deletados
   const activeDuplicates = useMemo(() => {
@@ -119,67 +135,84 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   };
 
   // Exclusão individual
-  const handleTrashClick = async (item: DuplicateItem) => {
+  const handleTrashClick = (item: DuplicateItem) => {
     const targetPath = item.caminho_copia || `${item.copia}/${item.nome}`;
-    const confirmed = window.confirm(
-      `Deseja mover a cópia redundante para a Lixeira do macOS?\n\nFaixa: ${item.nome}\nPasta: ${item.copia}\n\nNota: A faixa original permanecerá 100% segura e intacta.`
-    );
-    if (!confirmed) return;
-
-    if (onMoveToTrash) {
-      setIsDeletingId(item.id);
-      const success = await onMoveToTrash(targetPath, item.id);
-      setIsDeletingId(null);
-      if (success) {
-        setDeletedIds(prev => new Set(prev).add(item.id));
-        setSelectedBatchIds(prev => {
-          const next = new Set(prev);
-          next.delete(item.id);
-          return next;
-        });
+    setModalConfig({
+      isOpen: true,
+      title: 'Mover Duplicada para Lixeira',
+      message: `Deseja mover a cópia redundante para a Lixeira do macOS?\n\nFaixa: ${item.nome}\nPasta: ${item.copia}\n\nNota: A faixa original permanecerá 100% segura e intacta.`,
+      confirmText: 'Mover para Lixeira',
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        if (onMoveToTrash) {
+          setIsDeletingId(item.id);
+          const success = await onMoveToTrash(targetPath, item.id);
+          setIsDeletingId(null);
+          if (success) {
+            setDeletedIds(prev => new Set(prev).add(item.id));
+            setSelectedBatchIds(prev => {
+              const next = new Set(prev);
+              next.delete(item.id);
+              return next;
+            });
+          }
+        }
       }
-    }
+    });
   };
 
   // Exclusão em Lote
-  const handleBatchTrash = async () => {
+  const handleBatchTrash = () => {
     const toDelete = activeDuplicates.filter(d => selectedBatchIds.has(d.id));
     if (toDelete.length === 0) {
-      alert('Selecione ao menos uma faixa duplicada para excluir.');
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Faixa Selecionada',
+        message: 'Por favor, selecione ao menos uma faixa duplicada para excluir.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
       return;
     }
 
-    const confirmed = window.confirm(
-      `⚠️ ATENÇÃO: Deseja mover ${toDelete.length} faixas duplicadas para a Lixeira?\n\nAs faixas originais serão preservadas intactas.\nEsta ação liberará espaço no disco de forma segura.`
-    );
-    if (!confirmed) return;
+    setModalConfig({
+      isOpen: true,
+      title: 'Mover Lote para a Lixeira',
+      message: `⚠️ Deseja mover as ${toDelete.length} faixas duplicadas selecionadas para a Lixeira?\n\n🔒 As faixas originais serão preservadas 100% intactas.\nEsta ação liberará espaço no disco com segurança.`,
+      confirmText: `Mover ${toDelete.length} Faixas`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        if (!onMoveToTrash) return;
 
-    if (!onMoveToTrash) return;
+        setIsBatchDeleting(true);
+        setBatchProgress({ current: 0, total: toDelete.length });
 
-    setIsBatchDeleting(true);
-    setBatchProgress({ current: 0, total: toDelete.length });
+        const newDeleted = new Set(deletedIds);
 
-    const newDeleted = new Set(deletedIds);
+        for (let i = 0; i < toDelete.length; i++) {
+          const item = toDelete[i];
+          const targetPath = item.caminho_copia || `${item.copia}/${item.nome}`;
+          setBatchProgress({ current: i + 1, total: toDelete.length });
 
-    for (let i = 0; i < toDelete.length; i++) {
-      const item = toDelete[i];
-      const targetPath = item.caminho_copia || `${item.copia}/${item.nome}`;
-      setBatchProgress({ current: i + 1, total: toDelete.length });
-
-      try {
-        const success = await onMoveToTrash(targetPath, item.id);
-        if (success) {
-          newDeleted.add(item.id);
+          try {
+            const success = await onMoveToTrash(targetPath, item.id);
+            if (success) {
+              newDeleted.add(item.id);
+            }
+          } catch (err) {
+            console.error(`Falha ao excluir ${item.nome}:`, err);
+          }
         }
-      } catch (err) {
-        console.error(`Falha ao excluir ${item.nome}:`, err);
-      }
-    }
 
-    setDeletedIds(newDeleted);
-    setSelectedBatchIds(new Set());
-    setIsBatchDeleting(false);
-    setBatchProgress(null);
+        setDeletedIds(newDeleted);
+        setSelectedBatchIds(new Set());
+        setIsBatchDeleting(false);
+        setBatchProgress(null);
+      }
+    });
   };
 
   const isAllVisibleSelected = filteredDuplicates.length > 0 &&
@@ -464,6 +497,17 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
           </div>
         </>
       )}
+
+      {/* Modal de Confirmação em Tela Integrado */}
+      <ConfirmModal
+        isOpen={modalConfig.isOpen}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        confirmText={modalConfig.confirmText}
+        variant={modalConfig.variant}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

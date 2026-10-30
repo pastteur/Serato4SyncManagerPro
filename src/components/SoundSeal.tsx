@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw } from 'lucide-react';
+import { ConfirmModal } from './ConfirmModal';
 
 interface SoundSealProps {
   mp3Path: string;
@@ -42,6 +43,22 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     atualizados: number;
     faixa_atual: string;
   } | null>(null);
+
+  // Modal de Confirmação em Tela (sem popups nativos que travam)
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    detail?: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -130,7 +147,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   // Iniciar varredura do Sound Seal
   const handleStartSealScan = async () => {
     if (!mp3Path) {
-      alert('Selecione a pasta MP3 antes de iniciar.');
+      onAddLog('⚠️ Selecione a pasta MP3 antes de iniciar.');
       return;
     }
     setIsScanning(true);
@@ -158,7 +175,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   // Scanner de Relocate de Músicas Perdidas
   const handleScanRelocate = async () => {
     if (!seratoPath || !mp3Path) {
-      alert('Selecione as pastas MP3 e Serato antes de iniciar o Relocate.');
+      onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de iniciar o Relocate.');
       return;
     }
     setIsScanningRelocate(true);
@@ -231,63 +248,83 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   };
 
   // Exclusão individual de uma cópia
-  const handleTrashSingleCopy = async (caminho: string, nome: string) => {
+  const handleTrashSingleCopy = (caminho: string, nome: string) => {
     if (!onMoveToTrash) return;
-    const okConfirm = window.confirm(`Deseja mover esta cópia para a Lixeira?\n\n${nome}\n\nA faixa de referência original será preservada.`);
-    if (!okConfirm) return;
+    setModalConfig({
+      isOpen: true,
+      title: 'Mover Cópia para a Lixeira',
+      message: `Deseja mover esta cópia para a Lixeira do Mac?\n\nFaixa: ${nome}\n\nA faixa de referência original será 100% PRESERVADA.`,
+      confirmText: 'Mover para Lixeira',
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        const ok = await onMoveToTrash(caminho, caminho);
+        if (ok) {
+          setDuplicatesBySound(prev => prev.map(g => ({
+            ...g,
+            faixas: g.faixas.filter((f: any) => f.caminho !== caminho),
+            total_copias: g.faixas.filter((f: any) => f.caminho !== caminho).length
+          })).filter(g => g.faixas.length > 1));
 
-    const ok = await onMoveToTrash(caminho, caminho);
-    if (ok) {
-      // Remove da lista local
-      setDuplicatesBySound(prev => prev.map(g => ({
-        ...g,
-        faixas: g.faixas.filter((f: any) => f.caminho !== caminho),
-        total_copias: g.faixas.filter((f: any) => f.caminho !== caminho).length
-      })).filter(g => g.faixas.length > 1));
-
-      setSelectedCopyPaths(prev => {
-        const next = new Set(prev);
-        next.delete(caminho);
-        return next;
-      });
-      loadStatus();
-    }
+          setSelectedCopyPaths(prev => {
+            const next = new Set(prev);
+            next.delete(caminho);
+            return next;
+          });
+          loadStatus();
+        }
+      }
+    });
   };
 
   // Exclusão em Massa de todas as cópias selecionadas
-  const handleBatchTrashCopies = async () => {
+  const handleBatchTrashCopies = () => {
     if (!onMoveToTrash) return;
     if (selectedCopyPaths.size === 0) {
-      alert('Selecione ao menos uma cópia redundante para mover para a Lixeira.');
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Cópia Selecionada',
+        message: 'Por favor, selecione ao menos uma cópia redundante para mover para a Lixeira.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
       return;
     }
 
     const count = selectedCopyPaths.size;
-    const msg = `🗑️ Deseja mover as ${count} cópias redundantes selecionadas para a Lixeira?\n\n🔒 As faixas de referência (originais) serão 100% PRESERVADAS.\n\nEsta ação liberará espaço no disco mantendo a melhor cópia de cada áudio.`;
-    if (!confirm(msg)) return;
+    setModalConfig({
+      isOpen: true,
+      title: 'Mover Cópias Redundantes para Lixeira',
+      message: `Deseja mover as ${count} cópias redundantes selecionadas para a Lixeira do Mac?\n\n🔒 As faixas de referência (originais) serão 100% PRESERVADAS.\n\nEsta ação liberará espaço no disco mantendo a melhor cópia de cada áudio.`,
+      confirmText: `Sim, Mover ${count} Cópias`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsTrashingBatch(true);
+        setTrashProgress({ current: 0, total: count, fileName: 'Iniciando...' });
+        onAddLog(`🗑️ Sound Seal: Movendo ${count} cópias redundantes para a Lixeira...`);
 
-    setIsTrashingBatch(true);
-    setTrashProgress({ current: 0, total: count, fileName: 'Iniciando...' });
-    onAddLog(`🗑️ Sound Seal: Movendo ${count} cópias redundantes para a Lixeira...`);
+        let trashedCount = 0;
+        const toTrash = Array.from(selectedCopyPaths);
 
-    let trashedCount = 0;
-    const toTrash = Array.from(selectedCopyPaths);
+        for (let i = 0; i < toTrash.length; i++) {
+          const p = toTrash[i];
+          const name = p.split('/').pop() || '';
+          setTrashProgress({ current: i + 1, total: count, fileName: name });
 
-    for (let i = 0; i < toTrash.length; i++) {
-      const p = toTrash[i];
-      const name = p.split('/').pop() || '';
-      setTrashProgress({ current: i + 1, total: count, fileName: name });
+          const ok = await onMoveToTrash(p, p);
+          if (ok) trashedCount++;
+        }
 
-      const ok = await onMoveToTrash(p, p);
-      if (ok) trashedCount++;
-    }
-
-    setIsTrashingBatch(false);
-    setTrashProgress(null);
-    onAddLog(`✅ Concluído: ${trashedCount} cópias redundantes movidas para a Lixeira.`);
-    setSelectedCopyPaths(new Set());
-    loadDuplicatesBySound();
-    loadStatus();
+        setIsTrashingBatch(false);
+        setTrashProgress(null);
+        onAddLog(`✅ Concluído: ${trashedCount} cópias redundantes movidas para a Lixeira.`);
+        setSelectedCopyPaths(new Set());
+        loadDuplicatesBySound();
+        loadStatus();
+      }
+    });
   };
 
   // Religar faixa individual
@@ -320,41 +357,55 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   };
 
   // Religar todas as faixas selecionadas em massa
-  const handleBatchRelink = async () => {
+  const handleBatchRelink = () => {
     if (selectedRelinkItems.size === 0) {
-      alert('Nenhuma correspondência selecionada para relocalizar.');
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Correspondência',
+        message: 'Nenhuma correspondência selecionada para relocalizar.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
       return;
     }
 
     const count = selectedRelinkItems.size;
-    const msg = `⚡ Deseja religar automaticamente as ${count} faixas perdidas selecionadas ao Serato?\n\nOs arquivos encontrados serão restaurados aos seus locais esperados para tocar imediatamente.`;
-    if (!confirm(msg)) return;
-
-    setIsRelinkingBatch(true);
-    setRelinkProgress({
-      processados: 0,
-      total: count,
-      percentual: 0,
-      atualizados: 0,
-      faixa_atual: 'Iniciando relocalização...'
-    });
-
-    onAddLog(`⚡ Disparando relocalização em massa de ${count} faixas perdidas...`);
-
-    try {
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const items = Array.from(selectedRelinkItems.values());
-        await invoke('batch_relink_tracks', {
-          mp3Path,
-          itemsJson: JSON.stringify(items)
+    setModalConfig({
+      isOpen: true,
+      title: 'Religar Faixas ao Serato',
+      message: `Deseja religar automaticamente as ${count} faixas perdidas selecionadas ao Serato?\n\nOs arquivos encontrados serão restaurados aos seus locais esperados para tocar imediatamente.`,
+      confirmText: `Religar ${count} Faixas`,
+      variant: 'info',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRelinkingBatch(true);
+        setRelinkProgress({
+          processados: 0,
+          total: count,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando relocalização...'
         });
+
+        onAddLog(`⚡ Disparando relocalização em massa de ${count} faixas perdidas...`);
+
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const items = Array.from(selectedRelinkItems.values());
+            await invoke('batch_relink_tracks', {
+              mp3Path,
+              itemsJson: JSON.stringify(items)
+            });
+          }
+        } catch (e) {
+          setIsRelinkingBatch(false);
+          setRelinkProgress(null);
+          onAddLog(`❌ Erro ao disparar relocalização em lote: ${e}`);
+        }
       }
-    } catch (e) {
-      setIsRelinkingBatch(false);
-      setRelinkProgress(null);
-      onAddLog(`❌ Erro ao disparar relocalização em lote: ${e}`);
-    }
+    });
   };
 
   return (
@@ -779,6 +830,18 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal de Confirmação em Tela Integrado (Zero Travamento de Popups) */}
+      <ConfirmModal
+        isOpen={modalConfig.isOpen}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        detail={modalConfig.detail}
+        confirmText={modalConfig.confirmText}
+        variant={modalConfig.variant}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

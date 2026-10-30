@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Target, Sparkles, CheckCircle2, Play, Music, ArrowRight, RefreshCw, Layers, FolderTree, Zap, Eye } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
+import { ConfirmModal } from './ConfirmModal';
 
 interface AutoCueGeneratorProps {
   mp3Path: string;
@@ -40,6 +41,22 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
     atualizados: number;
     faixa_atual: string;
   } | null>(null);
+
+  // Modal de Confirmação em Tela (sem popups nativos que travam)
+  const [modalConfig, setModalConfig] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    detail?: string;
+    confirmText?: string;
+    variant?: 'danger' | 'warning' | 'info';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    onConfirm: () => {}
+  });
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
@@ -196,7 +213,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
   };
 
   // Gravação em lote para toda a Crate
-  const handleBatchApplyCrate = async (onlyPending: boolean = false) => {
+  const handleBatchApplyCrate = (onlyPending: boolean = false) => {
     const scopeLabel = selectedSubcrate
       ? `Subcrate "${selectedCrate} -> ${selectedSubcrate}"`
       : selectedCrate
@@ -205,36 +222,44 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
 
     const countLabel = onlyPending ? `${pendentesCount} faixas pendentes` : `${totalTracks} faixas`;
 
-    const msg = `⚡ Deseja gerar e gravar os 5 Hot Cues oficiais do Serato em:\n\n📂 ${scopeLabel}\n🎯 Faixas: ${countLabel}\n\nOs marcadores serão gravados em GEOB:Serato Markers2 para acionamento direto nos pads do controlador.`;
-    if (!confirm(msg)) return;
-
-    setIsBatchRunning(true);
-    setBatchProgress({
-      processados: 0,
-      total: totalTracks,
-      percentual: 0,
-      atualizados: 0,
-      faixa_atual: 'Iniciando cálculo e gravação...'
-    });
-
-    onAddLog(`⚡ Disparando geração em lote de Hot Cues para ${scopeLabel}...`);
-
-    try {
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        await invoke('batch_apply_crate_cues', {
-          mp3Path,
-          crateRaiz: selectedCrate || null,
-          subcrate: selectedSubcrate || null,
-          includeSubcrates,
-          onlyPending
+    setModalConfig({
+      isOpen: true,
+      title: 'Geração e Gravação em Massa de Hot Cues',
+      message: `Deseja gerar e gravar os 5 Hot Cues oficiais do Serato em ${countLabel}?`,
+      detail: `Escopo: ${scopeLabel}\nOs marcadores serão gravados em GEOB:Serato Markers2 para acionamento direto nos pads do controlador.`,
+      confirmText: 'Gravar Hot Cues',
+      variant: 'warning',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsBatchRunning(true);
+        setBatchProgress({
+          processados: 0,
+          total: totalTracks,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando cálculo e gravação...'
         });
+
+        onAddLog(`⚡ Disparando geração em lote de Hot Cues para ${scopeLabel}...`);
+
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('batch_apply_crate_cues', {
+              mp3Path,
+              crateRaiz: selectedCrate || null,
+              subcrate: selectedSubcrate || null,
+              includeSubcrates,
+              onlyPending
+            });
+          }
+        } catch (e) {
+          setIsBatchRunning(false);
+          setBatchProgress(null);
+          onAddLog(`❌ Erro ao disparar lote: ${e}`);
+        }
       }
-    } catch (e) {
-      setIsBatchRunning(false);
-      setBatchProgress(null);
-      onAddLog(`❌ Erro ao disparar lote: ${e}`);
-    }
+    });
   };
 
   const roundSec = (val: number) => Math.round(val || 0);
@@ -595,6 +620,16 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
         </div>
       </div>
 
+      <ConfirmModal
+        isOpen={modalConfig.isOpen}
+        title={modalConfig.title}
+        message={modalConfig.message}
+        detail={modalConfig.detail}
+        confirmText={modalConfig.confirmText}
+        variant={modalConfig.variant}
+        onConfirm={modalConfig.onConfirm}
+        onCancel={() => setModalConfig(prev => ({ ...prev, isOpen: false }))}
+      />
     </div>
   );
 };

@@ -169,7 +169,8 @@ export const App: React.FC = () => {
   // Start Sync Execution (supports dry-run / simulation)
   const handleStartSync = async (dryRun: boolean = false) => {
     if (!mp3Path || !seratoPath) {
-      alert('Por favor, selecione ambas as pastas antes de iniciar.');
+      addLog('⚠️ Por favor, selecione ambas as pastas (Músicas e Serato) antes de iniciar.');
+      setActiveTab('logs');
       return;
     }
 
@@ -252,7 +253,7 @@ export const App: React.FC = () => {
         addLog(`⚠️ Não foi possível abrir pasta no Finder: ${err}`);
       }
     } else {
-      alert('No aplicativo desktop nativo, isso abre a pasta ~/SeratoSync/logs no Finder.');
+      addLog('📂 No aplicativo desktop nativo, isso abre a pasta ~/SeratoSync/logs no Finder.');
     }
   };
 
@@ -266,7 +267,7 @@ export const App: React.FC = () => {
         addLog(`⚠️ Não foi possível revelar arquivo: ${err}`);
       }
     } else {
-      alert(`Revelar arquivo no Finder: ${filePath}`);
+      addLog(`🔍 Revelar arquivo no Finder: ${filePath}`);
     }
   };
 
@@ -285,8 +286,7 @@ export const App: React.FC = () => {
         }
         return true;
       } catch (err) {
-        addLog(`❌ Erro ao mover para a Lixeira: ${err}`);
-        alert(`Erro ao mover para a Lixeira: ${err}`);
+        addLog(`⚠️ Erro ao mover para a Lixeira: ${err}`);
         return false;
       }
     } else {

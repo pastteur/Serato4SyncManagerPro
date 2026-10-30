@@ -25,11 +25,11 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
 
   const handleRunMatch = async (exportCrateNow: boolean = false) => {
     if (!inputData.trim()) {
-      alert('Informe o link do Spotify ou a lista de faixas para cruzar.');
+      onAddLog('⚠️ Informe o link do Spotify ou a lista de faixas para cruzar.');
       return;
     }
     if (!mp3Path) {
-      alert('Selecione a pasta MP3 antes de realizar o cruzamento.');
+      onAddLog('⚠️ Selecione a pasta MP3 antes de realizar o cruzamento.');
       return;
     }
 
@@ -71,7 +71,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     if (!matchResult || !matchResult.faltantes) return;
     const text = matchResult.faltantes.map((f: any) => f.solicitado).join('\n');
     navigator.clipboard.writeText(text);
-    alert(`Lista de ${matchResult.faltantes.length} faixas faltantes copiada para a área de transferência!`);
+    onAddLog(`📋 Lista de ${matchResult.faltantes.length} faixas faltantes copiada para a área de transferência!`);
   };
 
   return (
@@ -205,7 +205,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
               </button>
               <button
                 type="button"
-                onClick={() => alert(`Para baixar as ${matchResult.total_faltantes} faixas faltantes com tags e capas oficiais, você pode utilizar o utilitário integrado de download ou colar a lista no spotdl / yt-dlp.`)}
+                onClick={() => onAddLog(`📥 Baixar Faltantes: Você pode colar as ${matchResult.total_faltantes} faixas faltantes no utilitário de download integrado ou no spotdl / yt-dlp.`)}
                 className="text-[10px] px-2.5 py-0.5 rounded bg-serato-orange hover:bg-amber-400 text-black font-bold flex items-center gap-1 cursor-pointer"
               >
                 <Download className="w-3 h-3" />
