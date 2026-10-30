@@ -1,18 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye } from 'lucide-react';
+import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw } from 'lucide-react';
 
 interface SoundSealProps {
   mp3Path: string;
   seratoPath: string;
   onAddLog: (message: string) => void;
   onOpenFileInFinder?: (filePath: string) => void;
+  onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
 }
 
 export const SoundSeal: React.FC<SoundSealProps> = ({
   mp3Path,
   seratoPath,
   onAddLog,
-  onOpenFileInFinder
+  onOpenFileInFinder,
+  onMoveToTrash
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'seal' | 'relocate'>('seal');
   const [status, setStatus] = useState<any>(null);
@@ -20,6 +22,26 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   const [duplicatesBySound, setDuplicatesBySound] = useState<any[]>([]);
   const [relocateResults, setRelocateResults] = useState<any[]>([]);
   const [isScanningRelocate, setIsScanningRelocate] = useState<boolean>(false);
+
+  // Seleção e Exclusão em Massa de Cópias por Som
+  const [selectedCopyPaths, setSelectedCopyPaths] = useState<Set<string>>(new Set());
+  const [isTrashingBatch, setIsTrashingBatch] = useState<boolean>(false);
+  const [trashProgress, setTrashProgress] = useState<{
+    current: number;
+    total: number;
+    fileName: string;
+  } | null>(null);
+
+  // Seleção e Relocalização em Massa
+  const [selectedRelinkItems, setSelectedRelinkItems] = useState<Map<string, { rel_path: string; source_path: string; nome: string }>>(new Map());
+  const [isRelinkingBatch, setIsRelinkingBatch] = useState<boolean>(false);
+  const [relinkProgress, setRelinkProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    atualizados: number;
+    faixa_atual: string;
+  } | null>(null);
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -43,7 +65,17 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       const res = await invoke<string>('get_sound_seal_duplicates');
       const parsed = JSON.parse(res);
       if (parsed.sucesso) {
-        setDuplicatesBySound(parsed.duplicados_som || []);
+        const groups = parsed.duplicados_som || [];
+        setDuplicatesBySound(groups);
+
+        // Pré-seleciona todas as cópias redundantes automaticamente (deixando a referência segura)
+        const initialSelected = new Set<string>();
+        groups.forEach((g: any) => {
+          (g.faixas || []).slice(1).forEach((f: any) => {
+            initialSelected.add(f.caminho);
+          });
+        });
+        setSelectedCopyPaths(initialSelected);
       }
     } catch (e) {
       console.error(e);
@@ -53,6 +85,46 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   useEffect(() => {
     loadStatus();
     loadDuplicatesBySound();
+  }, []);
+
+  // Listener para batch relink
+  useEffect(() => {
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenFinished: (() => void) | undefined;
+
+    const setupListeners = async () => {
+      if (isTauri) {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlistenProgress = await listen<any>('sound-seal-relink-progress', (event) => {
+          const payload = event.payload;
+          setRelinkProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            atualizados: payload.atualizados || 0,
+            faixa_atual: payload.faixa_atual || '',
+          });
+        });
+
+        unlistenFinished = await listen<any>('sound-seal-relink-finished', (event) => {
+          const payload = event.payload;
+          setIsRelinkingBatch(false);
+          setRelinkProgress(null);
+          if (payload.sucesso) {
+            onAddLog(`🎉 Relocalização concluída! ${payload.atualizados} faixas religadas com sucesso ao Serato.`);
+            handleScanRelocate();
+          } else {
+            onAddLog(`❌ Erro no lote de relocalização: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
+      }
+    };
+
+    setupListeners();
+    return () => {
+      if (unlistenProgress) unlistenProgress();
+      if (unlistenFinished) unlistenFinished();
+    };
   }, []);
 
   // Iniciar varredura do Sound Seal
@@ -101,8 +173,28 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
         });
         const parsed = JSON.parse(res);
         if (parsed.sucesso) {
-          setRelocateResults(parsed.analisadas || []);
-          onAddLog(`✅ Relocate: Análise concluída. ${parsed.total_perdidas} faixas ausentes verificadas.`);
+          const items = parsed.analisadas || [];
+          setRelocateResults(items);
+
+          // Pré-seleciona correspondências com 100% de confiança ou encontradas no Lixo
+          const relinkMap = new Map<string, { rel_path: string; source_path: string; nome: string }>();
+          items.forEach((it: any) => {
+            if (it.in_trash && it.trash_path) {
+              relinkMap.set(it.faixa_perdida, {
+                rel_path: it.faixa_perdida,
+                source_path: it.trash_path,
+                nome: it.nome
+              });
+            } else if (it.candidatos && it.candidatos.length > 0 && it.candidatos[0].score >= 87) {
+              relinkMap.set(it.faixa_perdida, {
+                rel_path: it.faixa_perdida,
+                source_path: it.candidatos[0].caminho,
+                nome: it.nome
+              });
+            }
+          });
+          setSelectedRelinkItems(relinkMap);
+          onAddLog(`✅ Relocate: ${parsed.total_perdidas} faixas ausentes verificadas (${relinkMap.size} com correspondência confirmada).`);
         }
       }
     } catch (e) {
@@ -112,10 +204,164 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     }
   };
 
+  // Total de cópias redundantes (excluindo os originais de referência)
+  const allCopyPaths: string[] = [];
+  duplicatesBySound.forEach(g => {
+    (g.faixas || []).slice(1).forEach((f: any) => allCopyPaths.push(f.caminho));
+  });
+
+  // Toggle de seleção de uma cópia
+  const toggleSelectCopy = (path: string) => {
+    setSelectedCopyPaths(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  // Selecionar todas as cópias redundantes
+  const handleSelectAllCopies = () => {
+    setSelectedCopyPaths(new Set(allCopyPaths));
+  };
+
+  // Desmarcar todas as cópias
+  const handleDeselectAllCopies = () => {
+    setSelectedCopyPaths(new Set());
+  };
+
+  // Exclusão individual de uma cópia
+  const handleTrashSingleCopy = async (caminho: string, nome: string) => {
+    if (!onMoveToTrash) return;
+    const okConfirm = window.confirm(`Deseja mover esta cópia para a Lixeira?\n\n${nome}\n\nA faixa de referência original será preservada.`);
+    if (!okConfirm) return;
+
+    const ok = await onMoveToTrash(caminho, caminho);
+    if (ok) {
+      // Remove da lista local
+      setDuplicatesBySound(prev => prev.map(g => ({
+        ...g,
+        faixas: g.faixas.filter((f: any) => f.caminho !== caminho),
+        total_copias: g.faixas.filter((f: any) => f.caminho !== caminho).length
+      })).filter(g => g.faixas.length > 1));
+
+      setSelectedCopyPaths(prev => {
+        const next = new Set(prev);
+        next.delete(caminho);
+        return next;
+      });
+      loadStatus();
+    }
+  };
+
+  // Exclusão em Massa de todas as cópias selecionadas
+  const handleBatchTrashCopies = async () => {
+    if (!onMoveToTrash) return;
+    if (selectedCopyPaths.size === 0) {
+      alert('Selecione ao menos uma cópia redundante para mover para a Lixeira.');
+      return;
+    }
+
+    const count = selectedCopyPaths.size;
+    const msg = `🗑️ Deseja mover as ${count} cópias redundantes selecionadas para a Lixeira?\n\n🔒 As faixas de referência (originais) serão 100% PRESERVADAS.\n\nEsta ação liberará espaço no disco mantendo a melhor cópia de cada áudio.`;
+    if (!confirm(msg)) return;
+
+    setIsTrashingBatch(true);
+    setTrashProgress({ current: 0, total: count, fileName: 'Iniciando...' });
+    onAddLog(`🗑️ Sound Seal: Movendo ${count} cópias redundantes para a Lixeira...`);
+
+    let trashedCount = 0;
+    const toTrash = Array.from(selectedCopyPaths);
+
+    for (let i = 0; i < toTrash.length; i++) {
+      const p = toTrash[i];
+      const name = p.split('/').pop() || '';
+      setTrashProgress({ current: i + 1, total: count, fileName: name });
+
+      const ok = await onMoveToTrash(p, p);
+      if (ok) trashedCount++;
+    }
+
+    setIsTrashingBatch(false);
+    setTrashProgress(null);
+    onAddLog(`✅ Concluído: ${trashedCount} cópias redundantes movidas para a Lixeira.`);
+    setSelectedCopyPaths(new Set());
+    loadDuplicatesBySound();
+    loadStatus();
+  };
+
+  // Religar faixa individual
+  const handleRelinkSingle = async (relPath: string, sourcePath: string, nome: string) => {
+    onAddLog(`⚡ Relocate: Religando ${nome} ao Serato...`);
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('relink_track', {
+          mp3Path,
+          relPath,
+          sourcePath
+        });
+        const data = JSON.parse(resJson);
+        if (data.sucesso) {
+          onAddLog(`✅ ${data.mensagem}`);
+          setRelocateResults(prev => prev.filter(r => r.faixa_perdida !== relPath));
+          setSelectedRelinkItems(prev => {
+            const next = new Map(prev);
+            next.delete(relPath);
+            return next;
+          });
+        } else {
+          onAddLog(`❌ Erro ao religar: ${data.erro}`);
+        }
+      }
+    } catch (e) {
+      onAddLog(`❌ Falha: ${e}`);
+    }
+  };
+
+  // Religar todas as faixas selecionadas em massa
+  const handleBatchRelink = async () => {
+    if (selectedRelinkItems.size === 0) {
+      alert('Nenhuma correspondência selecionada para relocalizar.');
+      return;
+    }
+
+    const count = selectedRelinkItems.size;
+    const msg = `⚡ Deseja religar automaticamente as ${count} faixas perdidas selecionadas ao Serato?\n\nOs arquivos encontrados serão restaurados aos seus locais esperados para tocar imediatamente.`;
+    if (!confirm(msg)) return;
+
+    setIsRelinkingBatch(true);
+    setRelinkProgress({
+      processados: 0,
+      total: count,
+      percentual: 0,
+      atualizados: 0,
+      faixa_atual: 'Iniciando relocalização...'
+    });
+
+    onAddLog(`⚡ Disparando relocalização em massa de ${count} faixas perdidas...`);
+
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const items = Array.from(selectedRelinkItems.values());
+        await invoke('batch_relink_tracks', {
+          mp3Path,
+          itemsJson: JSON.stringify(items)
+        });
+      }
+    } catch (e) {
+      setIsRelinkingBatch(false);
+      setRelinkProgress(null);
+      onAddLog(`❌ Erro ao disparar relocalização em lote: ${e}`);
+    }
+  };
+
   return (
-    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3">
-      {/* Sub-Tabs Switcher */}
-      <div className="flex items-center justify-between pb-2 border-b border-serato-cardBorder shrink-0">
+    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3 relative">
+      
+      {/* Sub-Tabs Switcher & Ações */}
+      <div className="flex flex-wrap items-center justify-between pb-2 border-b border-serato-cardBorder shrink-0 gap-2">
         <div className="flex items-center gap-2">
           <button
             type="button"
@@ -144,27 +390,58 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           </button>
         </div>
 
-        {activeSubTab === 'seal' ? (
-          <button
-            type="button"
-            onClick={handleStartSealScan}
-            disabled={isScanning}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan hover:bg-cyan-300 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-40 cursor-pointer"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
-            <span>{isScanning ? 'Ouvindo faixas...' : '🧬 Iniciar Sound Seal'}</span>
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={handleScanRelocate}
-            disabled={isScanningRelocate}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-serato-orange hover:bg-amber-400 text-black shadow-lg shadow-serato-orange/20 transition disabled:opacity-40 cursor-pointer"
-          >
-            <Search className="w-3.5 h-3.5" />
-            <span>{isScanningRelocate ? 'Procurando...' : '🔍 Rastrear Músicas Perdidas'}</span>
-          </button>
-        )}
+        {/* Botões do Topo Conforme Sub-Aba Ativa */}
+        <div className="flex items-center gap-2 flex-wrap">
+          {activeSubTab === 'seal' ? (
+            <>
+              {/* Botão de Ação em Massa: Mover Cópias para Lixeira */}
+              <button
+                type="button"
+                onClick={handleBatchTrashCopies}
+                disabled={isScanning || isTrashingBatch || selectedCopyPaths.size === 0}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700/50 shadow-lg shadow-rose-950/40 transition disabled:opacity-30 cursor-pointer"
+                title="Move todas as cópias redundantes selecionadas para a Lixeira, mantendo a referência protegida"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isTrashingBatch ? 'Movendo...' : `🗑️ Mover Cópias para Lixeira (${selectedCopyPaths.size})`}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleStartSealScan}
+                disabled={isScanning || isTrashingBatch}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan hover:bg-cyan-300 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-40 cursor-pointer"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
+                <span>{isScanning ? 'Ouvindo faixas...' : '🧬 Iniciar Sound Seal'}</span>
+              </button>
+            </>
+          ) : (
+            <>
+              {/* Botão de Ação em Massa: Religar Todas as Músicas */}
+              <button
+                type="button"
+                onClick={handleBatchRelink}
+                disabled={isScanningRelocate || isRelinkingBatch || selectedRelinkItems.size === 0}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-cyan to-blue-500 hover:opacity-90 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-30 cursor-pointer"
+                title="Restaura e religa todas as faixas encontradas com alta precisão"
+              >
+                <Zap className={`w-3.5 h-3.5 ${isRelinkingBatch ? 'animate-bounce' : ''}`} />
+                <span>{isRelinkingBatch ? 'Religando...' : `⚡ Religar Selecionadas (${selectedRelinkItems.size})`}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleScanRelocate}
+                disabled={isScanningRelocate || isRelinkingBatch}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-serato-orange hover:bg-amber-400 text-black shadow-lg shadow-serato-orange/20 transition disabled:opacity-40 cursor-pointer"
+              >
+                <Search className={`w-3.5 h-3.5 ${isScanningRelocate ? 'animate-spin' : ''}`} />
+                <span>{isScanningRelocate ? 'Procurando...' : '🔍 Rastrear Músicas Perdidas'}</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Conteúdo da Sub-Aba Sound Seal */}
@@ -189,15 +466,62 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
               </div>
               <div className="bg-black/40 px-3 py-2 rounded-lg border border-white/5 text-center">
                 <div className="text-[10px] text-serato-muted uppercase">Cópias por Som</div>
-                <div className="text-base font-bold text-serato-gold">{status?.total_faixas_com_copia_som?.toLocaleString() || 0}</div>
+                <div className="text-base font-bold text-serato-gold">{status?.total_faixas_com_copia_som?.toLocaleString() || allCopyPaths.length}</div>
               </div>
             </div>
           </div>
 
+          {/* Banner de Progresso de Exclusão em Lote */}
+          {isTrashingBatch && trashProgress && (
+            <div className="bg-rose-950/40 border border-rose-700/50 p-3 rounded-xl shadow-xl flex flex-col gap-1.5 shrink-0 animate-pulse">
+              <div className="flex items-center justify-between text-xs font-bold text-white">
+                <span className="flex items-center gap-2 text-rose-300">
+                  <Trash2 className="w-4 h-4 text-rose-400 animate-bounce" />
+                  <span>Movendo cópias redundantes selecionadas para a Lixeira...</span>
+                </span>
+                <span className="font-mono text-serato-gold">
+                  {trashProgress.current} de {trashProgress.total} faixas
+                </span>
+              </div>
+
+              <div className="w-full bg-slate-900 rounded-full h-2.5 border border-serato-cardBorder overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-rose-500 to-amber-500 h-2.5 transition-all duration-150"
+                  style={{ width: `${Math.min(100, (trashProgress.current / trashProgress.total) * 100)}%` }}
+                />
+              </div>
+
+              <div className="text-[11px] text-slate-400 font-mono truncate">
+                Faixa: <b className="text-slate-200">{trashProgress.fileName}</b>
+              </div>
+            </div>
+          )}
+
           {/* Tabela de Cópias Reconhecidas Pelo Som */}
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
-            <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs font-semibold text-slate-200 flex items-center justify-between">
-              <span>Cópias Reconhecidas por Assinatura Sonora ({duplicatesBySound.length} grupos identificados)</span>
+            <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs font-semibold text-slate-200 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-3">
+                <span>Cópias Reconhecidas por Assinatura Sonora ({duplicatesBySound.length} grupos identificados)</span>
+                
+                {/* Botões Rápidos de Seleção */}
+                <div className="flex items-center gap-1.5 ml-2">
+                  <button
+                    type="button"
+                    onClick={handleSelectAllCopies}
+                    className="text-[11px] px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-serato-cyan border border-serato-cardBorder font-mono transition cursor-pointer"
+                  >
+                    Marcar Todas as Cópias ({allCopyPaths.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDeselectAllCopies}
+                    className="text-[11px] px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-slate-400 border border-serato-cardBorder font-mono transition cursor-pointer"
+                  >
+                    Desmarcar
+                  </button>
+                </div>
+              </div>
+
               <span className="text-[10px] text-serato-muted font-mono">Mesmo som, nomes ou tags divergentes</span>
             </div>
 
@@ -212,37 +536,87 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                 duplicatesBySound.map((group, idx) => (
                   <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-2.5 space-y-1.5 text-xs">
                     <div className="flex items-center justify-between font-mono text-[10px] text-serato-muted border-b border-white/5 pb-1">
-                      <span className="text-serato-cyan">SELO SHA-256: {group.seal.substring(0, 16)}...</span>
+                      <span className="text-serato-cyan font-bold">SELO SHA-256: {group.seal.substring(0, 18)}...</span>
                       <span className="text-serato-gold font-bold">{group.total_copias} arquivos com o mesmo áudio</span>
                     </div>
 
                     <div className="space-y-1 pt-1">
-                      {group.faixas.map((f: any, fIdx: number) => (
-                        <div key={fIdx} className="flex items-center justify-between hover:bg-white/[0.02] p-1 rounded">
-                          <div className="flex items-center gap-2 truncate max-w-xl">
-                            <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${fIdx === 0 ? 'bg-emerald-950/60 text-emerald-400 border border-emerald-800/40' : 'bg-amber-950/60 text-amber-300 border border-amber-800/40'}`}>
-                              {fIdx === 0 ? 'Referência' : 'Cópia'}
-                            </span>
-                            <span className="text-slate-200 truncate" title={f.caminho}>{f.nome}</span>
-                            <span className="text-[10px] text-slate-500 truncate">({f.crate})</span>
-                          </div>
+                      {group.faixas.map((f: any, fIdx: number) => {
+                        const isReference = fIdx === 0;
+                        const isSelected = selectedCopyPaths.has(f.caminho);
 
-                          <div className="flex items-center gap-2 shrink-0">
-                            {f.bpm && <span className="text-[10px] font-mono text-slate-400">{Math.round(parseFloat(f.bpm))} BPM</span>}
-                            {f.key && <span className="text-[10px] font-mono text-serato-cyan">{f.key}</span>}
-                            {onOpenFileInFinder && (
-                              <button
-                                type="button"
-                                onClick={() => onOpenFileInFinder(f.caminho)}
-                                className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300"
-                                title="Revelar no Finder"
+                        return (
+                          <div
+                            key={fIdx}
+                            className={`flex items-center justify-between p-1.5 rounded transition ${
+                              isReference
+                                ? 'bg-emerald-950/20 border border-emerald-900/30'
+                                : isSelected
+                                ? 'bg-amber-950/20 border border-amber-900/40'
+                                : 'hover:bg-white/[0.02]'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 truncate max-w-xl">
+                              {/* Checkbox para cópias redundantes */}
+                              {!isReference ? (
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleSelectCopy(f.caminho)}
+                                  className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0 shrink-0"
+                                />
+                              ) : (
+                                <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                                  <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                                </span>
+                              )}
+
+                              <span
+                                className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold uppercase shrink-0 ${
+                                  isReference
+                                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                                    : 'bg-amber-950 text-amber-300 border border-amber-800'
+                                }`}
                               >
-                                <Eye className="w-3 h-3 text-serato-cyan" />
-                              </button>
-                            )}
+                                {isReference ? 'Referência (Protegida)' : 'Cópia'}
+                              </span>
+
+                              <span className={`truncate ${isReference ? 'font-semibold text-white' : 'text-slate-300'}`} title={f.caminho}>
+                                {f.nome}
+                              </span>
+                              <span className="text-[10px] text-slate-500 shrink-0">({f.crate})</span>
+                            </div>
+
+                            <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
+                              {f.bpm && <span className="text-slate-400">{Math.round(parseFloat(f.bpm))} BPM</span>}
+                              {f.key && <span className="text-serato-cyan font-bold">{f.key}</span>}
+
+                              {onOpenFileInFinder && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenFileInFinder(f.caminho)}
+                                  className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 cursor-pointer"
+                                  title="Revelar no Finder"
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-serato-cyan" />
+                                </button>
+                              )}
+
+                              {/* Botão de Lixeira Individual na cópia */}
+                              {!isReference && onMoveToTrash && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleTrashSingleCopy(f.caminho, f.nome)}
+                                  className="p-1 rounded bg-rose-950/50 hover:bg-rose-900 text-rose-300 border border-rose-800/40 cursor-pointer"
+                                  title="Mover esta cópia para a Lixeira"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 ))
@@ -269,6 +643,37 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
             </div>
           </div>
 
+          {/* Banner de Progresso de Relocalização em Lote */}
+          {isRelinkingBatch && relinkProgress && (
+            <div className="bg-cyan-950/40 border border-serato-cyan/50 p-3 rounded-xl shadow-xl flex flex-col gap-1.5 shrink-0 animate-pulse">
+              <div className="flex items-center justify-between text-xs font-bold text-white">
+                <span className="flex items-center gap-2 text-serato-cyan">
+                  <Zap className="w-4 h-4 text-serato-orange animate-bounce" />
+                  <span>Religando faixas ausentes ao Serato...</span>
+                </span>
+                <span className="font-mono text-serato-gold">
+                  {relinkProgress.percentual}% ({relinkProgress.processados} / {relinkProgress.total})
+                </span>
+              </div>
+
+              <div className="w-full bg-slate-900 rounded-full h-2.5 border border-serato-cardBorder overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-serato-cyan to-blue-500 h-2.5 transition-all duration-150"
+                  style={{ width: `${Math.min(100, Math.max(1, relinkProgress.percentual))}%` }}
+                />
+              </div>
+
+              <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
+                <span className="truncate max-w-[70%]">
+                  Faixa: <b className="text-slate-200">{relinkProgress.faixa_atual}</b>
+                </span>
+                <span className="text-serato-neonGreen font-semibold">
+                  ✅ {relinkProgress.atualizados} faixas religadas
+                </span>
+              </div>
+            </div>
+          )}
+
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
             <div className="overflow-y-auto flex-1 p-2 space-y-2">
               {relocateResults.length === 0 ? (
@@ -278,56 +683,97 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                   <p className="text-slate-600 mt-1">Todas as faixas das suas crates foram encontradas no disco.</p>
                 </div>
               ) : (
-                relocateResults.map((item, idx) => (
-                  <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-3 space-y-2 text-xs">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] bg-rose-950/60 text-rose-400 px-2 py-0.5 rounded border border-rose-800/40 font-bold uppercase">
-                          Perdida no Serato
-                        </span>
-                        <span className="font-semibold text-white">{item.nome}</span>
-                        <span className="text-[10px] text-slate-500">Crate: {item.crate}</span>
+                relocateResults.map((item, idx) => {
+                  const bestCandidate = item.candidatos && item.candidatos.length > 0 ? item.candidatos[0] : null;
+                  const isChecked = selectedRelinkItems.has(item.faixa_perdida);
+
+                  return (
+                    <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-3 space-y-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2 truncate max-w-lg">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => {
+                              setSelectedRelinkItems(prev => {
+                                const next = new Map(prev);
+                                if (next.has(item.faixa_perdida)) {
+                                  next.delete(item.faixa_perdida);
+                                } else if (item.in_trash && item.trash_path) {
+                                  next.set(item.faixa_perdida, {
+                                    rel_path: item.faixa_perdida,
+                                    source_path: item.trash_path,
+                                    nome: item.nome
+                                  });
+                                } else if (bestCandidate) {
+                                  next.set(item.faixa_perdida, {
+                                    rel_path: item.faixa_perdida,
+                                    source_path: bestCandidate.caminho,
+                                    nome: item.nome
+                                  });
+                                }
+                                return next;
+                              });
+                            }}
+                            className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0 shrink-0"
+                          />
+
+                          <span className="text-[10px] bg-rose-950/60 text-rose-400 px-2 py-0.5 rounded border border-rose-800/40 font-bold uppercase shrink-0">
+                            Perdida no Serato
+                          </span>
+                          <span className="font-semibold text-white truncate" title={item.faixa_perdida}>{item.nome}</span>
+                          <span className="text-[10px] text-slate-500 shrink-0">Crate: {item.crate}</span>
+                        </div>
+
+                        {item.in_trash && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-bold font-mono">
+                              ⚠️ ENCONTRADO NA LIXEIRA (.Trashes)
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleRelinkSingle(item.faixa_perdida, item.trash_path, item.nome)}
+                              className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold text-[10px] cursor-pointer"
+                            >
+                              Restaurar do Lixo ♻️
+                            </button>
+                          </div>
+                        )}
                       </div>
 
-                      {item.in_trash && (
-                        <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-bold">
-                          ⚠️ ENCONTRADO NA LIXEIRA (.Trashes)
-                        </span>
-                      )}
-                    </div>
+                      {/* Candidatos sugeridos */}
+                      <div className="space-y-1 bg-black/30 p-2 rounded border border-white/5">
+                        <div className="text-[10px] text-serato-muted uppercase font-mono">Correspondências encontradas pelo Sound Seal:</div>
+                        {item.candidatos && item.candidatos.length > 0 ? (
+                          item.candidatos.map((cand: any, cIdx: number) => (
+                            <div key={cIdx} className="flex items-center justify-between p-1 hover:bg-white/[0.02] rounded">
+                              <div className="flex items-center gap-2 truncate max-w-lg">
+                                <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold font-mono ${cand.score === 100 ? 'bg-emerald-950/60 text-emerald-400' : 'bg-cyan-950/60 text-cyan-300'}`}>
+                                  {cand.score}% CONF
+                                </span>
+                                <span className="text-slate-200 truncate" title={cand.caminho}>{cand.nome}</span>
+                              </div>
 
-                    {/* Candidatos sugeridos */}
-                    <div className="space-y-1 bg-black/30 p-2 rounded border border-white/5">
-                      <div className="text-[10px] text-serato-muted uppercase font-mono">Correspondências encontradas:</div>
-                      {item.candidatos && item.candidatos.length > 0 ? (
-                        item.candidatos.map((cand: any, cIdx: number) => (
-                          <div key={cIdx} className="flex items-center justify-between p-1 hover:bg-white/[0.02] rounded">
-                            <div className="flex items-center gap-2 truncate max-w-lg">
-                              <span className={`text-[10px] px-1.5 py-0.2 rounded font-bold font-mono ${cand.score === 100 ? 'bg-emerald-950/60 text-emerald-400' : 'bg-cyan-950/60 text-cyan-300'}`}>
-                                {cand.score}% CONF
-                              </span>
-                              <span className="text-slate-200 truncate">{cand.nome}</span>
+                              <div className="flex items-center gap-2">
+                                {cand.bpm && <span className="text-[10px] font-mono text-slate-400">{Math.round(parseFloat(cand.bpm))} BPM</span>}
+                                {cand.key && <span className="text-[10px] font-mono text-serato-cyan">{cand.key}</span>}
+                                <button
+                                  type="button"
+                                  onClick={() => handleRelinkSingle(item.faixa_perdida, cand.caminho, item.nome)}
+                                  className="px-2 py-0.5 rounded bg-serato-cyan hover:bg-cyan-300 text-black font-bold text-[10px] cursor-pointer"
+                                >
+                                  Religar →
+                                </button>
+                              </div>
                             </div>
-
-                            <div className="flex items-center gap-2">
-                              {cand.bpm && <span className="text-[10px] font-mono text-slate-400">{Math.round(parseFloat(cand.bpm))} BPM</span>}
-                              {cand.key && <span className="text-[10px] font-mono text-serato-cyan">{cand.key}</span>}
-                              <button
-                                type="button"
-                                onClick={() => alert(`Religar faixa ao Serato: ${cand.caminho}`)}
-                                className="px-2 py-0.5 rounded bg-serato-cyan hover:bg-cyan-300 text-black font-bold text-[10px] cursor-pointer"
-                              >
-                                Religar →
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-[11px] text-slate-500 italic">Nenhum arquivo correspondente localizado no HD.</div>
-                      )}
+                          ))
+                        ) : (
+                          <div className="text-[11px] text-slate-500 italic">Nenhum arquivo correspondente localizado no HD.</div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

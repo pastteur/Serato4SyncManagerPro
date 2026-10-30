@@ -516,6 +516,7 @@ export const App: React.FC = () => {
               seratoPath={seratoPath}
               onAddLog={addLog}
               onOpenFileInFinder={handleOpenFileInFinder}
+              onMoveToTrash={handleMoveToTrash}
             />
           )}
 

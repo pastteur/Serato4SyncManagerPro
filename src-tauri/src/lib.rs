@@ -663,6 +663,85 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn relink_track(
+        app: AppHandle,
+        mp3_path: String,
+        rel_path: String,
+        source_path: String,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "sound_seal.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--relink");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+        cmd.arg("--rel-path");
+        cmd.arg(&rel_path);
+        cmd.arg("--source-path");
+        cmd.arg(&source_path);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao religar faixa: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            return Err(stdout);
+        }
+        Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn batch_relink_tracks(
+        app: AppHandle,
+        window: Window,
+        mp3_path: String,
+        items_json: String,
+    ) -> Result<(), String> {
+        let script = find_python_script(Some(&app), "sound_seal.py");
+        let window_clone = window.clone();
+
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--batch-relink");
+            cmd.arg(&items_json);
+            cmd.arg("--mp3");
+            cmd.arg(&mp3_path);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window_clone.emit("sound-seal-relink-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("sound-seal-relink-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("sound-seal-relink-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+        });
+
+        Ok(())
+    }
+
+    #[tauri::command]
     pub async fn match_tracks(
         app: AppHandle,
         input_type: String,
@@ -1008,6 +1087,8 @@ pub fn run() {
             commands::get_sound_seal_status,
             commands::get_sound_seal_duplicates,
             commands::scan_missing_relocate,
+            commands::relink_track,
+            commands::batch_relink_tracks,
             commands::match_tracks,
             commands::scan_audio_health,
             commands::repair_track_online,

@@ -405,6 +405,71 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
     }
 
 
+def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
+    """
+    Restaura ou religa o arquivo de som ao local esperado pela crate do Serato.
+    Se a fonte estiver em .Trashes, move de volta; caso contrário, copia.
+    """
+    base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
+    target_path = base_path.parent / rel_path
+    src = Path(source_path_str)
+
+    if not src.exists():
+        return {"sucesso": False, "erro": "Arquivo de som de origem não encontrado."}
+
+    try:
+        import shutil
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if ".Trashes" in str(src) or ".Trash" in str(src):
+            shutil.move(str(src), str(target_path))
+        else:
+            shutil.copy2(str(src), str(target_path))
+        return {
+            "sucesso": True,
+            "arquivo": target_path.name,
+            "destino": str(target_path),
+            "mensagem": f"Faixa religada com sucesso ao Serato em: {target_path}"
+        }
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
+
+
+def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
+    """Executa a relocalização/restauração em lote para todas as correspondências confirmadas."""
+    total = len(relink_items)
+    print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
+    relinked = 0
+    errors = []
+
+    for idx, item in enumerate(relink_items, 1):
+        rel_p = item.get("rel_path") or item.get("faixa_perdida", "")
+        src_p = item.get("source_path") or item.get("candidato_caminho", "")
+        res = relink_track(mp3_base_dir, rel_p, src_p)
+        if res.get("sucesso"):
+            relinked += 1
+        else:
+            errors.append(f"{rel_p}: {res.get('erro')}")
+
+        pct = round((idx / total) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx,
+            "total": total,
+            "percentual": pct,
+            "atualizados": relinked,
+            "faixa_atual": Path(rel_p).name
+        }, ensure_ascii=False), flush=True)
+
+    print(json.dumps({
+        "tipo": "fim",
+        "sucesso": True,
+        "total": total,
+        "atualizados": relinked,
+        "erros": errors[:10]
+    }, ensure_ascii=False), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Sound Seal & Relocate")
     parser.add_argument("--scan", action="store_true", help="Gera Sound Seals na pasta MP3")
@@ -414,6 +479,10 @@ def main():
     parser.add_argument("--duplicates", action="store_true", help="Retorna duplicatas por som")
     parser.add_argument("--relocate", action="store_true", help="Analisa faixas perdidas do Serato")
     parser.add_argument("--batch", type=int, default=500, help="Tamanho do lote de varredura")
+    parser.add_argument("--relink", action="store_true", help="Religa uma faixa específica")
+    parser.add_argument("--rel-path", type=str, default="", help="Caminho relativo esperado pelo Serato")
+    parser.add_argument("--source-path", type=str, default="", help="Caminho do arquivo localizado no HD")
+    parser.add_argument("--batch-relink", type=str, default="", help="JSON de lista de faixas a religar")
 
     args = parser.parse_args()
 
@@ -427,14 +496,32 @@ def main():
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0)
 
+    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+
+    if args.relink:
+        res = relink_track(mp3_dir, args.rel_path, args.source_path)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.batch_relink:
+        try:
+            if args.batch_relink.startswith('['):
+                items = json.loads(args.batch_relink)
+            else:
+                with open(args.batch_relink, 'r', encoding='utf-8') as f:
+                    items = json.load(f)
+            batch_relink_tracks(mp3_dir, items)
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
+            sys.exit(1)
+
     if args.scan:
-        mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
         res = scan_sound_seals(mp3_dir, batch_size=args.batch)
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0)
 
     if args.relocate:
-        mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
         serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
         res = scan_missing_and_relocate(serato_dir, mp3_dir)
         print(json.dumps(res, ensure_ascii=False))
