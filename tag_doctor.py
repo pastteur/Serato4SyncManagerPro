@@ -36,17 +36,19 @@ DEFAULT_BACKUPS_DIR = Path.home() / "pasync" / "backups"
 SERATO_INTERNAL_DB = Path.home() / "Library" / "Application Support" / "Serato" / "Library" / "master.sqlite"
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
-# Padrões comuns de sujeira em downloads e pacotes da web
+# Padrões abrangentes de remoção de domínios, sites e sujeiras de download da web
 NOISE_PATTERNS = [
-    re.compile(r'\(www\.[a-z0-9\-_\.]+\.[a-z]{2,}\)', re.IGNORECASE),
-    re.compile(r'\[www\.[a-z0-9\-_\.]+\.[a-z]{2,}\]', re.IGNORECASE),
-    re.compile(r'www\.[a-z0-9\-_\.]+\.[a-z]{2,}', re.IGNORECASE),
+    re.compile(r'\(?(?:https?://)?(?:www\.)?[a-z0-9\-_]+(?:\.[a-z0-9\-_]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)(?:/[^\s\)]*)?\)?', re.IGNORECASE),
+    re.compile(r'\[(?:https?://)?(?:www\.)?[a-z0-9\-_]+(?:\.[a-z0-9\-_]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)(?:/[^\s\]]*)?\]', re.IGNORECASE),
+    re.compile(r'[a-z0-9\-_]+\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info)', re.IGNORECASE),
     re.compile(r'\[dj\s*pool\]', re.IGNORECASE),
     re.compile(r'\(dj\s*pool\)', re.IGNORECASE),
     re.compile(r'\[exclusive\]', re.IGNORECASE),
     re.compile(r'\[megapack\]', re.IGNORECASE),
     re.compile(r'\[\d{3}\s*kbps\]', re.IGNORECASE),
     re.compile(r'\(\d{3}\s*kbps\)', re.IGNORECASE),
+    re.compile(r'\(official\s*(?:audio|video|music\s*video|lyric\s*video)?\)', re.IGNORECASE),
+    re.compile(r'\[official\s*(?:audio|video|music\s*video|lyric\s*video)?\]', re.IGNORECASE),
     re.compile(r'_\-_'),
     re.compile(r'-\s*-'),
 ]
@@ -125,7 +127,10 @@ def restore_master_database(backup_path_str: str):
 def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist: str = "", existing_title: str = "", existing_album: str = ""):
     """
     Higieniza nomes de faixas e títulos preservando 100% de versões/remixes/feats,
-    e detecta Crate Raiz (ex: Axé, Funk, Sertanejo, EMusic) e Álbum.
+    e detecta Crate Raiz (ex: Axé, Funk, Sertanejo, Pop Rock) e Álbum.
+    Remove propagandas de sites da web (myfreemp3, pool, etc.), aspas soltas,
+    deduplica artistas duplicados no título (ex: U2 - U2-Vertigo -> U2 - Vertigo),
+    remove crates redundantes do final e trata compilações (ex: Sbornik).
     """
     text = filename_no_ext
 
@@ -148,11 +153,20 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # 3. Remove numeração de faixa inicial se houver (ex: "01 - ")
     text = LEADING_TRACK_NUM.sub('', text)
 
-    # 4. Remove pontos ou traços residuais no final (ex: " . .")
+    # 4. Remove duplicação de parênteses/colchetes: ex (Single Version) (Single Version)
+    text = re.sub(r'(\([^\)]+\))\s*\1', r'\1', text, flags=re.IGNORECASE)
+    text = re.sub(r'(\[[^\]]+\])\s*\1', r'\1', text, flags=re.IGNORECASE)
+
+    # 5. Normaliza aspas soltas com espaços: \" Do You Remember ... \"
+    text = re.sub(r'(?<=\s)\"\s*(.*?)\s*\"(?=\s|$)', r'\1', text)
+    text = text.replace('\"', '').strip()
+
+    # 6. Remove pontos ou traços residuais no final (ex: " . .")
     text = TRAILING_DOTS.sub('', text)
 
-    # 5. Normaliza underscores e múltiplos espaços
+    # 7. Normaliza underscores e múltiplos espaços
     text = text.replace('_', ' ')
+    text = re.sub(r'\s*-\s*-\s*', ' - ', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
     # Identificação da Crate Raiz e Hierarquia
@@ -160,35 +174,92 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     crate_raiz = folder_parts[0] if folder_parts else ""
     crate_completa = " -> ".join(folder_parts) if folder_parts else ""
 
+    # 8. Remove Crate redundante no final do nome se foi adicionada anteriormente:
+    # Ex: "... - Pop Rock" quando a pasta já é "Pop Rock"
+    if crate_raiz and text.lower().endswith(f" - {crate_raiz.lower()}"):
+        text = text[:-(len(crate_raiz) + 3)].strip()
+
     # Separação Inteligente: Artista - Título (Versão/Remix) - Álbum
+    raw_parts = [p.strip() for p in text.split(" - ") if p.strip()]
+
     artist = existing_artist.strip() if existing_artist else ""
     title = existing_title.strip() if existing_title else ""
     album = existing_album.strip() if existing_album else ""
 
-    parts = text.split(" - ")
-    if len(parts) >= 3:
-        p_art = parts[0].strip()
-        p_tit = parts[1].strip()
-        p_alb = parts[2].strip()
+    # Detecção de Compilação Russa / Coletânea ('Sbornik', 'Various Artists', 'VA')
+    if raw_parts and raw_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va']:
+        raw_parts = raw_parts[1:]
+
+    if len(raw_parts) >= 3:
+        p_art = raw_parts[0]
+        p_tit = raw_parts[1]
+        p_alb = raw_parts[2]
         if not artist: artist = p_art
         if not title: title = p_tit
         if not album: album = p_alb
-    elif len(parts) == 2:
-        p_art = parts[0].strip()
-        p_tit = parts[1].strip()
+    elif len(raw_parts) == 2:
+        p_art = raw_parts[0]
+        p_tit = raw_parts[1]
         if not artist: artist = p_art
         if not title: title = p_tit
-    else:
-        if not title:
-            title = text
+    elif len(raw_parts) == 1:
+        if existing_artist:
+            artist = existing_artist.strip()
+            title = raw_parts[0]
+        else:
+            title = raw_parts[0]
+
+    # Caso Sbornik / Compilação: se o artista ficou vazio e o título tem 'Artista-Título'
+    if not artist and title:
+        m = re.match(r'^([^-–]+?)\s*[-–]\s*(.+)$', title)
+        if m:
+            artist = m.group(1).strip()
+            title = m.group(2).strip()
 
     # Se existing_title era básico mas o filename possui versão/remix detalhado, prefere a versão rica!
-    # Ex: existing_title="É o amor" e filename="Araketo - É o amor (Bahia Mix)" -> title="É o amor (Bahia Mix)"
     if " - " in text:
         p_after_art = text.split(" - ", 1)[1].strip()
-        # Se contiver remix/feat/mix entre parênteses ou colchetes, preserva
         if re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', p_after_art, re.IGNORECASE):
             title = p_after_art
+
+    # Casos especiais de bandas compostas abreviadas:
+    # Ex: Artist='Blink', Title='blink-182-All the Small Things' -> Artist='Blink-182'
+    # Ex: Artist='Guns', Title='Guns-n-roses-Patiens' -> Artist="Guns N' Roses"
+    m_sub = re.match(r'^((?:[a-zA-Z0-9]+[ -–_]?)+?)[-–]([A-Z0-9].*)$', title)
+    if m_sub and artist:
+        first_chunk = m_sub.group(1).strip()
+        rest_title = m_sub.group(2).strip()
+        if artist.lower() in first_chunk.lower():
+            if 'guns' in first_chunk.lower() and 'rose' in first_chunk.lower():
+                artist = "Guns N' Roses"
+            elif 'blink' in first_chunk.lower() and '182' in first_chunk.lower():
+                artist = 'Blink-182'
+            else:
+                artist = first_chunk.title()
+            title = rest_title
+
+    # Detecção e remoção de Artista Duplicado no Título!
+    # Ex: Artist='The Beatles', Title='The Beatles-Help!' -> Title='Help!'
+    # Ex: Artist='U2', Title='U2-Vertigo' -> Title='Vertigo'
+    # Ex: Artist='Michael Jackson', Title='Michael Jackson -Rock with you [Remix]' -> Title='Rock with you [Remix]'
+    # Ex: Artist='George Thorogood', Title='George Thorogood-Howlin\' For My Baby' -> Title='Howlin\' For My Baby'
+    if artist and title:
+        art_clean = re.escape(artist.strip())
+        title_stripped = re.sub(r'^' + art_clean + r'\s*[-–:]\s*', '', title, flags=re.IGNORECASE).strip()
+        if title_stripped:
+            title = title_stripped
+
+    # Se ainda restou reticências truncadas no título:
+    if title and '...' in title and artist:
+        title = re.sub(r'^[^\.]*\.\.\.\s*', '', title).strip()
+
+    # Se álbum for igual à Crate ou Título, evita duplicação
+    if album and (album.lower() == crate_raiz.lower() or album.lower() == title.lower()):
+        album = ""
+
+    # Limpeza final de traços e espaços residuais
+    title = title.strip(' -–:').strip()
+    artist = artist.strip(' -–:').strip()
 
     # Capitalização Elegante suave (apenas se tudo maiúsculo ou tudo minúsculo)
     if artist and (artist.isupper() or artist.islower()):
