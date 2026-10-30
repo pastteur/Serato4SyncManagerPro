@@ -17,6 +17,7 @@ import shutil
 import datetime
 import json
 import argparse
+import unicodedata
 from pathlib import Path
 
 # Garante flushing imediato
@@ -39,6 +40,10 @@ AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.
 # Padrões rápidos e seguros de remoção de domínios, sites e sujeiras de download da web (sem catastrophic backtracking)
 NOISE_PATTERNS = [
     re.compile(r'\b(?:https?://)?(?:www\.)?[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)\b(?:/[^\s\)]*)?', re.IGNORECASE),
+    re.compile(r'\b(?:myfreemp3|123savemp3|spotidown|mp3clan|convert2mp3|y2mate|savefrom|360ytmp3)\.[a-z]{2,5}\b', re.IGNORECASE),
+    re.compile(r'\bmy-free-mp3s?\.com\b', re.IGNORECASE),
+    re.compile(r'\bwww\.[a-zA-Z0-9\-]+\.[a-z]{2,5}\b', re.IGNORECASE),
+    re.compile(r'\b\d{2,3}\s*kbps\b', re.IGNORECASE),
     re.compile(r'\[dj\s*pool\]', re.IGNORECASE),
     re.compile(r'\(dj\s*pool\)', re.IGNORECASE),
     re.compile(r'\[exclusive\]', re.IGNORECASE),
@@ -54,6 +59,7 @@ NOISE_PATTERNS = [
 # Padrão de BPM/Key no final do nome: ex: " . 80 . Fm", " . 128 . Am", " . 96 . C#"
 TRAILING_BPM_KEY = re.compile(r'\s*\.\s*\d{2,3}(?:\.\d+)?\s*\.\s*[A-G][b#]?(?:m|maj|min)?\s*$', re.IGNORECASE)
 TRAILING_DOTS = re.compile(r'[\s\._]+$')
+TRAILING_PUNCT = re.compile(r'(?<=\s)[\._]+$|\.{2,}$|[\s_]+$')
 LEADING_TRACK_NUM = re.compile(r'^\d{1,3}\s*[-–.]\s*')
 
 
@@ -127,16 +133,27 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     Higieniza nomes de faixas e títulos preservando 100% de versões/remixes/feats,
     e detecta Crate Raiz (ex: Axé, Funk, Sertanejo, Pop Rock) e Álbum.
     Remove propagandas de sites da web (myfreemp3, pool, etc.), aspas soltas,
-    deduplica artistas duplicados no título (ex: U2 - U2-Vertigo -> U2 - Vertigo),
-    remove crates redundantes do final e trata compilações (ex: Sbornik).
+    deduplica repetições infinitas de crates/álbuns no nome, deduplica artistas
+    no título e garante consistência e idempotência total (f(f(x)) == f(x)).
     """
-    text = filename_no_ext
+    # 0. Normalização Unicode NFC
+    text = unicodedata.normalize('NFC', filename_no_ext)
 
-    # 1. Remove URLs e sujeiras de download (sem tocar em Remix, feat, etc.)
+    # 1. Identificação da Crate Raiz e Hierarquia (com normalização NFC e sem underscore)
+    folder_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
+    crate_raiz_raw = folder_parts[0] if folder_parts else ""
+    crate_raiz = unicodedata.normalize('NFC', crate_raiz_raw.replace('_', ' ').strip())
+    crate_completa = " -> ".join(folder_parts) if folder_parts else ""
+
+    # Normaliza underscores e hífens duplos antes da remoção de URLs
+    text = text.replace('_', ' ')
+    text = re.sub(r'\s*-\s*-\s*', ' - ', text)
+
+    # 2. Remove URLs e sujeiras de download da web
     for pattern in NOISE_PATTERNS:
         text = pattern.sub('', text)
 
-    # 2. Extrai e remove cauda de BPM/Key (ex: " . 80 . Fm", " . 130 . Dm")
+    # 3. Extrai e remove cauda/marcadores de BPM e Key (ex: " . 80 . Fm", " . 130 . Dm", " . 128")
     detected_bpm = ""
     detected_key = ""
     bpm_key_match = TRAILING_BPM_KEY.search(text)
@@ -146,115 +163,132 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         if len(subparts) >= 2:
             detected_bpm = subparts[0]
             detected_key = subparts[1]
+        elif len(subparts) == 1:
+            detected_bpm = subparts[0]
         text = TRAILING_BPM_KEY.sub('', text)
 
-    # 3. Remove numeração de faixa inicial se houver (ex: "01 - ")
-    text = LEADING_TRACK_NUM.sub('', text)
+    # Remove BPMs isolados residuais tipo " . 130 " ou " - 128 bpm"
+    bpm_isolated = re.search(r'\s*\.\s*(\d{2,3}(?:\.\d+)?)\s*(?:\.|$)', text)
+    if bpm_isolated and not detected_bpm:
+        detected_bpm = bpm_isolated.group(1)
+        text = re.sub(r'\s*\.\s*\d{2,3}(?:\.\d+)?\s*(?:\.|$)', ' ', text)
 
-    # 4. Remove duplicação de parênteses/colchetes: ex (Single Version) (Single Version)
+    # 4. Remove numeração de faixa inicial se houver (ex: "01 - ", "11. ")
+    text = re.sub(r'^\d{1,3}\s*[-–.]\s*', '', text)
+
+    # 5. Remove duplicação de parênteses/colchetes: ex (Single Version) (Single Version)
     text = re.sub(r'(\([^\)]+\))\s*\1', r'\1', text, flags=re.IGNORECASE)
     text = re.sub(r'(\[[^\]]+\])\s*\1', r'\1', text, flags=re.IGNORECASE)
 
-    # 5. Normaliza aspas soltas com espaços: \" Do You Remember ... \"
+    # 6. Normaliza aspas soltas e espaços múltiplos
     text = re.sub(r'(?<=\s)\"\s*(.*?)\s*\"(?=\s|$)', r'\1', text)
-    text = text.replace('\"', '').strip()
-
-    # 6. Remove pontos ou traços residuais no final (ex: " . .")
-    text = TRAILING_DOTS.sub('', text)
-
-    # 7. Normaliza underscores e múltiplos espaços
-    text = text.replace('_', ' ')
+    text = text.replace('\"', '')
     text = re.sub(r'\s*-\s*-\s*', ' - ', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
-    # Identificação da Crate Raiz e Hierarquia
-    folder_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
-    crate_raiz = folder_parts[0] if folder_parts else ""
-    crate_completa = " -> ".join(folder_parts) if folder_parts else ""
+    # 7. Separação Inteligente: split por " - "
+    raw_parts = [unicodedata.normalize('NFC', p.strip()) for p in text.split(" - ") if p.strip()]
 
-    # 8. Remove Crate redundante no final do nome se foi adicionada anteriormente:
-    # Ex: "... - Pop Rock" quando a pasta já é "Pop Rock"
-    if crate_raiz and text.lower().endswith(f" - {crate_raiz.lower()}"):
-        text = text[:-(len(crate_raiz) + 3)].strip()
+    # 8. Remove todas as ocorrências de Crate Raiz embutidas no nome do arquivo
+    non_crate_parts = []
+    for p in raw_parts:
+        if crate_raiz and p.lower() == crate_raiz.lower():
+            continue
+        non_crate_parts.append(p)
 
-    # Separação Inteligente: Artista - Título (Versão/Remix) - Álbum
-    raw_parts = [p.strip() for p in text.split(" - ") if p.strip()]
+    # 9. Deduplica partes repetidas consecutivas ou cíclicas mantendo a ordem original
+    unique_parts = []
+    for p in non_crate_parts:
+        p_clean = TRAILING_PUNCT.sub('', p).strip(" -–:").strip()
+        if not p_clean:
+            continue
+        if p_clean.lower() not in [u.lower() for u in unique_parts]:
+            unique_parts.append(p_clean)
 
-    # Sanitiza tags existentes contra anúncios, URLs e caracteres truncados
-    clean_ex_art = existing_artist.strip() if existing_artist else ""
-    clean_ex_tit = existing_title.strip() if existing_title else ""
-    clean_ex_alb = existing_album.strip() if existing_album else ""
+    # Detecção de Compilação Russa / Coletânea ('Sbornik', 'Various Artists', 'VA')
+    if unique_parts and unique_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va']:
+        unique_parts = unique_parts[1:]
+
+    # 10. Sanitiza tags existentes passadas via Mutagen
+    clean_ex_art = unicodedata.normalize('NFC', existing_artist).replace('_', ' ').strip() if existing_artist else ""
+    clean_ex_tit = unicodedata.normalize('NFC', existing_title).replace('_', ' ').strip() if existing_title else ""
+    clean_ex_alb = unicodedata.normalize('NFC', existing_album).replace('_', ' ').strip() if existing_album else ""
+
+    for pattern in NOISE_PATTERNS:
+        if clean_ex_art: clean_ex_art = pattern.sub('', clean_ex_art)
+        if clean_ex_tit: clean_ex_tit = pattern.sub('', clean_ex_tit)
+        if clean_ex_alb: clean_ex_alb = pattern.sub('', clean_ex_alb)
 
     if clean_ex_art:
-        for pattern in NOISE_PATTERNS:
-            clean_ex_art = pattern.sub('', clean_ex_art)
-        clean_ex_art = TRAILING_DOTS.sub('', clean_ex_art).strip(' -–:').strip()
+        clean_ex_art = TRAILING_PUNCT.sub('', clean_ex_art).strip(' -–:').strip()
 
     if clean_ex_tit:
-        for pattern in NOISE_PATTERNS:
-            clean_ex_tit = pattern.sub('', clean_ex_tit)
         clean_ex_tit = TRAILING_BPM_KEY.sub('', clean_ex_tit)
-        clean_ex_tit = LEADING_TRACK_NUM.sub('', clean_ex_tit)
-        clean_ex_tit = TRAILING_DOTS.sub('', clean_ex_tit).strip(' -–:').strip()
-        # Remove Crate redundante se estiver anexada ao título da tag
+        clean_ex_tit = re.sub(r'^\d{1,3}\s*[-–.]\s*', '', clean_ex_tit)
+        clean_ex_tit = TRAILING_PUNCT.sub('', clean_ex_tit).strip(' -–:').strip()
         if crate_raiz and clean_ex_tit.lower().endswith(f" - {crate_raiz.lower()}"):
             clean_ex_tit = clean_ex_tit[:-(len(crate_raiz) + 3)].strip()
 
     if clean_ex_alb:
-        for pattern in NOISE_PATTERNS:
-            clean_ex_alb = pattern.sub('', clean_ex_alb)
-        clean_ex_alb = TRAILING_DOTS.sub('', clean_ex_alb).strip(' -–:').strip()
+        clean_ex_alb = TRAILING_PUNCT.sub('', clean_ex_alb).strip(' -–:').strip()
         if clean_ex_alb.lower() == crate_raiz.lower():
             clean_ex_alb = ""
 
-    # Se a tag de título era idêntica ao nome bruto do arquivo (comum em arquivos baixados da web),
-    # anula para forçar extração limpa do título a partir das partes higienizadas
     if clean_ex_tit and (clean_ex_tit.lower() == filename_no_ext.lower() or clean_ex_tit.lower() == text.lower()):
         clean_ex_tit = ""
 
-    artist = clean_ex_art
-    title = clean_ex_tit
-    album = clean_ex_alb
-
-    # Detecção de Compilação Russa / Coletânea ('Sbornik', 'Various Artists', 'VA')
-    if raw_parts and raw_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va']:
-        raw_parts = raw_parts[1:]
-
-    if len(raw_parts) >= 3:
-        p_art = raw_parts[0]
-        p_tit = raw_parts[1]
-        p_alb = raw_parts[2]
-        if not artist: artist = p_art
-        if not title: title = p_tit
-        if not album: album = p_alb
-    elif len(raw_parts) == 2:
-        p_art = raw_parts[0]
-        p_tit = raw_parts[1]
-        if not artist: artist = p_art
-        if not title: title = p_tit
-    elif len(raw_parts) == 1:
-        if existing_artist:
-            artist = existing_artist.strip()
-            title = raw_parts[0]
+    # Determina partes base a partir de unique_parts
+    if len(unique_parts) >= 3:
+        p_art = unique_parts[0]
+        p_tit = unique_parts[1]
+        p_alb = unique_parts[2]
+    elif len(unique_parts) == 2:
+        p_art = unique_parts[0]
+        p_tit = unique_parts[1]
+        p_alb = ""
+    elif len(unique_parts) == 1:
+        if clean_ex_art and clean_ex_art.lower() != unique_parts[0].lower():
+            p_art = clean_ex_art
+            p_tit = unique_parts[0]
         else:
-            title = raw_parts[0]
+            p_art = ""
+            p_tit = unique_parts[0]
+        p_alb = ""
+    else:
+        p_art, p_tit, p_alb = "", "", ""
 
-    # Caso Sbornik / Compilação: se o artista ficou vazio e o título tem 'Artista-Título'
+    # Se a tag do título tinha o álbum duplicado no final, remove
+    if p_alb and clean_ex_tit.lower().endswith(f" - {p_alb.lower()}"):
+        clean_ex_tit = clean_ex_tit[:-(len(p_alb) + 3)].strip()
+    if clean_ex_alb and clean_ex_tit.lower().endswith(f" - {clean_ex_alb.lower()}"):
+        clean_ex_tit = clean_ex_tit[:-(len(clean_ex_alb) + 3)].strip()
+
+    artist = p_art or clean_ex_art
+    title = p_tit or clean_ex_tit
+    album = p_alb or clean_ex_alb
+
+    # Se a tag de título tem versão rica que o nome do arquivo perdeu, recupera
+    if clean_ex_tit and re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', clean_ex_tit, re.IGNORECASE):
+        if not re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', title, re.IGNORECASE):
+            title = clean_ex_tit
+
+    # Detecção e remoção de Artista Duplicado no Título!
+    if artist and title:
+        art_clean = re.escape(artist.strip())
+        title_stripped = re.sub(r'^' + art_clean + r'\s*[-–:]\s*', '', title, flags=re.IGNORECASE).strip()
+        if title_stripped:
+            title = title_stripped
+        if artist.strip().lower() == title.strip().lower():
+            artist = ""
+
+    # Caso CPM 22 ou similar sem traço
     if not artist and title:
-        m = re.match(r'^([^-–]+?)\s*[-–]\s*(.+)$', title)
-        if m:
-            artist = m.group(1).strip()
-            title = m.group(2).strip()
-
-    # Se existing_title era básico mas o filename possui versão/remix detalhado, prefere a versão rica!
-    if " - " in text:
-        p_after_art = text.split(" - ", 1)[1].strip()
-        if re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', p_after_art, re.IGNORECASE):
-            title = p_after_art
+        m_cpm = re.match(r'^(cpm\s*22)\s+([^-–].+)$', title, re.IGNORECASE)
+        if m_cpm:
+            artist = "CPM 22"
+            title = m_cpm.group(2).strip()
 
     # Casos especiais de bandas compostas abreviadas:
-    # Ex: Artist='Blink', Title='blink-182-All the Small Things' -> Artist='Blink-182'
-    # Ex: Artist='Guns', Title='Guns-n-roses-Patiens' -> Artist="Guns N' Roses"
     if artist:
         art_l = artist.lower()
         tit_l = title.lower()
@@ -269,54 +303,43 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
                 artist = "Guns N' Roses"
                 title = m_g.group(1).strip()
 
-    # Detecção e remoção de Artista Duplicado no Título!
-    # Ex: Artist='The Beatles', Title='The Beatles-Help!' -> Title='Help!'
-    # Ex: Artist='U2', Title='U2-Vertigo' -> Title='Vertigo'
-    # Ex: Artist='Michael Jackson', Title='Michael Jackson -Rock with you [Remix]' -> Title='Rock with you [Remix]'
-    # Ex: Artist='George Thorogood', Title='George Thorogood-Howlin\' For My Baby' -> Title='Howlin\' For My Baby'
-    if artist and title:
-        art_clean = re.escape(artist.strip())
-        title_stripped = re.sub(r'^' + art_clean + r'\s*[-–:]\s*', '', title, flags=re.IGNORECASE).strip()
-        if title_stripped:
-            title = title_stripped
-
     # Se ainda restou reticências truncadas no título:
     if title and '...' in title and artist:
         title = re.sub(r'^[^\.]*\.\.\.\s*', '', title).strip()
 
-    # Se álbum for igual à Crate ou Título, evita duplicação
-    if album and (album.lower() == crate_raiz.lower() or album.lower() == title.lower()):
+    # Se o álbum for igual à Crate ou Título, ou contido no título, anula para evitar duplicação
+    if album and (album.lower() == crate_raiz.lower() or album.lower() in title.lower() or title.lower() in album.lower()):
         album = ""
 
     # Limpeza final de traços e espaços residuais
     title = title.strip(' -–:').strip()
     artist = artist.strip(' -–:').strip()
 
-    # Capitalização Elegante suave (apenas se tudo maiúsculo ou tudo minúsculo)
     if artist and (artist.isupper() or artist.islower()):
         artist = artist.title()
 
     # Formatos de Nomenclatura para o DJ escolher:
-    # 1. Padrão DJ Clássico: Artista - Título
     fmt_dj = f"{artist} - {title}".strip(" -") if artist else title
+    fmt_crate = f"{artist} - {title} - {crate_raiz}".strip(" -") if crate_raiz else fmt_dj
 
-    # 2. Com Crate Raiz: Artista - Título - Crate
-    if crate_raiz:
-        fmt_crate = f"{artist} - {title} - {crate_raiz}".strip(" -")
-    else:
-        fmt_crate = fmt_dj
-
-    # 3. Completo: Artista - Título - Crate - Álbum
     extra_parts = []
     if crate_raiz:
         extra_parts.append(crate_raiz)
-    if album and album.lower() != crate_raiz.lower():
+    if album and album.lower() != crate_raiz.lower() and album.lower() not in title.lower():
         extra_parts.append(album)
 
     if extra_parts:
         fmt_completo = f"{artist} - {title} - {' - '.join(extra_parts)}".strip(" -")
     else:
         fmt_completo = fmt_crate
+
+    # Trava matemática anti-estouro de nome de arquivo no APFS (max 180 chars para stem)
+    if len(fmt_completo) > 180:
+        fmt_completo = fmt_completo[:180].rstrip(" -–:")
+    if len(fmt_crate) > 180:
+        fmt_crate = fmt_crate[:180].rstrip(" -–:")
+    if len(fmt_dj) > 180:
+        fmt_dj = fmt_dj[:180].rstrip(" -–:")
 
     return {
         "artist": artist,
@@ -453,7 +476,8 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                     clean_target_name = clean_full
 
                 # Uma faixa já tem o nome limpo no disco se bate com qualquer um dos padrões oficiais válidos
-                is_name_clean = (f == clean_dj or f == clean_crate or f == clean_full)
+                f_norm = unicodedata.normalize('NFC', f)
+                is_name_clean = (f_norm == clean_dj or f_norm == clean_crate or f_norm == clean_full)
                 if not is_name_clean:
                     total_dirty += 1
 
@@ -524,7 +548,8 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                     else:
                         item_target = item_clean_full
 
-                    is_item_name_clean = (f == item_clean_dj or f == item_clean_crate or f == item_clean_full)
+                    f_norm = unicodedata.normalize('NFC', f)
+                    is_item_name_clean = (f_norm == item_clean_dj or f_norm == item_clean_crate or f_norm == item_clean_full)
 
                     # Verifica se as tags ID3 oficiais já estão limpas e coincidem com Artista e Título limpos
                     tags_clean = bool(
@@ -635,12 +660,30 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False)
                     if not novo_caminho.exists() or is_same_file:
                         try:
                             if is_same_file:
-                                temp_path = file_path.parent / f".tmp_{abs(hash(str(file_path)))}_{file_path.name}"
+                                temp_path = file_path.parent / f".tmp_{abs(hash(str(file_path)))}.tmp"
                                 file_path.rename(temp_path)
                                 temp_path.rename(novo_caminho)
                             else:
                                 file_path.rename(novo_caminho)
                             file_path = novo_caminho
+                        except Exception as e_ren:
+                            errors.append(f"Renomear {file_path.name}: {e_ren}")
+                    else:
+                        # Colisão: arquivo de mesmo nome já existe no disco, adiciona sufixo numérico
+                        try:
+                            c = 1
+                            alt_stem = Path(novo_nome).stem
+                            alt_dest = file_path.parent / f"{alt_stem} ({c}){file_path.suffix}"
+                            while alt_dest.exists():
+                                try:
+                                    if os.path.samefile(file_path, alt_dest):
+                                        break
+                                except Exception:
+                                    pass
+                                c += 1
+                                alt_dest = file_path.parent / f"{alt_stem} ({c}){file_path.suffix}"
+                            file_path.rename(alt_dest)
+                            file_path = alt_dest
                         except Exception as e_ren:
                             errors.append(f"Renomear {file_path.name}: {e_ren}")
 
@@ -709,7 +752,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                 clean_crate = f"{clean_quick['fmt_crate']}{ext}"
                 clean_full = f"{clean_quick['fmt_completo']}{ext}"
 
-                is_name_clean = (f == clean_dj or f == clean_crate or f == clean_full)
+                f_norm = unicodedata.normalize('NFC', f)
+                is_name_clean = (f_norm == clean_dj or f_norm == clean_crate or f_norm == clean_full)
 
                 if naming_mode == 'dj':
                     target_name = clean_dj
@@ -718,7 +762,7 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                 else:
                     target_name = clean_full
 
-                needs_rename = (rename_files and f != target_name)
+                needs_rename = (rename_files and f_norm != target_name)
                 needs_clean = not is_name_clean
 
                 if needs_clean or needs_rename:
@@ -808,12 +852,29 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                     if not dest_path.exists() or is_same_file:
                         try:
                             if is_same_file:
-                                temp_path = full_path.parent / f".tmp_{abs(hash(str(full_path)))}_{filename}"
+                                temp_path = full_path.parent / f".tmp_{abs(hash(str(full_path)))}.tmp"
                                 full_path.rename(temp_path)
                                 temp_path.rename(dest_path)
                             else:
                                 full_path.rename(dest_path)
                             full_path = dest_path
+                        except Exception as e_rename:
+                            errors.append(f"Renomear {filename}: {e_rename}")
+                    else:
+                        # Colisão: arquivo de mesmo nome já existe no disco, adiciona sufixo numérico
+                        try:
+                            c = 1
+                            alt_dest = full_path.parent / f"{suggested_stem} ({c}){ext}"
+                            while alt_dest.exists():
+                                try:
+                                    if os.path.samefile(full_path, alt_dest):
+                                        break
+                                except Exception:
+                                    pass
+                                c += 1
+                                alt_dest = full_path.parent / f"{suggested_stem} ({c}){ext}"
+                            full_path.rename(alt_dest)
+                            full_path = alt_dest
                         except Exception as e_rename:
                             errors.append(f"Renomear {filename}: {e_rename}")
 
