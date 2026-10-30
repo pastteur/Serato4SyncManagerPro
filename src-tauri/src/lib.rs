@@ -706,10 +706,13 @@ mod commands {
     pub async fn scan_audio_health(
         app: AppHandle,
         mp3_path: String,
-        min_duration: Option<f64>,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
+        max_duration: Option<f64>,
+        categoria: Option<String>,
         limit: Option<usize>,
         offset: Option<usize>,
-        all: Option<bool>,
     ) -> Result<String, String> {
         let script = find_python_script(Some(&app), "audio_health.py");
         let mut cmd = Command::new("/usr/bin/python3");
@@ -717,9 +720,30 @@ mod commands {
         cmd.arg("--scan");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
-        if let Some(dur) = min_duration {
-            cmd.arg("--min-duration");
+        if let Some(cr) = crate_raiz {
+            if !cr.is_empty() {
+                cmd.arg("--crate-raiz");
+                cmd.arg(cr);
+            }
+        }
+        if let Some(sub) = subcrate {
+            if !sub.is_empty() {
+                cmd.arg("--subcrate");
+                cmd.arg(sub);
+            }
+        }
+        if let Some(false) = include_subcrates {
+            cmd.arg("--no-subcrates");
+        }
+        if let Some(dur) = max_duration {
+            cmd.arg("--max-duration");
             cmd.arg(dur.to_string());
+        }
+        if let Some(cat) = categoria {
+            if !cat.is_empty() {
+                cmd.arg("--categoria");
+                cmd.arg(cat);
+            }
         }
         if let Some(l) = limit {
             cmd.arg("--limit");
@@ -729,13 +753,73 @@ mod commands {
             cmd.arg("--offset");
             cmd.arg(o.to_string());
         }
-        if let Some(true) = all {
-            cmd.arg("--all");
-        }
 
         let output = cmd.output().map_err(|e| format!("Falha na auditoria de áudio: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn repair_track_online(app: AppHandle, filepath: String) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "audio_health.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--repair-online");
+        cmd.arg(&filepath);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao reparar áudio online: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn batch_repair_online(
+        app: AppHandle,
+        window: Window,
+        filepaths_json: String,
+    ) -> Result<(), String> {
+        let script = find_python_script(Some(&app), "audio_health.py");
+        let window_clone = window.clone();
+
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--batch-repair-online");
+            cmd.arg(&filepaths_json);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window_clone.emit("audio-health-batch-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("audio-health-batch-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("audio-health-batch-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+        });
+
+        Ok(())
     }
 
     #[tauri::command]
@@ -765,6 +849,125 @@ mod commands {
             return Err(stdout);
         }
         Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn scan_crate_cues(
+        app: AppHandle,
+        mp3_path: String,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "auto_cue.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--scan-crate");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+        if let Some(cr) = crate_raiz {
+            if !cr.is_empty() {
+                cmd.arg("--crate-raiz");
+                cmd.arg(cr);
+            }
+        }
+        if let Some(sub) = subcrate {
+            if !sub.is_empty() {
+                cmd.arg("--subcrate");
+                cmd.arg(sub);
+            }
+        }
+        if let Some(false) = include_subcrates {
+            cmd.arg("--no-subcrates");
+        }
+        if let Some(l) = limit {
+            cmd.arg("--limit");
+            cmd.arg(l.to_string());
+        }
+        if let Some(o) = offset {
+            cmd.arg("--offset");
+            cmd.arg(o.to_string());
+        }
+
+        let output = cmd.output().map_err(|e| format!("Falha ao escanear cues na crate: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn batch_apply_crate_cues(
+        app: AppHandle,
+        window: Window,
+        mp3_path: String,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
+        only_pending: Option<bool>,
+    ) -> Result<(), String> {
+        let script = find_python_script(Some(&app), "auto_cue.py");
+        let window_clone = window.clone();
+
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--batch-crate");
+            cmd.arg("--mp3");
+            cmd.arg(&mp3_path);
+            if let Some(cr) = crate_raiz {
+                if !cr.is_empty() {
+                    cmd.arg("--crate-raiz");
+                    cmd.arg(cr);
+                }
+            }
+            if let Some(sub) = subcrate {
+                if !sub.is_empty() {
+                    cmd.arg("--subcrate");
+                    cmd.arg(sub);
+                }
+            }
+            if let Some(false) = include_subcrates {
+                cmd.arg("--no-subcrates");
+            }
+            if let Some(true) = only_pending {
+                cmd.arg("--only-pending");
+            }
+
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window_clone.emit("auto-cue-batch-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("auto-cue-batch-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("auto-cue-batch-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+        });
+
+        Ok(())
     }
 
     #[tauri::command]
@@ -807,8 +1010,12 @@ pub fn run() {
             commands::scan_missing_relocate,
             commands::match_tracks,
             commands::scan_audio_health,
+            commands::repair_track_online,
+            commands::batch_repair_online,
             commands::preview_auto_cues,
             commands::apply_auto_cues,
+            commands::scan_crate_cues,
+            commands::batch_apply_crate_cues,
             commands::apply_batch_auto_cues
         ])
         .run(tauri::generate_context!())

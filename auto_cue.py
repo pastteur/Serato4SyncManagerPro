@@ -7,6 +7,7 @@ macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Gera e grava marcadores oficiais de Hot Cues para o Serato DJ Pro 4
 (Intro, Drop 1, Breakdown, Drop 2, Outro) nas tags GEOB:Serato Markers2.
+Suporta varredura e aplicação por Crate e Subcrate com streaming de progresso.
 ================================================================================
 """
 
@@ -29,6 +30,7 @@ try:
 except ImportError:
     mutagen = None
 
+AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
 CUE_COLORS = {
     "red": b'\xcc\x00\x00',
@@ -159,13 +161,184 @@ def generate_and_save_serato_cues(filepath_str: str):
         return {"sucesso": False, "erro": str(e)}
 
 
+def scan_crate_cues(
+    mp3_base_dir: str,
+    crate_raiz: str = "",
+    subcrate: str = "",
+    include_subcrates: bool = True,
+    limit: int = 150,
+    offset: int = 0
+):
+    """Varre faixas da Crate ou Subcrate verificando existência de Hot Cues gravados."""
+    base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
+    if not base_path.exists():
+        return {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
+
+    target_dir = base_path
+    if crate_raiz:
+        target_dir = base_path / crate_raiz
+        if subcrate:
+            target_dir = target_dir / subcrate
+
+    if not target_dir.exists():
+        return {"sucesso": True, "total": 0, "gravadas": 0, "pendentes": 0, "items": []}
+
+    total_tracks = 0
+    total_with_cues = 0
+    items = []
+
+    for root, dirs, files in os.walk(str(target_dir)):
+        if '/.' in root or '\\.' in root:
+            continue
+        if crate_raiz and not include_subcrates and not subcrate:
+            if root != str(target_dir):
+                dirs.clear()
+                continue
+            dirs.clear()
+
+        rel_folder = os.path.relpath(root, str(base_path))
+
+        for f in files:
+            if f.startswith('._') or f.startswith('.'):
+                continue
+            ext = Path(f).suffix.lower()
+            if ext in ('.mp3', '.m4a', '.flac', '.wav', '.aiff'):
+                total_tracks += 1
+                full_p = Path(root) / f
+                has_cues = False
+                dur = 0.0
+                bpm = 0.0
+
+                if mutagen:
+                    try:
+                        audio = mutagen.File(str(full_p))
+                        if audio is not None:
+                            dur = getattr(audio.info, 'length', 0.0)
+                            if 'TBPM' in audio:
+                                try: bpm = float(str(audio['TBPM']).split('.')[0])
+                                except Exception: pass
+                            if 'GEOB:Serato Markers2' in audio:
+                                has_cues = True
+                    except Exception:
+                        pass
+
+                if has_cues:
+                    total_with_cues += 1
+
+                if total_tracks > offset and len(items) < limit:
+                    crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
+                    c_raiz = crate_parts[0] if crate_parts else ""
+                    items.append({
+                        "id": f"cue-{total_tracks}",
+                        "caminho": str(full_p),
+                        "arquivo": f,
+                        "pasta": rel_folder,
+                        "crate": c_raiz,
+                        "duracao_seg": round(dur, 1),
+                        "bpm": round(bpm),
+                        "tem_cues": has_cues,
+                        "status": "Gravado" if has_cues else "Pendente"
+                    })
+
+    return {
+        "sucesso": True,
+        "total": total_tracks,
+        "gravadas": total_with_cues,
+        "pendentes": total_tracks - total_with_cues,
+        "items": items
+    }
+
+
+def batch_apply_crate_cues(
+    mp3_base_dir: str,
+    crate_raiz: str = "",
+    subcrate: str = "",
+    include_subcrates: bool = True,
+    only_pending: bool = False
+):
+    """Gera e aplica Hot Cues para todas as faixas da Crate com streaming de progresso."""
+    base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
+    target_dir = base_path
+    if crate_raiz:
+        target_dir = base_path / crate_raiz
+        if subcrate:
+            target_dir = target_dir / subcrate
+
+    files_to_process = []
+    for root, dirs, files in os.walk(str(target_dir)):
+        if '/.' in root or '\\.' in root:
+            continue
+        if crate_raiz and not include_subcrates and not subcrate:
+            if root != str(target_dir):
+                dirs.clear()
+                continue
+            dirs.clear()
+
+        for f in files:
+            if f.startswith('._') or f.startswith('.'):
+                continue
+            ext = Path(f).suffix.lower()
+            if ext in ('.mp3', '.m4a', '.flac', '.wav', '.aiff'):
+                files_to_process.append(Path(root) / f)
+
+    total = len(files_to_process)
+    print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
+    applied_count = 0
+    errors = []
+
+    for idx, full_p in enumerate(files_to_process, 1):
+        if only_pending and mutagen:
+            try:
+                audio = mutagen.File(str(full_p))
+                if audio and 'GEOB:Serato Markers2' in audio:
+                    continue
+            except Exception:
+                pass
+
+        res = generate_and_save_serato_cues(str(full_p))
+        if res.get("sucesso"):
+            applied_count += 1
+        else:
+            errors.append(f"{full_p.name}: {res.get('erro')}")
+
+        if idx % 10 == 0 or idx == total:
+            pct = round((idx / total) * 100, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": idx,
+                "total": total,
+                "percentual": pct,
+                "atualizados": applied_count,
+                "faixa_atual": full_p.name
+            }, ensure_ascii=False), flush=True)
+
+    print(json.dumps({
+        "tipo": "fim",
+        "sucesso": True,
+        "total": total,
+        "atualizados": applied_count,
+        "erros": errors[:10]
+    }, ensure_ascii=False), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Auto-Cue Generator")
     parser.add_argument("--preview", type=str, default="", help="Calcula prévia dos cues de uma música")
     parser.add_argument("--apply", type=str, default="", help="Grava Hot Cues no arquivo")
     parser.add_argument("--apply-batch", type=str, default="", help="JSON de lista de arquivos para aplicar em lote")
+    parser.add_argument("--scan-crate", action="store_true", help="Varre Crate/Subcrate para listar faixas e cues")
+    parser.add_argument("--batch-crate", action="store_true", help="Gera Hot Cues para toda a Crate")
+    parser.add_argument("--mp3", type=str, default="", help="Pasta MP3 base")
+    parser.add_argument("--crate-raiz", type=str, default="", help="Crate raiz")
+    parser.add_argument("--subcrate", type=str, default="", help="Subcrate")
+    parser.add_argument("--no-subcrates", action="store_true", help="Não incluir subcrates")
+    parser.add_argument("--only-pending", action="store_true", help="Apenas faixas que ainda não possuem Hot Cues")
+    parser.add_argument("--limit", type=int, default=150, help="Limite de faixas na listagem")
+    parser.add_argument("--offset", type=int, default=0, help="Offset de paginação")
 
     args = parser.parse_args()
+    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
 
     if args.preview:
         file_p = Path(args.preview)
@@ -203,6 +376,28 @@ def main():
         except Exception as e:
             print(json.dumps({"sucesso": False, "erro": str(e)}))
             sys.exit(1)
+
+    if args.scan_crate:
+        res = scan_crate_cues(
+            mp3_dir,
+            crate_raiz=args.crate_raiz,
+            subcrate=args.subcrate,
+            include_subcrates=not args.no_subcrates,
+            limit=args.limit,
+            offset=args.offset
+        )
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0)
+
+    if args.batch_crate:
+        batch_apply_crate_cues(
+            mp3_dir,
+            crate_raiz=args.crate_raiz,
+            subcrate=args.subcrate,
+            include_subcrates=not args.no_subcrates,
+            only_pending=args.only_pending
+        )
+        sys.exit(0)
 
     parser.print_help()
 
