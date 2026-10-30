@@ -349,12 +349,36 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn list_crates_tag_doctor(
+        app: AppHandle,
+        mp3_path: String,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "tag_doctor.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--list-crates");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao listar crates: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("Erro ao listar crates: {} {}", stdout, stderr));
+        }
+        Ok(stdout)
+    }
+
+    #[tauri::command]
     pub async fn scan_tags_doctor(
         app: AppHandle,
         mp3_path: String,
         limit: Option<usize>,
         offset: Option<usize>,
         search: Option<String>,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
     ) -> Result<String, String> {
         let script = find_python_script(Some(&app), "tag_doctor.py");
         let mut cmd = Command::new("/usr/bin/python3");
@@ -376,6 +400,21 @@ mod commands {
                 cmd.arg(s);
             }
         }
+        if let Some(cr) = crate_raiz {
+            if !cr.is_empty() {
+                cmd.arg("--crate-raiz");
+                cmd.arg(cr);
+            }
+        }
+        if let Some(sub) = subcrate {
+            if !sub.is_empty() {
+                cmd.arg("--subcrate");
+                cmd.arg(sub);
+            }
+        }
+        if let Some(false) = include_subcrates {
+            cmd.arg("--no-subcrates");
+        }
 
         let output = cmd.output().map_err(|e| format!("Falha ao executar scanner: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -384,6 +423,93 @@ mod commands {
             return Err(format!("Erro no scanner: {} {}", stdout, stderr));
         }
         Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn batch_apply_tags_doctor(
+        app: AppHandle,
+        window: Window,
+        mp3_path: String,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
+        naming_mode: Option<String>,
+        rename_files: Option<bool>,
+        search: Option<String>,
+    ) -> Result<(), String> {
+        let script = find_python_script(Some(&app), "tag_doctor.py");
+        let window_clone = window.clone();
+
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--batch-apply");
+            cmd.arg("--mp3");
+            cmd.arg(&mp3_path);
+
+            if let Some(cr) = crate_raiz {
+                if !cr.is_empty() {
+                    cmd.arg("--crate-raiz");
+                    cmd.arg(cr);
+                }
+            }
+            if let Some(sub) = subcrate {
+                if !sub.is_empty() {
+                    cmd.arg("--subcrate");
+                    cmd.arg(sub);
+                }
+            }
+            if let Some(false) = include_subcrates {
+                cmd.arg("--no-subcrates");
+            }
+            if let Some(mode) = naming_mode {
+                cmd.arg("--naming-mode");
+                cmd.arg(mode);
+            }
+            if let Some(true) = rename_files {
+                cmd.arg("--rename-files");
+            }
+            if let Some(s) = search {
+                if !s.is_empty() {
+                    cmd.arg("--search");
+                    cmd.arg(s);
+                }
+            }
+
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window_clone.emit("tag-doctor-batch-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("tag-doctor-batch-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("tag-doctor-batch-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+        });
+
+        Ok(())
     }
 
     #[tauri::command]
@@ -668,8 +794,10 @@ pub fn run() {
             commands::open_in_finder,
             commands::open_file_in_finder,
             commands::move_to_trash,
+            commands::list_crates_tag_doctor,
             commands::scan_tags_doctor,
             commands::apply_tags_doctor,
+            commands::batch_apply_tags_doctor,
             commands::backup_serato_db,
             commands::list_serato_backups,
             commands::restore_serato_db,

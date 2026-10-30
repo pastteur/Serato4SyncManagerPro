@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, Disc3 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers } from 'lucide-react';
 
 export interface TagDoctorItem {
   id: string;
@@ -26,6 +26,18 @@ export interface TagDoctorItem {
   precisa_limpeza: boolean;
 }
 
+export interface CrateSubInfo {
+  nome: string;
+  caminho_rel: string;
+  total: number;
+}
+
+export interface CrateInfo {
+  nome: string;
+  total: number;
+  subcrates: CrateSubInfo[];
+}
+
 interface TagDoctorProps {
   mp3Path: string;
   onAddLog: (message: string) => void;
@@ -40,12 +52,35 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   const [renameFilesOnDisk, setRenameFilesOnDisk] = useState<boolean>(false);
   const [namingMode, setNamingMode] = useState<'full' | 'crate' | 'dj'>('full');
 
+  // Crate e Subcrate Selection
+  const [cratesList, setCratesList] = useState<CrateInfo[]>([]);
+  const [selectedCrate, setSelectedCrate] = useState<string>('');
+  const [selectedSubcrate, setSelectedSubcrate] = useState<string>('');
+  const [includeSubcrates, setIncludeSubcrates] = useState<boolean>(true);
+  const [isLoadingCrates, setIsLoadingCrates] = useState<boolean>(false);
+
+  // Batch Execution Progress State
+  const [isBatchApplying, setIsBatchApplying] = useState<boolean>(false);
+  const [batchProgress, setBatchProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    atualizados: number;
+    faixa_atual: string;
+  } | null>(null);
+
   const [totalFound, setTotalFound] = useState<number>(0);
   const [totalDirty, setTotalDirty] = useState<number>(0);
   const [page, setPage] = useState<number>(1);
   const pageSize = 50;
 
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+
+  // Subcrates da Crate selecionada atualmente
+  const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
+
+  // Total de músicas em todas as crates combinadas
+  const totalLibraryCount = cratesList.reduce((acc, c) => acc + c.total, 0);
 
   // Calcula nome sugerido baseado no modo selecionado
   const getSuggestedName = (item: TagDoctorItem, mode: 'full' | 'crate' | 'dj'): string => {
@@ -55,15 +90,48 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     return item.arquivo_sugerido;
   };
 
-  // Carrega lista ao abrir ou mudar busca/página
-  const loadScan = async (targetPage: number = page, search: string = searchTerm) => {
+  // Carrega lista de Crates e Subcrates
+  const loadCrates = async () => {
+    if (!mp3Path) return;
+    setIsLoadingCrates(true);
+    try {
+      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('list_crates_tag_doctor', { mp3Path });
+        const data = JSON.parse(resJson);
+        if (data.sucesso && data.crates) {
+          setCratesList(data.crates);
+        }
+      }
+    } catch (e) {
+      console.error('Falha ao listar crates:', e);
+    } finally {
+      setIsLoadingCrates(false);
+    }
+  };
+
+  // Carrega lista de faixas conforme filtros e paginação
+  const loadScan = async (
+    targetPage: number = page,
+    search: string = searchTerm,
+    crate: string = selectedCrate,
+    sub: string = selectedSubcrate,
+    incSubs: boolean = includeSubcrates
+  ) => {
     if (!mp3Path) {
       onAddLog('⚠️ Selecione a pasta MP3 Master antes de rodar o Higienizador de Tags.');
       return;
     }
 
     setIsLoading(true);
-    onAddLog(`🔍 Higienizador: Escaneando faixas em ${mp3Path}...`);
+    const filterLabel = sub
+      ? `Subcrate: ${crate} -> ${sub}`
+      : crate
+        ? `Crate: ${crate} ${incSubs ? '(com subcrates)' : '(apenas raiz)'}`
+        : 'Biblioteca Completa';
+
+    onAddLog(`🔍 Higienizador: Escaneando ${filterLabel}...`);
 
     try {
       const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -74,7 +142,10 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           mp3Path,
           limit: pageSize,
           offset,
-          search
+          search: search || null,
+          crateRaiz: crate || null,
+          subcrate: sub || null,
+          includeSubcrates: incSubs
         });
         const data = JSON.parse(resJson);
 
@@ -98,6 +169,50 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
+  // Escuta eventos de streaming do batch apply
+  useEffect(() => {
+    let unlistenProgress: (() => void) | undefined;
+    let unlistenFinished: (() => void) | undefined;
+
+    const setupListeners = async () => {
+      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+      if (isTauri) {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlistenProgress = await listen<any>('tag-doctor-batch-progress', (event) => {
+          const payload = event.payload;
+          setBatchProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            atualizados: payload.atualizados || 0,
+            faixa_atual: payload.faixa_atual || '',
+          });
+        });
+
+        unlistenFinished = await listen<any>('tag-doctor-batch-finished', (event) => {
+          const payload = event.payload;
+          setIsBatchApplying(false);
+          setBatchProgress(null);
+          if (payload.sucesso) {
+            onAddLog(`🎉 Higienização em lote finalizada! ${payload.atualizados} de ${payload.total} faixas atualizadas com sucesso.`);
+            loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+            loadCrates();
+          } else {
+            onAddLog(`❌ Erro no processamento em lote: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
+      }
+    };
+
+    setupListeners();
+    loadCrates();
+
+    return () => {
+      if (unlistenProgress) unlistenProgress();
+      if (unlistenFinished) unlistenFinished();
+    };
+  }, [mp3Path]);
+
   // Backup seguro do master.sqlite
   const handleBackupDb = async () => {
     try {
@@ -119,8 +234,8 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
-  // Aplica as tags nos arquivos selecionados
-  const handleApplyClean = async () => {
+  // Aplicação de tags para as faixas selecionadas da página
+  const handleApplyCleanPage = async () => {
     const selectedItems = items
       .filter(it => selectedIds.has(it.id))
       .map(it => ({
@@ -134,7 +249,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
 
     const msg = renameFilesOnDisk
-      ? `Deseja regravar as tags ID3 e RENOMEAR os ${selectedItems.length} arquivos no disco no formato escolhido?`
+      ? `Deseja regravar as tags ID3 e RENOMEAR os ${selectedItems.length} arquivos selecionados no disco?`
       : `Deseja regravar as tags ID3 oficiais dos ${selectedItems.length} arquivos selecionados? (Os nomes físicos no HD não serão alterados)`;
 
     if (!confirm(msg)) return;
@@ -154,7 +269,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
         if (data.sucesso) {
           onAddLog(`🎯 Concluído! ${data.atualizados} música(s) atualizadas com sucesso nas tags oficiais.`);
-          loadScan(page, searchTerm);
+          loadScan(page, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
         } else {
           onAddLog(`❌ Erro ao gravar tags: ${data.erro}`);
         }
@@ -164,6 +279,76 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     } finally {
       setIsApplying(false);
     }
+  };
+
+  // Aplicação em Lote (Crate inteira com subcrates, ou Subcrate específica, ou Toda a Biblioteca)
+  const handleBatchApplyCrate = async () => {
+    const targetLabel = selectedSubcrate
+      ? `Subcrate "${selectedCrate} -> ${selectedSubcrate}"`
+      : selectedCrate
+        ? `Crate "${selectedCrate}" ${includeSubcrates ? '(e todas as suas subcrates)' : '(apenas arquivos da raiz)'}`
+        : 'TODA A BIBLIOTECA (todas as crates e subcrates)';
+
+    const countLabel = `${totalFound.toLocaleString()} faixas encontradas (${totalDirty.toLocaleString()} precisam de ajuste)`;
+
+    const msg = renameFilesOnDisk
+      ? `⚡ Deseja aplicar a higienização de tags ID3 e RENOMEAR FISICAMENTE no disco em:\n\n📂 ${targetLabel}\n🎯 Faixas: ${countLabel}\n\nO Serato continuará lendo normalmente os Beatgrids e Cues.`
+      : `⚡ Deseja regravar as tags ID3 oficiais (preservando Serato Markers) em:\n\n📂 ${targetLabel}\n🎯 Faixas: ${countLabel}\n\n(Os nomes dos arquivos no HD não serão alterados)`;
+
+    if (!confirm(msg)) return;
+
+    setIsBatchApplying(true);
+    setBatchProgress({
+      processados: 0,
+      total: totalFound,
+      percentual: 0,
+      atualizados: 0,
+      faixa_atual: 'Iniciando varredura e gravação em lote...'
+    });
+
+    onAddLog(`⚡ Disparando processamento em lote para ${targetLabel}...`);
+
+    try {
+      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('batch_apply_tags_doctor', {
+          mp3Path,
+          crateRaiz: selectedCrate || null,
+          subcrate: selectedSubcrate || null,
+          includeSubcrates,
+          namingMode,
+          renameFiles: renameFilesOnDisk,
+          search: searchTerm || null
+        });
+      }
+    } catch (e) {
+      setIsBatchApplying(false);
+      setBatchProgress(null);
+      onAddLog(`❌ Erro ao disparar lote: ${e}`);
+    }
+  };
+
+  // Mudança de Crate Raiz
+  const handleCrateChange = (crateName: string) => {
+    setSelectedCrate(crateName);
+    setSelectedSubcrate(''); // Reseta subcrate
+    setPage(1);
+    loadScan(1, searchTerm, crateName, '', includeSubcrates);
+  };
+
+  // Mudança de Subcrate
+  const handleSubcrateChange = (subPath: string) => {
+    setSelectedSubcrate(subPath);
+    setPage(1);
+    loadScan(1, searchTerm, selectedCrate, subPath, includeSubcrates);
+  };
+
+  // Toggle incluir subcrates
+  const handleToggleIncludeSubcrates = (inc: boolean) => {
+    setIncludeSubcrates(inc);
+    setPage(1);
+    loadScan(1, searchTerm, selectedCrate, selectedSubcrate, inc);
   };
 
   // Toggle de seleção individual
@@ -185,8 +370,15 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
+  // Rótulo do botão em lote
+  const batchButtonLabel = selectedSubcrate
+    ? `⚡ Aplicar na Subcrate (${totalDirty.toLocaleString()})`
+    : selectedCrate
+      ? `⚡ Aplicar na Crate ${selectedCrate} (${totalDirty.toLocaleString()})`
+      : `⚡ Aplicar na Biblioteca (${totalDirty.toLocaleString()})`;
+
   return (
-    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3">
+    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3 relative">
       
       {/* Top Banner & Ações Rápidas */}
       <div className="flex flex-wrap items-center justify-between pb-3 border-b border-serato-cardBorder shrink-0 gap-3">
@@ -203,7 +395,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
           {/* Botão de Backup do Banco */}
           <button
             type="button"
@@ -218,28 +410,111 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           {/* Botão de Analisar */}
           <button
             type="button"
-            onClick={() => loadScan(1, searchTerm)}
-            disabled={isLoading || isApplying}
+            onClick={() => loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
+            disabled={isLoading || isApplying || isBatchApplying}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-serato-card hover:bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 transition disabled:opacity-40 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-            <span>{isLoading ? 'Analisando...' : '🔍 Escanear Biblioteca'}</span>
+            <span>{isLoading ? 'Analisando...' : '🔍 Escanear'}</span>
           </button>
 
-          {/* Botão Salvar / Aplicar */}
+          {/* Botão Aplicar Página */}
           <button
             type="button"
-            onClick={handleApplyClean}
-            disabled={isLoading || isApplying || selectedIds.size === 0}
-            className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan hover:bg-cyan-300 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-40 cursor-pointer"
+            onClick={handleApplyCleanPage}
+            disabled={isLoading || isApplying || isBatchApplying || selectedIds.size === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 transition disabled:opacity-40 cursor-pointer"
+            title="Aplica as tags somente para as faixas selecionadas nesta página"
           >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>{isApplying ? 'Gravando...' : `✍️ Aplicar (${selectedIds.size})`}</span>
+            <Sparkles className="w-3.5 h-3.5 text-serato-cyan" />
+            <span>{isApplying ? 'Gravando...' : `✍️ Aplicar Página (${selectedIds.size})`}</span>
+          </button>
+
+          {/* Botão de Execução em Lote por Crate ou Biblioteca */}
+          <button
+            type="button"
+            onClick={handleBatchApplyCrate}
+            disabled={isLoading || isApplying || isBatchApplying || totalFound === 0}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-orange via-amber-500 to-serato-gold hover:opacity-90 text-black shadow-lg shadow-serato-orange/20 transition disabled:opacity-40 cursor-pointer"
+            title="Processa e higieniza todas as faixas da Crate ou subcrate de uma só vez"
+          >
+            <Zap className={`w-3.5 h-3.5 ${isBatchApplying ? 'animate-bounce' : ''}`} />
+            <span>{isBatchApplying ? 'Processando Lote...' : batchButtonLabel}</span>
           </button>
         </div>
       </div>
 
-      {/* Barra de Opções de Nomenclatura e Filtros Amigáveis */}
+      {/* Barra de Filtro Inteligente por Crate & Subcrate */}
+      <div className="bg-serato-header/70 border border-serato-cardBorder p-2.5 rounded-lg flex flex-wrap items-center justify-between gap-3 shrink-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+            <FolderTree className="w-4 h-4 text-serato-orange" />
+            <span>Filtrar por Crate:</span>
+          </span>
+
+          {/* Seletor Crate Raiz */}
+          <select
+            value={selectedCrate}
+            onChange={(e) => handleCrateChange(e.target.value)}
+            disabled={isLoading || isBatchApplying}
+            className="bg-serato-dark border border-serato-cardBorder text-slate-200 text-xs font-semibold rounded px-2.5 py-1.5 focus:outline-none focus:border-serato-orange cursor-pointer max-w-[240px]"
+          >
+            <option value="">📁 Todas as Crates ({totalLibraryCount > 0 ? `${totalLibraryCount.toLocaleString()} faixas` : 'Biblioteca Completa'})</option>
+            {cratesList.map(c => (
+              <option key={c.nome} value={c.nome}>
+                📁 {c.nome} ({c.total.toLocaleString()} faixas)
+              </option>
+            ))}
+          </select>
+
+          {/* Seletor de Subcrate (quando uma crate está ativa) */}
+          {selectedCrate && (
+            <div className="flex items-center gap-2 ml-1">
+              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer bg-serato-dark px-2 py-1 rounded border border-serato-cardBorder">
+                <input
+                  type="checkbox"
+                  checked={includeSubcrates && !selectedSubcrate}
+                  onChange={(e) => handleToggleIncludeSubcrates(e.target.checked)}
+                  disabled={!!selectedSubcrate || isBatchApplying}
+                  className="rounded border-slate-700 bg-serato-dark text-serato-orange focus:ring-0"
+                />
+                <span className="text-[11px] font-medium">Incluir todas as subcrates ({activeCrateData?.subcrates.length || 0})</span>
+              </label>
+
+              {activeCrateData && activeCrateData.subcrates.length > 0 && (
+                <select
+                  value={selectedSubcrate}
+                  onChange={(e) => handleSubcrateChange(e.target.value)}
+                  disabled={isLoading || isBatchApplying}
+                  className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2.5 py-1.5 focus:outline-none focus:border-serato-cyan cursor-pointer max-w-[200px]"
+                >
+                  <option value="">↳ Todas as Subcrates ({activeCrateData.total.toLocaleString()} faixas)</option>
+                  {activeCrateData.subcrates.map(sub => (
+                    <option key={sub.caminho_rel} value={sub.caminho_rel}>
+                      ↳ {sub.nome} ({sub.total} faixas)
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Informação contextual do filtro selecionado */}
+        <div className="flex items-center gap-3 text-xs font-mono">
+          <span className="text-slate-400">
+            Escopo: <b className="text-white">{selectedSubcrate ? `${selectedCrate} -> ${selectedSubcrate}` : (selectedCrate || 'Biblioteca Completa')}</b>
+          </span>
+          <span className="text-slate-400">
+            Total no Escopo: <b className="text-serato-cyan">{totalFound.toLocaleString()}</b>
+          </span>
+          <span className="text-slate-400">
+            Para Ajustar: <b className="text-serato-gold">{totalDirty.toLocaleString()}</b>
+          </span>
+        </div>
+      </div>
+
+      {/* Barra de Opções de Nomenclatura e Busca */}
       <div className="flex flex-wrap items-center justify-between gap-3 bg-serato-card px-3 py-2 rounded-lg border border-serato-cardBorder shrink-0">
         
         {/* Seletor de Modelo de Nome */}
@@ -248,6 +523,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             <Disc3 className="w-3.5 h-3.5 text-serato-cyan" />
             <span>Formato do Nome:</span>
           </span>
+
           <select
             value={namingMode}
             onChange={(e) => setNamingMode(e.target.value as any)}
@@ -269,12 +545,6 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           </label>
         </div>
 
-        {/* Métricas */}
-        <div className="flex items-center gap-4 text-xs font-mono text-serato-muted">
-          <span>Total: <b className="text-white">{totalFound.toLocaleString()}</b></span>
-          <span>Para Ajustar: <b className="text-serato-gold">{totalDirty.toLocaleString()}</b></span>
-        </div>
-
         {/* Busca */}
         <div className="relative w-64">
           <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
@@ -282,12 +552,44 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             type="text"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && loadScan(1, searchTerm)}
+            onKeyDown={(e) => e.key === 'Enter' && loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
             placeholder="Filtrar por nome, artista ou remix..."
             className="w-full pl-8 pr-3 py-1 text-xs bg-serato-dark border border-serato-cardBorder rounded-md text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan"
           />
         </div>
       </div>
+
+      {/* Modal / Overlay de Progresso em Tempo Real quando Executando em Lote */}
+      {isBatchApplying && batchProgress && (
+        <div className="bg-cyan-950/40 border border-serato-cyan/50 p-4 rounded-xl shadow-xl flex flex-col gap-2 shrink-0 animate-pulse">
+          <div className="flex items-center justify-between text-xs font-bold text-white">
+            <span className="flex items-center gap-2 text-serato-cyan">
+              <Zap className="w-4 h-4 text-serato-orange animate-bounce" />
+              <span>Higienizando em lote: {selectedCrate ? `Crate "${selectedCrate}"` : 'Biblioteca Completa'}...</span>
+            </span>
+            <span className="font-mono text-serato-gold">
+              {batchProgress.percentual}% ({batchProgress.processados.toLocaleString()} / {batchProgress.total.toLocaleString()} faixas)
+            </span>
+          </div>
+
+          {/* Barra de Progresso */}
+          <div className="w-full bg-slate-900 rounded-full h-3 border border-serato-cardBorder overflow-hidden">
+            <div
+              className="bg-gradient-to-r from-serato-cyan via-amber-400 to-serato-orange h-3 transition-all duration-200"
+              style={{ width: `${Math.min(100, Math.max(1, batchProgress.percentual))}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
+            <span className="truncate max-w-[70%]">
+              🎵 Faixa atual: <b className="text-slate-200">{batchProgress.faixa_atual}</b>
+            </span>
+            <span className="text-serato-neonGreen font-semibold">
+              ✅ {batchProgress.atualizados.toLocaleString()} faixas ajustadas
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Tabela De / Para (Antes vs Depois) */}
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
@@ -304,7 +606,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                   />
                 </th>
                 <th className="py-2 px-3">Como Está no Disco (Original)</th>
-                <th className="py-2 px-3 w-32">Crate / Pasta Raiz</th>
+                <th className="py-2 px-3 w-36">Crate / Pasta Raiz</th>
                 <th className="py-2 px-3 w-6 text-center"></th>
                 <th className="py-2 px-3">Tags Oficiais & Nome Sugerido</th>
                 <th className="py-2 px-3 w-28 text-center">BPM & Tom</th>
@@ -317,7 +619,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                   <td colSpan={7} className="text-center py-12 text-slate-500 font-sans">
                     <Music className="w-8 h-8 opacity-20 text-serato-cyan mx-auto mb-2" />
                     <p className="font-semibold text-slate-400">Nenhuma faixa carregada no momento.</p>
-                    <p className="text-xs text-slate-600 mt-1">Clique em "Escanear Biblioteca" para analisar e ver as melhorias sugeridas.</p>
+                    <p className="text-xs text-slate-600 mt-1">Selecione uma Crate ou clique em "Escanear" para analisar e ver as melhorias sugeridas.</p>
                   </td>
                 </tr>
               ) : (
@@ -354,8 +656,8 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                       <td className="py-2 px-3">
                         <div className="flex items-center gap-1.5">
                           <Folder className="w-3.5 h-3.5 text-serato-orange shrink-0" />
-                          <span className="font-sans font-semibold text-slate-200 text-xs px-2 py-0.5 rounded bg-serato-card border border-serato-cardBorder truncate max-w-[120px]" title={item.crate_completa || item.crate_raiz}>
-                            {item.crate_raiz || 'Geral'}
+                          <span className="font-sans font-semibold text-slate-200 text-xs px-2 py-0.5 rounded bg-serato-card border border-serato-cardBorder truncate max-w-[130px]" title={item.crate_completa || item.crate_raiz}>
+                            {item.crate_completa || item.crate_raiz || 'Geral'}
                           </span>
                         </div>
                       </td>
@@ -425,7 +727,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         {/* Paginação */}
         <div className="bg-serato-header px-3 py-2 border-t border-serato-cardBorder flex items-center justify-between text-xs text-serato-muted shrink-0">
           <div>
-            Exibindo página <b className="text-white">{page}</b> de <b className="text-white">{Math.max(1, Math.ceil(totalFound / pageSize))}</b> ({totalFound.toLocaleString()} faixas)
+            Exibindo página <b className="text-white">{page}</b> de <b className="text-white">{Math.max(1, Math.ceil(totalFound / pageSize))}</b> ({totalFound.toLocaleString()} faixas no escopo selecionado)
           </div>
 
           <div className="flex items-center gap-2">
@@ -434,7 +736,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
               onClick={() => {
                 const newP = Math.max(1, page - 1);
                 setPage(newP);
-                loadScan(newP, searchTerm);
+                loadScan(newP, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
               }}
               disabled={page <= 1 || isLoading}
               className="flex items-center gap-1 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 disabled:opacity-30 border border-serato-cardBorder cursor-pointer"
@@ -450,7 +752,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                 if (page < maxP) {
                   const newP = page + 1;
                   setPage(newP);
-                  loadScan(newP, searchTerm);
+                  loadScan(newP, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
                 }
               }}
               disabled={page >= Math.ceil(totalFound / pageSize) || isLoading}

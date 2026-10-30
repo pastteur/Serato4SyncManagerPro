@@ -231,7 +231,58 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     }
 
 
-def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_filter: str = ""):
+def list_crates_and_subcrates(mp3_dir_str: str):
+    """Mapeia rapidamente todas as crates raiz e suas respectivas subcrates."""
+    base_path = Path(os.path.expanduser(mp3_dir_str)).resolve()
+    if not base_path.exists():
+        return {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
+
+    crates_dict = {}
+    for entry in base_path.iterdir():
+        if entry.is_dir() and not entry.name.startswith('.'):
+            crates_dict[entry.name] = {
+                "nome": entry.name,
+                "total": 0,
+                "subcrates": {}
+            }
+
+    for root, dirs, files in os.walk(str(base_path)):
+        if '/.' in root or '\\.' in root:
+            continue
+        rel = os.path.relpath(root, str(base_path))
+        if rel == '.':
+            continue
+        parts = rel.split(os.sep)
+        crate_raiz = parts[0]
+        if crate_raiz in crates_dict:
+            audio_count = sum(1 for f in files if Path(f).suffix.lower() in AUDIO_EXTENSIONS and not f.startswith('.'))
+            crates_dict[crate_raiz]["total"] += audio_count
+            if len(parts) > 1:
+                sub = "/".join(parts[1:])
+                crates_dict[crate_raiz]["subcrates"][sub] = audio_count
+
+    # Formata lista ordenada
+    result_crates = []
+    for crate_name in sorted(crates_dict.keys(), key=lambda x: x.lower()):
+        c_data = crates_dict[crate_name]
+        subs_list = []
+        for sub_name in sorted(c_data["subcrates"].keys(), key=lambda x: x.lower()):
+            subs_list.append({
+                "nome": sub_name,
+                "caminho_rel": sub_name,
+                "total": c_data["subcrates"][sub_name]
+            })
+        result_crates.append({
+            "nome": crate_name,
+            "total": c_data["total"],
+            "subcrates": subs_list
+        })
+
+    return {"sucesso": True, "crates": result_crates}
+
+
+def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_filter: str = "",
+                    crate_raiz: str = "", subcrate: str = "", include_subcrates: bool = True):
     """Varre arquivos de áudio, inspeciona nomes em altíssima velocidade e lê tags ID3 da página atual."""
     base_path = Path(os.path.expanduser(mp3_dir_str)).resolve()
     if not base_path.exists():
@@ -243,10 +294,32 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
 
     search_lower = search_filter.strip().lower() if search_filter else ""
 
-    for root, _, files in os.walk(str(base_path)):
+    target_dir = base_path
+    if crate_raiz:
+        target_dir = base_path / crate_raiz
+        if subcrate:
+            target_dir = target_dir / subcrate
+
+    if not target_dir.exists():
+        return {
+            "sucesso": True,
+            "total_encontrados": 0,
+            "total_precisam_limpeza": 0,
+            "limite": limit,
+            "offset": offset,
+            "items": []
+        }
+
+    for root, dirs, files in os.walk(str(target_dir)):
         # Ignora lixeiras e pastas ocultas
         if '/.' in root or '\\.' in root:
             continue
+
+        if crate_raiz and not include_subcrates and not subcrate:
+            if root != str(target_dir):
+                dirs.clear()
+                continue
+            dirs.clear()
 
         rel_folder = os.path.relpath(root, str(base_path))
 
@@ -435,13 +508,167 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False)
     }
 
 
+def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
+                     include_subcrates: bool = True, naming_mode: str = "full",
+                     rename_files: bool = False, search_filter: str = ""):
+    """Executa higienização em massa para uma Crate, Subcrate ou toda a biblioteca com streaming de progresso."""
+    if not mutagen:
+        print(json.dumps({"tipo": "fim", "sucesso": False, "erro": "Mutagen não está instalado no sistema."}, ensure_ascii=False), flush=True)
+        return
+
+    base_path = Path(os.path.expanduser(mp3_dir_str)).resolve()
+    if not base_path.exists():
+        print(json.dumps({"tipo": "fim", "sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}, ensure_ascii=False), flush=True)
+        return
+
+    target_dir = base_path
+    if crate_raiz:
+        target_dir = base_path / crate_raiz
+        if subcrate:
+            target_dir = target_dir / subcrate
+
+    if not target_dir.exists():
+        print(json.dumps({"tipo": "fim", "sucesso": False, "erro": f"Caminho não encontrado: {target_dir}"}, ensure_ascii=False), flush=True)
+        return
+
+    search_lower = search_filter.strip().lower() if search_filter else ""
+
+    # 1. Enumera rapidamente todos os arquivos alvo
+    files_to_process = []
+    for root, dirs, files in os.walk(str(target_dir)):
+        if '/.' in root or '\\.' in root:
+            continue
+        if crate_raiz and not include_subcrates and not subcrate:
+            if root != str(target_dir):
+                dirs.clear()
+                continue
+            dirs.clear()
+
+        rel_folder = os.path.relpath(root, str(base_path))
+
+        for f in files:
+            if f.startswith('._') or f.startswith('.'):
+                continue
+            ext = Path(f).suffix.lower()
+            if ext in AUDIO_EXTENSIONS:
+                if search_lower and search_lower not in f.lower():
+                    continue
+                files_to_process.append((Path(root) / f, rel_folder, f, ext))
+
+    total = len(files_to_process)
+    print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
+    if total == 0:
+        print(json.dumps({"tipo": "fim", "sucesso": True, "atualizados": 0, "total": 0, "erros": []}, ensure_ascii=False), flush=True)
+        return
+
+    updated_count = 0
+    errors = []
+
+    for idx, (full_path, rel_folder, filename, ext) in enumerate(files_to_process, 1):
+        try:
+            name_no_ext = Path(filename).stem
+            artist_current = ""
+            title_current = ""
+            album_current = ""
+            try:
+                audio = mutagen.File(str(full_path))
+                if audio is not None:
+                    if 'TIT2' in audio: title_current = str(audio['TIT2'])
+                    elif 'title' in audio: title_current = str(audio['title'][0])
+                    if 'TPE1' in audio: artist_current = str(audio['TPE1'])
+                    elif 'artist' in audio: artist_current = str(audio['artist'][0])
+                    if 'TALB' in audio: album_current = str(audio['TALB'])
+                    elif 'album' in audio: album_current = str(audio['album'][0])
+            except Exception:
+                pass
+
+            clean_res = clean_track_name(
+                name_no_ext,
+                rel_folder=rel_folder,
+                existing_artist=artist_current,
+                existing_title=title_current,
+                existing_album=album_current
+            )
+
+            # Escolhe nomenclatura conforme o modo selecionado
+            if naming_mode == 'full' and clean_res.get('fmt_completo'):
+                suggested_stem = clean_res['fmt_completo']
+            elif naming_mode == 'crate' and clean_res.get('fmt_crate'):
+                suggested_stem = clean_res['fmt_crate']
+            elif naming_mode == 'dj' and clean_res.get('fmt_dj'):
+                suggested_stem = clean_res['fmt_dj']
+            else:
+                suggested_stem = clean_res['clean_filename']
+
+            suggested_filename = f"{suggested_stem}{ext}"
+
+            # Grava tags ID3 com mutagen (preservando GEOB Serato Markers2)
+            audio = mutagen.File(str(full_path))
+            if audio is not None:
+                if hasattr(audio, 'tags'):
+                    if audio.tags is None:
+                        audio.add_tags()
+                    if clean_res['title']:
+                        audio.tags['TIT2'] = TIT2(encoding=3, text=clean_res['title'])
+                    if clean_res['artist']:
+                        audio.tags['TPE1'] = TPE1(encoding=3, text=clean_res['artist'])
+                    if clean_res['album']:
+                        audio.tags['TALB'] = TALB(encoding=3, text=clean_res['album'])
+                    if clean_res['crate_raiz']:
+                        audio.tags['TCON'] = TCON(encoding=3, text=clean_res['crate_raiz'])
+                    audio.save()
+                else:
+                    if clean_res['title']: audio['title'] = [clean_res['title']]
+                    if clean_res['artist']: audio['artist'] = [clean_res['artist']]
+                    if clean_res['album']: audio['album'] = [clean_res['album']]
+                    if clean_res['crate_raiz']: audio['genre'] = [clean_res['crate_raiz']]
+                    audio.save()
+
+            # Renomeação opcional no disco
+            if rename_files and suggested_filename != filename:
+                dest_path = full_path.parent / suggested_filename
+                if dest_path != full_path and not dest_path.exists():
+                    full_path.rename(dest_path)
+
+            updated_count += 1
+        except Exception as e:
+            errors.append(f"{filename}: {e}")
+
+        # Streaming de progresso a cada 10 arquivos ou no final
+        if idx % 10 == 0 or idx == total:
+            pct = round((idx / total) * 100, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": idx,
+                "total": total,
+                "percentual": pct,
+                "atualizados": updated_count,
+                "faixa_atual": filename
+            }, ensure_ascii=False), flush=True)
+
+    print(json.dumps({
+        "tipo": "fim",
+        "sucesso": True,
+        "atualizados": updated_count,
+        "total": total,
+        "erros": errors[:15]
+    }, ensure_ascii=False), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Tag Doctor")
     parser.add_argument("--backup-db", action="store_true", help="Cria backup seguro do master.sqlite")
     parser.add_argument("--list-backups", action="store_true", help="Lista backups do banco")
     parser.add_argument("--restore-db", type=str, default="", help="Restaura banco especificado")
+    parser.add_argument("--list-crates", action="store_true", help="Lista crates e subcrates disponíveis")
     parser.add_argument("--scan-tags", action="store_true", help="Analisa tags da pasta MP3")
+    parser.add_argument("--batch-apply", action="store_true", help="Aplica correções em lote para Crate ou biblioteca")
     parser.add_argument("--mp3", type=str, default="", help="Caminho da pasta MP3")
+    parser.add_argument("--crate-raiz", type=str, default="", help="Nome da Crate Raiz")
+    parser.add_argument("--subcrate", type=str, default="", help="Subcrate específica")
+    parser.add_argument("--no-subcrates", action="store_true", help="Não incluir subcrates automaticamente")
+    parser.add_argument("--naming-mode", type=str, default="full", choices=["full", "crate", "dj"], help="Modo de nomenclatura")
     parser.add_argument("--limit", type=int, default=100, help="Limite de faixas na listagem")
     parser.add_argument("--offset", type=int, default=0, help="Offset de paginação")
     parser.add_argument("--search", type=str, default="", help="Filtro de busca")
@@ -465,9 +692,35 @@ def main():
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
 
+    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+
+    if args.list_crates:
+        res = list_crates_and_subcrates(mp3_dir)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.batch_apply:
+        batch_apply_tags(
+            mp3_dir_str=mp3_dir,
+            crate_raiz=args.crate_raiz,
+            subcrate=args.subcrate,
+            include_subcrates=not args.no_subcrates,
+            naming_mode=args.naming_mode,
+            rename_files=args.rename_files,
+            search_filter=args.search
+        )
+        sys.exit(0)
+
     if args.scan_tags:
-        mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
-        res = scan_audio_tags(mp3_dir, limit=args.limit, offset=args.offset, search_filter=args.search)
+        res = scan_audio_tags(
+            mp3_dir_str=mp3_dir,
+            limit=args.limit,
+            offset=args.offset,
+            search_filter=args.search,
+            crate_raiz=args.crate_raiz,
+            subcrate=args.subcrate,
+            include_subcrates=not args.no_subcrates
+        )
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
 
