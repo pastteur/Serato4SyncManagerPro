@@ -36,11 +36,9 @@ DEFAULT_BACKUPS_DIR = Path.home() / "pasync" / "backups"
 SERATO_INTERNAL_DB = Path.home() / "Library" / "Application Support" / "Serato" / "Library" / "master.sqlite"
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
-# Padrões abrangentes de remoção de domínios, sites e sujeiras de download da web
+# Padrões rápidos e seguros de remoção de domínios, sites e sujeiras de download da web (sem catastrophic backtracking)
 NOISE_PATTERNS = [
-    re.compile(r'\(?(?:https?://)?(?:www\.)?[a-z0-9\-_]+(?:\.[a-z0-9\-_]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)(?:/[^\s\)]*)?\)?', re.IGNORECASE),
-    re.compile(r'\[(?:https?://)?(?:www\.)?[a-z0-9\-_]+(?:\.[a-z0-9\-_]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)(?:/[^\s\]]*)?\]', re.IGNORECASE),
-    re.compile(r'[a-z0-9\-_]+\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info)', re.IGNORECASE),
+    re.compile(r'\b(?:https?://)?(?:www\.)?[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)\b(?:/[^\s\)]*)?', re.IGNORECASE),
     re.compile(r'\[dj\s*pool\]', re.IGNORECASE),
     re.compile(r'\(dj\s*pool\)', re.IGNORECASE),
     re.compile(r'\[exclusive\]', re.IGNORECASE),
@@ -225,18 +223,19 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # Casos especiais de bandas compostas abreviadas:
     # Ex: Artist='Blink', Title='blink-182-All the Small Things' -> Artist='Blink-182'
     # Ex: Artist='Guns', Title='Guns-n-roses-Patiens' -> Artist="Guns N' Roses"
-    m_sub = re.match(r'^((?:[a-zA-Z0-9]+[ -–_]?)+?)[-–]([A-Z0-9].*)$', title)
-    if m_sub and artist:
-        first_chunk = m_sub.group(1).strip()
-        rest_title = m_sub.group(2).strip()
-        if artist.lower() in first_chunk.lower():
-            if 'guns' in first_chunk.lower() and 'rose' in first_chunk.lower():
+    if artist:
+        art_l = artist.lower()
+        tit_l = title.lower()
+        if 'blink' in art_l and '182' in tit_l:
+            m_b = re.match(r'^blink[-_ ]?182\s*[-–]\s*(.+)$', title, re.IGNORECASE)
+            if m_b:
+                artist = "Blink-182"
+                title = m_b.group(1).strip()
+        elif 'guns' in art_l and 'rose' in tit_l:
+            m_g = re.match(r'^guns[-_ ]?(?:n|and)[-_ ]?roses?\s*[-–]\s*(.+)$', title, re.IGNORECASE)
+            if m_g:
                 artist = "Guns N' Roses"
-            elif 'blink' in first_chunk.lower() and '182' in first_chunk.lower():
-                artist = 'Blink-182'
-            else:
-                artist = first_chunk.title()
-            title = rest_title
+                title = m_g.group(1).strip()
 
     # Detecção e remoção de Artista Duplicado no Título!
     # Ex: Artist='The Beatles', Title='The Beatles-Help!' -> Title='Help!'

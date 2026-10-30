@@ -232,7 +232,7 @@ def get_sound_seal_status():
     }
 
 
-def get_sound_seal_duplicates(limit: int = 50):
+def get_sound_seal_duplicates(limit: int = 5000):
     """Lista cópias que possuem exatamente o mesmo selo sonoro (áudio idêntico)."""
     conn = get_db()
     cursor = conn.cursor()
