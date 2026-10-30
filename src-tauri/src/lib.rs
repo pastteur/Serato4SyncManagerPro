@@ -403,6 +403,7 @@ mod commands {
         crate_raiz: Option<String>,
         subcrate: Option<String>,
         include_subcrates: Option<bool>,
+        naming_mode: Option<String>,
     ) -> Result<String, String> {
         let script = find_python_script(Some(&app), "tag_doctor.py");
         let mut cmd = Command::new("/usr/bin/python3");
@@ -438,6 +439,12 @@ mod commands {
         }
         if let Some(false) = include_subcrates {
             cmd.arg("--no-subcrates");
+        }
+        if let Some(nm) = naming_mode {
+            if !nm.is_empty() {
+                cmd.arg("--naming-mode");
+                cmd.arg(nm);
+            }
         }
 
         let output = cmd.output().map_err(|e| format!("Falha ao executar scanner: {}", e))?;

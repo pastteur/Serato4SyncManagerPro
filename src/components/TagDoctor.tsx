@@ -133,7 +133,8 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     search: string = searchTerm,
     crate: string = selectedCrate,
     sub: string = selectedSubcrate,
-    incSubs: boolean = includeSubcrates
+    incSubs: boolean = includeSubcrates,
+    mode: 'full' | 'crate' | 'dj' = namingMode
   ) => {
     if (!mp3Path) {
       onAddLog('⚠️ Selecione a pasta MP3 Master antes de rodar o Higienizador de Tags.');
@@ -161,7 +162,8 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           search: search || null,
           crateRaiz: crate || null,
           subcrate: sub || null,
-          includeSubcrates: incSubs
+          includeSubcrates: incSubs,
+          namingMode: mode
         });
         const data = JSON.parse(resJson);
 
@@ -565,7 +567,11 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
           <select
             value={namingMode}
-            onChange={(e) => setNamingMode(e.target.value as any)}
+            onChange={(e) => {
+              const newMode = e.target.value as 'full' | 'crate' | 'dj';
+              setNamingMode(newMode);
+              loadScan(page, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, newMode);
+            }}
             className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer"
           >
             <option value="full">🌟 Artista - Título (Versão/Remix) - Crate - Álbum</option>

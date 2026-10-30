@@ -352,7 +352,8 @@ def list_crates_and_subcrates(mp3_dir_str: str):
 
 
 def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_filter: str = "",
-                    crate_raiz: str = "", subcrate: str = "", include_subcrates: bool = True):
+                    crate_raiz: str = "", subcrate: str = "", include_subcrates: bool = True,
+                    naming_mode: str = "full"):
     """Varre arquivos de áudio, inspeciona nomes em altíssima velocidade e lê tags ID3 da página atual."""
     base_path = Path(os.path.expanduser(mp3_dir_str)).resolve()
     if not base_path.exists():
@@ -407,11 +408,21 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
 
                 name_no_ext = Path(f).stem
                 clean_quick = clean_track_name(name_no_ext, rel_folder=rel_folder)
-                clean_target_name = f"{clean_quick['clean_filename']}{ext}"
 
-                # Detecção rápida de sujeira pelo nome do arquivo
-                needs_clean_name = (clean_target_name != f)
-                if needs_clean_name:
+                clean_dj = f"{clean_quick['fmt_dj']}{ext}"
+                clean_crate = f"{clean_quick['fmt_crate']}{ext}"
+                clean_full = f"{clean_quick['fmt_completo']}{ext}"
+
+                if naming_mode == 'dj':
+                    clean_target_name = clean_dj
+                elif naming_mode == 'crate':
+                    clean_target_name = clean_crate
+                else:
+                    clean_target_name = clean_full
+
+                # Uma faixa já tem o nome limpo no disco se bate com qualquer um dos padrões oficiais válidos
+                is_name_clean = (f == clean_dj or f == clean_crate or f == clean_full)
+                if not is_name_clean:
                     total_dirty += 1
 
                 # Apenas lê tags ID3 pesadas via mutagen para os itens da página atual
@@ -470,18 +481,36 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                     final_bpm = bpm_current or clean_res["detected_bpm"]
                     final_key = key_current or clean_res["detected_key"]
 
-                    needs_clean = (clean_target_name != f or
-                                   artist_current != clean_res["artist"] or
-                                   title_current != clean_res["title"])
+                    item_clean_dj = f"{clean_res['fmt_dj']}{ext}"
+                    item_clean_crate = f"{clean_res['fmt_crate']}{ext}"
+                    item_clean_full = f"{clean_res['fmt_completo']}{ext}"
+
+                    if naming_mode == 'dj':
+                        item_target = item_clean_dj
+                    elif naming_mode == 'crate':
+                        item_target = item_clean_crate
+                    else:
+                        item_target = item_clean_full
+
+                    is_item_name_clean = (f == item_clean_dj or f == item_clean_crate or f == item_clean_full)
+
+                    # Verifica se as tags ID3 oficiais já estão limpas e coincidem com Artista e Título limpos
+                    tags_clean = bool(
+                        artist_current and title_current and
+                        artist_current.strip().lower() == clean_res["artist"].strip().lower() and
+                        title_current.strip().lower() == clean_res["title"].strip().lower()
+                    )
+
+                    needs_clean = not (is_item_name_clean and tags_clean)
 
                     items.append({
                         "id": f"tag-{total_found}",
                         "caminho": str(full_path),
                         "arquivo_atual": f,
-                        "arquivo_sugerido": clean_target_name,
-                        "nome_dj": f"{clean_res['fmt_dj']}{ext}",
-                        "nome_crate": f"{clean_res['fmt_crate']}{ext}",
-                        "nome_completo": f"{clean_res['fmt_completo']}{ext}",
+                        "arquivo_sugerido": item_target,
+                        "nome_dj": item_clean_dj,
+                        "nome_crate": item_clean_crate,
+                        "nome_completo": item_clean_full,
                         "pasta": str(Path(root)),
                         "crate_raiz": clean_res["crate_raiz"],
                         "crate_completa": clean_res["crate_completa"],
@@ -789,7 +818,8 @@ def main():
             search_filter=args.search,
             crate_raiz=args.crate_raiz,
             subcrate=args.subcrate,
-            include_subcrates=not args.no_subcrates
+            include_subcrates=not args.no_subcrates,
+            naming_mode=args.naming_mode
         )
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
