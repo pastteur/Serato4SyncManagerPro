@@ -16,6 +16,7 @@ import re
 import shutil
 import datetime
 import json
+import sqlite3
 import argparse
 import unicodedata
 from pathlib import Path
@@ -61,6 +62,145 @@ TRAILING_BPM_KEY = re.compile(r'\s*\.\s*\d{2,3}(?:\.\d+)?\s*\.\s*[A-G][b#]?(?:m|
 TRAILING_DOTS = re.compile(r'[\s\._]+$')
 TRAILING_PUNCT = re.compile(r'(?<=\s)[\._]+$|\.{2,}$|[\s_]+$')
 LEADING_TRACK_NUM = re.compile(r'^\d{1,3}\s*[-–.]\s*')
+
+TAG_CACHE_DB = Path.home() / ".serato_tag_cache.sqlite"
+_SEEDED_TITLES = set()
+
+
+def init_tag_cache():
+    """Inicializa banco SQLite de cache de correspondência de metadados."""
+    try:
+        conn = sqlite3.connect(str(TAG_CACHE_DB))
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS metadata_cache (
+                title_norm TEXT PRIMARY KEY,
+                artist TEXT,
+                title TEXT,
+                score INT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def normalize_title_for_lookup(t: str) -> str:
+    """Normaliza título removendo parênteses e pontuação para busca fonética."""
+    t = unicodedata.normalize('NFC', t or '')
+    t = re.sub(r'[\(\[\{].*?[\)\]\}]', '', t)
+    t = re.sub(r'[^\w\s]', '', t)
+    return re.sub(r'\s+', ' ', t).strip().lower()
+
+
+def get_cached_artist(title: str) -> str:
+    """Busca artista em cache local instantâneo (SQLite)."""
+    norm = normalize_title_for_lookup(title)
+    if not norm:
+        return ""
+    try:
+        conn = sqlite3.connect(str(TAG_CACHE_DB))
+        cur = conn.cursor()
+        cur.execute("SELECT artist FROM metadata_cache WHERE title_norm = ?;", (norm,))
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    return ""
+
+
+def seed_tag_cache(title: str, artist: str):
+    """Alimenta o cache com títulos e artistas conhecidos da biblioteca."""
+    norm = normalize_title_for_lookup(title)
+    if not norm or not artist or norm in _SEEDED_TITLES:
+        return
+    _SEEDED_TITLES.add(norm)
+    try:
+        conn = sqlite3.connect(str(TAG_CACHE_DB))
+        conn.execute("INSERT OR IGNORE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, 100);",
+                     (norm, artist.strip(), title.strip()))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def lookup_musicbrainz_artist(title: str, crate: str = "") -> str:
+    """Consulta MusicBrainz na nuvem com fallback no cache local."""
+    norm = normalize_title_for_lookup(title)
+    if not norm:
+        return ""
+
+    cached = get_cached_artist(title)
+    if cached:
+        return cached
+
+    # Consulta endpoint público do MusicBrainz
+    try:
+        import urllib.request
+        import urllib.parse
+        q = f'recording:"{title}"'
+        url = f'https://musicbrainz.org/ws/2/recording/?query={urllib.parse.quote(q)}&fmt=json&limit=3'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Serato4SyncPro/1.0 (contact@serato4sync.pro)'})
+        with urllib.request.urlopen(req, timeout=3.5) as res:
+            data = json.loads(res.read().decode())
+            recs = data.get('recordings', [])
+            if recs:
+                best = recs[0]
+                art = best.get('artist-credit', [{}])[0].get('name', '')
+                score = int(best.get('score', 0))
+                if art and score >= 75:
+                    conn = sqlite3.connect(str(TAG_CACHE_DB))
+                    conn.execute("INSERT OR REPLACE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, ?);",
+                                 (norm, art.strip(), best.get('title', title), score))
+                    conn.commit()
+                    conn.close()
+                    return art.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def enrich_missing_artists(items: list):
+    """Identifica artistas para itens sem artista usando MusicBrainz e Cache."""
+    init_tag_cache()
+    enriched_count = 0
+    updated_items = []
+
+    for item in items:
+        art = (item.get("artista_sugerido") or "").strip()
+        tit = (item.get("titulo_sugerido") or item.get("titulo_atual") or "").strip()
+        crate = item.get("crate_raiz") or ""
+
+        if not art and tit:
+            found_art = lookup_musicbrainz_artist(tit, crate)
+            if found_art:
+                item["artista_sugerido"] = found_art
+                ext = Path(item["caminho"]).suffix if item.get("caminho") else ".mp3"
+                clean_res = clean_track_name(
+                    Path(item.get("caminho", "")).stem or tit,
+                    rel_folder=item.get("crate_completa") or item.get("crate_raiz", ""),
+                    existing_artist=found_art,
+                    existing_title=tit
+                )
+                item["arquivo_sugerido"] = f"{clean_res['fmt_completo']}{ext}"
+                item["nome_dj"] = f"{clean_res['fmt_dj']}{ext}"
+                item["nome_crate"] = f"{clean_res['fmt_crate']}{ext}"
+                item["nome_completo"] = f"{clean_res['fmt_completo']}{ext}"
+                item["precisa_limpeza"] = True
+                enriched_count += 1
+
+        updated_items.append(item)
+
+    return {
+        "sucesso": True,
+        "total_enriquecidos": enriched_count,
+        "items": updated_items
+    }
+
 
 
 def backup_master_database():
@@ -140,7 +280,7 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     text = unicodedata.normalize('NFC', filename_no_ext)
 
     # 1. Identificação da Crate Raiz e Hierarquia (com normalização NFC e sem underscore)
-    folder_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
+    folder_parts = [p for p in rel_folder.replace(' -> ', '/').replace('\\', '/').split('/') if p]
     crate_raiz_raw = folder_parts[0] if folder_parts else ""
     crate_raiz = unicodedata.normalize('NFC', crate_raiz_raw.replace('_', ' ').strip())
     crate_completa = " -> ".join(folder_parts) if folder_parts else ""
@@ -288,6 +428,12 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
             artist = "CPM 22"
             title = m_cpm.group(2).strip()
 
+    # Se ainda não tem artista, consulta o cache de títulos conhecidos / MusicBrainz
+    if not artist and title:
+        cached_art = get_cached_artist(title)
+        if cached_art:
+            artist = cached_art
+
     # Casos especiais de bandas compostas abreviadas:
     if artist:
         art_l = artist.lower()
@@ -315,8 +461,18 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     title = title.strip(' -–:').strip()
     artist = artist.strip(' -–:').strip()
 
-    if artist and (artist.isupper() or artist.islower()):
-        artist = artist.title()
+    if artist:
+        art_l = artist.lower()
+        if art_l in ['cpm 22', 'cpm22']:
+            artist = "CPM 22"
+        elif art_l == 'u2':
+            artist = "U2"
+        elif art_l == 'rbd':
+            artist = "RBD"
+        elif art_l == 'ac/dc':
+            artist = "AC/DC"
+        elif (artist.isupper() and len(artist) > 4) or artist.islower():
+            artist = artist.title()
 
     # Formatos de Nomenclatura para o DJ escolher:
     fmt_dj = f"{artist} - {title}".strip(" -") if artist else title
@@ -551,12 +707,18 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                     f_norm = unicodedata.normalize('NFC', f)
                     is_item_name_clean = (f_norm == item_clean_dj or f_norm == item_clean_crate or f_norm == item_clean_full)
 
+                    if artist_current and title_current:
+                        seed_tag_cache(title_current, artist_current)
+
                     # Verifica se as tags ID3 oficiais já estão limpas e coincidem com Artista e Título limpos
-                    tags_clean = bool(
-                        artist_current and title_current and
-                        artist_current.strip().lower() == clean_res["artist"].strip().lower() and
-                        title_current.strip().lower() == clean_res["title"].strip().lower()
-                    )
+                    if clean_res["artist"]:
+                        tags_clean = bool(
+                            artist_current and title_current and
+                            artist_current.strip().lower() == clean_res["artist"].strip().lower() and
+                            title_current.strip().lower() == clean_res["title"].strip().lower()
+                        )
+                    else:
+                        tags_clean = bool(title_current and title_current.strip().lower() == clean_res["title"].strip().lower())
 
                     needs_clean = not (is_item_name_clean and tags_clean)
 
@@ -921,6 +1083,7 @@ def main():
     parser.add_argument("--search", type=str, default="", help="Filtro de busca")
     parser.add_argument("--apply-tags", type=str, default="", help="Caminho do arquivo JSON com itens a atualizar")
     parser.add_argument("--rename-files", action="store_true", help="Renomeia arquivos fisicamente no disco")
+    parser.add_argument("--enrich-artists", type=str, default="", help="Identifica artistas faltantes via MusicBrainz/Cache para itens JSON")
 
     args = parser.parse_args()
 
@@ -971,6 +1134,22 @@ def main():
         )
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.enrich_artists:
+        try:
+            if args.enrich_artists == "-":
+                items = json.load(sys.stdin)
+            elif os.path.exists(args.enrich_artists):
+                with open(args.enrich_artists, "r", encoding="utf-8") as f:
+                    items = json.load(f)
+            else:
+                items = json.loads(args.enrich_artists)
+            res = enrich_missing_artists(items)
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(0 if res.get("sucesso") else 1)
+        except Exception as e:
+            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            sys.exit(1)
 
     if args.apply_tags:
         try:

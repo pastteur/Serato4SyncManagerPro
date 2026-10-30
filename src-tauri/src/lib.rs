@@ -583,6 +583,41 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn enrich_missing_artists(
+        app: AppHandle,
+        items_json: String,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "tag_doctor.py");
+
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!(
+            "tag_enrich_{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        ));
+        std::fs::write(&temp_file, &items_json)
+            .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
+
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--enrich-artists");
+        cmd.arg(&temp_file);
+
+        let output = cmd.output();
+        let _ = std::fs::remove_file(&temp_file);
+
+        let output = output.map_err(|e| format!("Falha ao executar enriquecimento: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(format!("Erro ao enriquecer artistas: {} {}", stdout, stderr));
+        }
+        Ok(stdout)
+    }
+
+    #[tauri::command]
     pub async fn backup_serato_db(app: AppHandle) -> Result<String, String> {
         let script = find_python_script(Some(&app), "tag_doctor.py");
         let mut cmd = Command::new("/usr/bin/python3");
@@ -1111,6 +1146,7 @@ pub fn run() {
             commands::scan_tags_doctor,
             commands::apply_tags_doctor,
             commands::batch_apply_tags_doctor,
+            commands::enrich_missing_artists,
             commands::backup_serato_db,
             commands::list_serato_backups,
             commands::restore_serato_db,

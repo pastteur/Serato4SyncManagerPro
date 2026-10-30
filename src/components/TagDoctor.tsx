@@ -48,6 +48,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   const [items, setItems] = useState<TagDoctorItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isApplying, setIsApplying] = useState<boolean>(false);
+  const [isEnriching, setIsEnriching] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [renameFilesOnDisk, setRenameFilesOnDisk] = useState<boolean>(true);
@@ -230,6 +231,32 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
       if (unlistenFinished) unlistenFinished();
     };
   }, [mp3Path]);
+
+  // Identificação inteligente de Artistas Faltantes via MusicBrainz e Catálogo Local
+  const handleEnrichArtists = async () => {
+    setIsEnriching(true);
+    onAddLog('🔍 Consultando base de metadados e MusicBrainz para identificar artistas faltantes...');
+    try {
+      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('enrich_missing_artists', {
+          itemsJson: JSON.stringify(items)
+        });
+        const data = JSON.parse(resJson);
+        if (data.sucesso && data.items) {
+          setItems(data.items);
+          onAddLog(`✅ ${data.total_enriquecidos} artista(s) identificado(s) e preenchido(s) com sucesso via MusicBrainz / Catálogo!`);
+        } else {
+          onAddLog(`ℹ️ Nenhuma nova correspondência encontrada.`);
+        }
+      }
+    } catch (e) {
+      onAddLog(`❌ Erro ao identificar artistas: ${e}`);
+    } finally {
+      setIsEnriching(false);
+    }
+  };
 
   // Backup seguro do master.sqlite
   const handleBackupDb = async () => {
@@ -469,6 +496,18 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           >
             <Sparkles className="w-3.5 h-3.5 text-serato-cyan" />
             <span>{isApplying ? 'Gravando...' : `✍️ Aplicar Página (${selectedIds.size})`}</span>
+          </button>
+
+          {/* Botão Auto-Identificar Artistas via MusicBrainz */}
+          <button
+            type="button"
+            onClick={handleEnrichArtists}
+            disabled={isLoading || isApplying || isBatchApplying || isEnriching || items.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border border-cyan-700/60 transition disabled:opacity-40 cursor-pointer shadow-sm"
+            title="Consulta o catálogo e MusicBrainz para identificar o artista das faixas que estão sem artista"
+          >
+            <Music className={`w-3.5 h-3.5 ${isEnriching ? 'animate-spin text-serato-gold' : 'text-serato-cyan'}`} />
+            <span>{isEnriching ? 'Identificando...' : '🎧 Auto-Completar Artistas'}</span>
           </button>
 
           {/* Botão de Execução em Lote por Crate ou Biblioteca */}
@@ -719,8 +758,16 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                       {/* Como Vai Ficar */}
                       <td className="py-2 px-3">
                         <div className="font-sans font-semibold text-white flex items-center gap-1.5 truncate max-w-[340px]">
-                          <span className="text-serato-cyan">{item.artista_sugerido || 'Desconhecido'}</span>
-                          <span className="text-slate-500">-</span>
+                          {item.artista_sugerido ? (
+                            <>
+                              <span className="text-serato-cyan font-bold">{item.artista_sugerido}</span>
+                              <span className="text-slate-500">-</span>
+                            </>
+                          ) : (
+                            <span className="text-slate-400 italic text-[10px] bg-slate-800/80 px-1.5 py-0.5 rounded border border-slate-700/60 shrink-0">
+                              (Sem Artista)
+                            </span>
+                          )}
                           <span className="text-white">{item.titulo_sugerido}</span>
                           {item.album_sugerido && (
                             <>
