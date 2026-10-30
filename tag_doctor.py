@@ -180,9 +180,41 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # Separação Inteligente: Artista - Título (Versão/Remix) - Álbum
     raw_parts = [p.strip() for p in text.split(" - ") if p.strip()]
 
-    artist = existing_artist.strip() if existing_artist else ""
-    title = existing_title.strip() if existing_title else ""
-    album = existing_album.strip() if existing_album else ""
+    # Sanitiza tags existentes contra anúncios, URLs e caracteres truncados
+    clean_ex_art = existing_artist.strip() if existing_artist else ""
+    clean_ex_tit = existing_title.strip() if existing_title else ""
+    clean_ex_alb = existing_album.strip() if existing_album else ""
+
+    if clean_ex_art:
+        for pattern in NOISE_PATTERNS:
+            clean_ex_art = pattern.sub('', clean_ex_art)
+        clean_ex_art = TRAILING_DOTS.sub('', clean_ex_art).strip(' -–:').strip()
+
+    if clean_ex_tit:
+        for pattern in NOISE_PATTERNS:
+            clean_ex_tit = pattern.sub('', clean_ex_tit)
+        clean_ex_tit = TRAILING_BPM_KEY.sub('', clean_ex_tit)
+        clean_ex_tit = LEADING_TRACK_NUM.sub('', clean_ex_tit)
+        clean_ex_tit = TRAILING_DOTS.sub('', clean_ex_tit).strip(' -–:').strip()
+        # Remove Crate redundante se estiver anexada ao título da tag
+        if crate_raiz and clean_ex_tit.lower().endswith(f" - {crate_raiz.lower()}"):
+            clean_ex_tit = clean_ex_tit[:-(len(crate_raiz) + 3)].strip()
+
+    if clean_ex_alb:
+        for pattern in NOISE_PATTERNS:
+            clean_ex_alb = pattern.sub('', clean_ex_alb)
+        clean_ex_alb = TRAILING_DOTS.sub('', clean_ex_alb).strip(' -–:').strip()
+        if clean_ex_alb.lower() == crate_raiz.lower():
+            clean_ex_alb = ""
+
+    # Se a tag de título era idêntica ao nome bruto do arquivo (comum em arquivos baixados da web),
+    # anula para forçar extração limpa do título a partir das partes higienizadas
+    if clean_ex_tit and (clean_ex_tit.lower() == filename_no_ext.lower() or clean_ex_tit.lower() == text.lower()):
+        clean_ex_tit = ""
+
+    artist = clean_ex_art
+    title = clean_ex_tit
+    album = clean_ex_alb
 
     # Detecção de Compilação Russa / Coletânea ('Sbornik', 'Various Artists', 'VA')
     if raw_parts and raw_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va']:
@@ -588,12 +620,29 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False)
                     audio['genre'] = [crate_raiz]
                 audio.save()
 
-            # Renomeação opcional segura no disco
+            # Renomeação opcional segura no disco contra colisões de caixa APFS
             if rename_files_on_disk and item.get("arquivo_sugerido"):
                 novo_nome = item["arquivo_sugerido"]
                 novo_caminho = file_path.parent / novo_nome
-                if novo_caminho != file_path and not novo_caminho.exists():
-                    file_path.rename(novo_caminho)
+                if novo_caminho != file_path:
+                    is_same_file = False
+                    try:
+                        if novo_caminho.exists():
+                            is_same_file = os.path.samefile(file_path, novo_caminho)
+                    except Exception:
+                        pass
+
+                    if not novo_caminho.exists() or is_same_file:
+                        try:
+                            if is_same_file:
+                                temp_path = file_path.parent / f".tmp_{abs(hash(str(file_path)))}_{file_path.name}"
+                                file_path.rename(temp_path)
+                                temp_path.rename(novo_caminho)
+                            else:
+                                file_path.rename(novo_caminho)
+                            file_path = novo_caminho
+                        except Exception as e_ren:
+                            errors.append(f"Renomear {file_path.name}: {e_ren}")
 
             updated_count += 1
         except Exception as e:
@@ -632,7 +681,7 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
 
     search_lower = search_filter.strip().lower() if search_filter else ""
 
-    # 1. Enumera rapidamente todos os arquivos alvo
+    # 1. Enumera rapidamente e filtra estritamente os arquivos que precisam de correção
     files_to_process = []
     for root, dirs, files in os.walk(str(target_dir)):
         if '/.' in root or '\\.' in root:
@@ -652,7 +701,28 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
             if ext in AUDIO_EXTENSIONS:
                 if search_lower and search_lower not in f.lower():
                     continue
-                files_to_process.append((Path(root) / f, rel_folder, f, ext))
+
+                name_no_ext = Path(f).stem
+                clean_quick = clean_track_name(name_no_ext, rel_folder=rel_folder)
+
+                clean_dj = f"{clean_quick['fmt_dj']}{ext}"
+                clean_crate = f"{clean_quick['fmt_crate']}{ext}"
+                clean_full = f"{clean_quick['fmt_completo']}{ext}"
+
+                is_name_clean = (f == clean_dj or f == clean_crate or f == clean_full)
+
+                if naming_mode == 'dj':
+                    target_name = clean_dj
+                elif naming_mode == 'crate':
+                    target_name = clean_crate
+                else:
+                    target_name = clean_full
+
+                needs_rename = (rename_files and f != target_name)
+                needs_clean = not is_name_clean
+
+                if needs_clean or needs_rename:
+                    files_to_process.append((Path(root) / f, rel_folder, f, ext))
 
     total = len(files_to_process)
     print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
@@ -724,11 +794,28 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                     if clean_res['crate_raiz']: audio['genre'] = [clean_res['crate_raiz']]
                     audio.save()
 
-            # Renomeação opcional no disco
+            # Renomeação opcional no disco segura contra colisões de caixa APFS
             if rename_files and suggested_filename != filename:
                 dest_path = full_path.parent / suggested_filename
-                if dest_path != full_path and not dest_path.exists():
-                    full_path.rename(dest_path)
+                if dest_path != full_path:
+                    is_same_file = False
+                    try:
+                        if dest_path.exists():
+                            is_same_file = os.path.samefile(full_path, dest_path)
+                    except Exception:
+                        pass
+
+                    if not dest_path.exists() or is_same_file:
+                        try:
+                            if is_same_file:
+                                temp_path = full_path.parent / f".tmp_{abs(hash(str(full_path)))}_{filename}"
+                                full_path.rename(temp_path)
+                                temp_path.rename(dest_path)
+                            else:
+                                full_path.rename(dest_path)
+                            full_path = dest_path
+                        except Exception as e_rename:
+                            errors.append(f"Renomear {filename}: {e_rename}")
 
             updated_count += 1
         except Exception as e:

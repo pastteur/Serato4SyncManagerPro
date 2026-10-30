@@ -50,7 +50,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   const [isApplying, setIsApplying] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [renameFilesOnDisk, setRenameFilesOnDisk] = useState<boolean>(false);
+  const [renameFilesOnDisk, setRenameFilesOnDisk] = useState<boolean>(true);
   const [namingMode, setNamingMode] = useState<'full' | 'crate' | 'dj'>('full');
 
   // Crate e Subcrate Selection
@@ -325,12 +325,12 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     const countLabel = `${totalFound.toLocaleString()} faixas encontradas (${totalDirty.toLocaleString()} precisam de ajuste)`;
 
     const msg = renameFilesOnDisk
-      ? `⚡ Deseja aplicar a higienização de tags ID3 e RENOMEAR FISICAMENTE no disco em:\n\n📂 ${targetLabel}\n🎯 Faixas: ${countLabel}\n\nO Serato continuará lendo normalmente os Beatgrids e Cues.`
-      : `⚡ Deseja regravar as tags ID3 oficiais (preservando Serato Markers) em:\n\n📂 ${targetLabel}\n🎯 Faixas: ${countLabel}\n\n(Os nomes dos arquivos no HD não serão alterados)`;
+      ? `⚡ Deseja aplicar a higienização de tags ID3 e RENOMEAR FISICAMENTE no disco em:\n\n📂 ${targetLabel}\n🎯 Faixas a processar: ${totalDirty.toLocaleString()} faixas que precisam de ajuste\n\n(Propagandas de sites e URLs serão eliminadas e os Beatgrids/Cues continuarão 100% íntegros)`
+      : `⚡ Deseja regravar as tags ID3 oficiais (preservando Serato Markers) em:\n\n📂 ${targetLabel}\n🎯 Faixas a processar: ${totalDirty.toLocaleString()} faixas que precisam de ajuste\n\n(Atenção: Os nomes físicos dos arquivos no HD não serão alterados)`;
 
     setModalConfig({
       isOpen: true,
-      title: 'Higienização de Tags em Lote',
+      title: renameFilesOnDisk ? '⚡ Higienização Completa (Tags + Renomear no HD)' : '⚡ Higienizar Tags ID3 em Lote',
       message: msg,
       confirmText: 'Sim, Executar Lote',
       variant: 'warning',
@@ -339,7 +339,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         setIsBatchApplying(true);
         setBatchProgress({
           processados: 0,
-          total: totalFound,
+          total: totalDirty,
           percentual: 0,
           atualizados: 0,
           faixa_atual: 'Iniciando varredura e gravação em lote...'
@@ -579,14 +579,18 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             <option value="dj">🎵 Artista - Título (Versão/Remix) Clássico</option>
           </select>
 
-          <label className="flex items-center gap-2 text-xs text-slate-300 ml-3 cursor-pointer">
+          <label className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
+            renameFilesOnDisk 
+              ? 'bg-serato-cyan/15 border-serato-cyan/40 text-serato-cyan font-medium' 
+              : 'bg-slate-800/40 border-slate-700 text-slate-400'
+          }`}>
             <input
               type="checkbox"
               checked={renameFilesOnDisk}
               onChange={(e) => setRenameFilesOnDisk(e.target.checked)}
               className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0"
             />
-            <span>Renomear arquivo no HD</span>
+            <span>Renomear arquivos no HD (remover propagandas da web)</span>
           </label>
         </div>
 
