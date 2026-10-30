@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+bun.lockb
+
+# Build Outputs & Bundles
+dist/
+build/
+src-tauri/target/
+
+# Local Logs & Reports (Keep directory, ignore contents)
+logs/*.csv
+logs/*.json
+logs/.serato_sync_cache.json
+logs/.serato_sync_summary.json
+
+# Local Databases & Backups
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+
+# macOS System Files
+.DS_Store
+*/.DS_Store
+.AppleDouble
+.LSOverride
+
+# Python Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+
+# IDE / Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
