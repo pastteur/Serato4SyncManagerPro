@@ -281,6 +281,64 @@ def get_sound_seal_duplicates(limit: int = 5000):
     return {"sucesso": True, "duplicados_som": results}
 
 
+def resolve_serato_path(rel_path: str, mp3_base: Path):
+    """
+    Resolve com precisão o caminho físico de uma faixa registrada no Serato.
+    Suporta caminhos relativos ao volume (/Volumes/Pastteyr/Music/MP3),
+    caminhos absolutos (/Users/...) e outros volumes montados.
+    """
+    if not rel_path:
+        return None
+
+    # 1. Caminho absoluto
+    p_abs = Path(rel_path)
+    if p_abs.is_absolute() and p_abs.exists():
+        return p_abs
+
+    # 2. Caminho a partir da raiz do volume do mp3_base (ex: /Volumes/Pastteyr / Music/MP3/...)
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        vol_root = Path(parts[0]) / parts[1] / parts[2]
+        cand = vol_root / rel_path
+        if cand.exists():
+            return cand
+
+    # 3. Caminho a partir da raiz do sistema (ex: Users/pastteur/Music/...)
+    cand_sys = Path('/') / rel_path
+    if cand_sys.exists():
+        return cand_sys
+
+    # 4. Alinhamento com a pasta MP3 base ou seus ancestrais
+    curr = mp3_base
+    while curr != curr.parent:
+        cand = curr / rel_path
+        if cand.exists():
+            return cand
+        cand_p = curr.parent / rel_path
+        if cand_p.exists():
+            return cand_p
+        curr = curr.parent
+
+    # 5. Outros volumes montados no Mac
+    if Path("/Volumes").exists():
+        for vol in Path("/Volumes").iterdir():
+            if vol.is_dir() and not vol.name.startswith('.'):
+                cand_vol = vol / rel_path
+                if cand_vol.exists():
+                    return cand_vol
+
+    return None
+
+
+def get_serato_target_path(rel_path: str, mp3_base: Path) -> Path:
+    """Calcula o caminho de destino ideal no disco onde o Serato espera o arquivo."""
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        vol_root = Path(parts[0]) / parts[1] / parts[2]
+        return vol_root / rel_path
+    return Path('/') / rel_path
+
+
 def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
     """
     Rastreia faixas do Serato cujo arquivo físico não existe no local registrado.
@@ -294,6 +352,7 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
     if not subcrates_dir.exists():
         subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "Subcrates"
 
+    mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
     missing_tracks = []
     checked_paths = set()
 
@@ -313,11 +372,10 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
         for crate_file in subcrates_dir.glob("*.crate"):
             try:
                 content = crate_file.read_bytes()
-                # Extrai tags ptrk
                 idx = 0
                 while True:
                     p = content.find(b'ptrk', idx)
-                    if p == -1:
+                    if p == -1 or p + 8 > len(content):
                         break
                     size = int.from_bytes(content[p+4:p+8], byteorder='big')
                     raw_str = content[p+8:p+8+size]
@@ -328,23 +386,15 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
                         continue
                     checked_paths.add(rel_path)
 
-                    # Verifica se o arquivo existe
-                    full_candidate = Path(os.path.expanduser(mp3_dir_str)).parent / rel_path
-                    if not full_candidate.exists():
-                        # Procura em outros volumes
-                        found = False
-                        if Path("/Volumes").exists():
-                            for vol in Path("/Volumes").iterdir():
-                                if (vol / rel_path).exists():
-                                    found = True
-                                    break
-                        if not found and not Path(rel_path).exists():
-                            filename = Path(rel_path).name
-                            missing_tracks.append({
-                                "caminho_serato": rel_path,
-                                "nome": filename,
-                                "crate_origem": crate_file.stem.replace('%%', ' -> ')
-                            })
+                    # Verifica se o arquivo existe usando resolução inteligente de volumes
+                    resolved = resolve_serato_path(rel_path, mp3_base)
+                    if not resolved:
+                        filename = Path(rel_path).name
+                        missing_tracks.append({
+                            "caminho_serato": rel_path,
+                            "nome": filename,
+                            "crate_origem": crate_file.stem.replace('%%', ' -> ')
+                        })
             except Exception:
                 continue
 
@@ -410,8 +460,8 @@ def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
     Restaura ou religa o arquivo de som ao local esperado pela crate do Serato.
     Se a fonte estiver em .Trashes, move de volta; caso contrário, copia.
     """
-    base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
-    target_path = base_path.parent / rel_path
+    mp3_base = Path(os.path.expanduser(mp3_base_dir)).resolve()
+    target_path = get_serato_target_path(rel_path, mp3_base)
     src = Path(source_path_str)
 
     if not src.exists():
@@ -428,6 +478,10 @@ def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
             "sucesso": True,
             "arquivo": target_path.name,
             "destino": str(target_path),
+            "mensagem": f"Faixa religada com sucesso ao Serato em: {target_path}"
+        }
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
             "mensagem": f"Faixa religada com sucesso ao Serato em: {target_path}"
         }
     except Exception as e:
@@ -470,6 +524,93 @@ def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
     }, ensure_ascii=False), flush=True)
 
 
+def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str):
+    """
+    Remove entradas de faixas perdidas (inexistentes no disco) de todas as crates do Serato.
+    Preserva 100% dos cabeçalhos vrsn e ovct e reescreve os blocos otrk válidos.
+    Cria backup automático .crate.bak antes de alterar qualquer arquivo.
+    """
+    subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "Subcrates"
+    if not subcrates_dir.exists():
+        subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "Subcrates"
+
+    if not subcrates_dir.exists():
+        return {"sucesso": False, "erro": f"Pasta de Subcrates não encontrada em: {serato_dir_str}"}
+
+    mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
+    total_removed = 0
+    crates_affected = []
+
+    for crate_file in sorted(subcrates_dir.glob("*.crate")):
+        try:
+            content = crate_file.read_bytes()
+            pos = 0
+            header_end = 0
+            otrk_blocks = []
+
+            # 1. Varre o arquivo .crate separando o cabeçalho (vrsn/ovct) dos blocos de faixas (otrk)
+            while pos < len(content):
+                tag = content[pos:pos+4]
+                if len(tag) < 4:
+                    break
+                length = int.from_bytes(content[pos+4:pos+8], byteorder='big')
+                if tag == b'otrk':
+                    block_end = pos + 8 + length
+                    block = content[pos:block_end]
+                    p_idx = block.find(b'ptrk')
+                    if p_idx != -1 and p_idx + 8 <= len(block):
+                        p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
+                        path_str = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
+                        otrk_blocks.append((path_str, block))
+                    pos = block_end
+                else:
+                    pos += 8 + length
+                    header_end = pos
+
+            if not otrk_blocks:
+                continue
+
+            header_bytes = content[:header_end]
+            kept_blocks = []
+            removed_in_this = 0
+
+            # 2. Verifica existência real no disco de cada faixa
+            for rel_path, block in otrk_blocks:
+                resolved = resolve_serato_path(rel_path, mp3_base)
+                if resolved and resolved.exists():
+                    kept_blocks.append(block)
+                else:
+                    removed_in_this += 1
+
+            # 3. Se houver faixas perdidas removidas, cria backup e reescreve a crate
+            if removed_in_this > 0:
+                new_content = header_bytes + b''.join(kept_blocks)
+                backup_path = crate_file.with_suffix('.crate.bak')
+                if not backup_path.exists():
+                    crate_file.rename(backup_path)
+                crate_file.write_bytes(new_content)
+
+                total_removed += removed_in_this
+                crates_affected.append({
+                    "crate": crate_file.stem.replace('%%', ' -> '),
+                    "removidas": removed_in_this,
+                    "restantes": len(kept_blocks)
+                })
+
+        except Exception as e:
+            crates_affected.append({
+                "crate": crate_file.name,
+                "erro": str(e)
+            })
+            continue
+
+    return {
+        "sucesso": True,
+        "total_removidas": total_removed,
+        "crates_afetadas": crates_affected
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Sound Seal & Relocate")
     parser.add_argument("--scan", action="store_true", help="Gera Sound Seals na pasta MP3")
@@ -483,6 +624,7 @@ def main():
     parser.add_argument("--rel-path", type=str, default="", help="Caminho relativo esperado pelo Serato")
     parser.add_argument("--source-path", type=str, default="", help="Caminho do arquivo localizado no HD")
     parser.add_argument("--batch-relink", type=str, default="", help="JSON de lista de faixas a religar")
+    parser.add_argument("--remove-lost", action="store_true", help="Remove faixas perdidas de todas as crates do Serato")
 
     args = parser.parse_args()
 
@@ -526,6 +668,12 @@ def main():
         res = scan_missing_and_relocate(serato_dir, mp3_dir)
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0)
+
+    if args.remove_lost:
+        serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
+        res = remove_lost_tracks_from_crates(serato_dir, mp3_dir)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
 
     parser.print_help()
 

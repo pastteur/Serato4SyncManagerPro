@@ -43,15 +43,25 @@ CUE_COLORS = {
 
 
 def build_serato_cue_entry(index: int, pos_ms: int, color_bytes: bytes, label: str) -> bytearray:
-    """Monta um bloco binário CUE oficial do Serato."""
+    """
+    Monta um bloco binário CUE oficial do Serato Markers2.
+    Layout binário oficial (Holzhaus/serato-tags spec):
+      00: uint8_t index (0..7)
+      01: uint8_t flag (0x00)
+      02-05: uint32_t position in milliseconds (LITTLE-ENDIAN)
+      06: uint8_t separator (0x00)
+      07-09: 3 bytes RGB color (ex: b'\xcc\x00\x00')
+      0a-0b: 2 bytes padding (b'\x00\x00')
+      0c..: UTF-8 label (null-terminated)
+    """
     data = bytearray()
-    data.append(0)           # byte nulo
-    data.append(index)       # índice do cue (0..7)
-    data.extend(int(pos_ms).to_bytes(4, byteorder='big'))
-    data.append(0)
-    data.extend(color_bytes) # cor RGB (3 bytes)
-    data.extend(b'\x00\x00')
-    data.extend(label.encode('utf-8') + b'\x00')
+    data.append(index)                                              # Offset 00: índice do cue (0..7)
+    data.append(0)                                                  # Offset 01: flag / byte nulo
+    data.extend(int(pos_ms).to_bytes(4, byteorder='little'))        # Offset 02-05: posição ms (LITTLE-ENDIAN)
+    data.append(0)                                                  # Offset 06: separador
+    data.extend(color_bytes[:3])                                    # Offset 07-09: cor RGB (3 bytes)
+    data.extend(b'\x00\x00')                                        # Offset 0a-0b: padding
+    data.extend(label.encode('utf-8') + b'\x00')                    # Offset 0c..: label null-terminated
 
     entry = bytearray(b'CUE\x00')
     entry.extend(len(data).to_bytes(4, byteorder='big'))
@@ -128,17 +138,29 @@ def generate_and_save_serato_cues(filepath_str: str):
 
         cues = calculate_smart_cues(duration, bpm_val)
 
-        # Monta payload binário Serato Markers2
-        payload = bytearray(b'\x01\x01COLOR\x00\x00\x00\x00\x04\x00\xff\xff\xffBPMLOCK\x00\x00\x00\x00\x01\x00\x00')
+        # Monta payload binário Serato Markers2 oficial
+        # Estrutura decodificada oficial Serato DJ Pro:
+        # 1. Magic bytes \x01\x01
+        # 2. COLOR chunk: 'COLOR\0' + 4-byte len (4) + 4-byte data (\x00\xff\xff\xff)
+        # 3. BPMLOCK chunk: 'BPMLOCK\0' + 4-byte len (1) + 1-byte data (\x00) + 1-byte pad (\x00)
+        # 4. Sequência de blocos CUE oficiais
+        inner = bytearray(b'\x01\x01COLOR\x00\x00\x00\x00\x04\x00\xff\xff\xffBPMLOCK\x00\x00\x00\x00\x01\x00\x00')
         for c in cues:
             color_bytes = CUE_COLORS.get(c["color"], b'\xcc\x00\x00')
             cue_block = build_serato_cue_entry(c["index"], c["pos_ms"], color_bytes, c["label"])
-            payload.extend(cue_block)
+            inner.extend(cue_block)
 
-        base64_str = base64.b64encode(payload)
-        serato_data = b'\x01\x01' + base64_str
+        # Codifica em base64 com quebra de linha a cada 72 chars (padrão Serato)
+        b64_raw = base64.b64encode(bytes(inner)).decode('ascii')
+        b64_lines = '\n'.join(b64_raw[i:i+72] for i in range(0, len(b64_raw), 72))
+        b64_bytes = b64_lines.encode('ascii')
 
-        # Grava tag GEOB no arquivo MP3
+        # Formato final Serato: \x01\x01 + base64, preenchido com null bytes (\x00) até 470 bytes mínimos
+        serato_data = b'\x01\x01' + b64_bytes
+        if len(serato_data) < 470:
+            serato_data = serato_data.ljust(470, b'\x00')
+
+        # Grava tag GEOB no arquivo MP3 com ID3v2.3 (obrigatório para Serato DJ Pro)
         if hasattr(audio, 'tags'):
             if audio.tags is None:
                 audio.add_tags()
@@ -149,7 +171,12 @@ def generate_and_save_serato_cues(filepath_str: str):
                 desc='Serato Markers2',
                 data=serato_data
             )
-            audio.save()
+            # Remove Markers_ legado se existir para evitar conflito de prioridade
+            if 'GEOB:Serato Markers_' in audio.tags:
+                del audio.tags['GEOB:Serato Markers_']
+
+            # CRÍTICO: Serato DJ Pro requer ID3v2.3, NÃO v2.4
+            audio.save(v2_version=3)
 
         return {
             "sucesso": True,

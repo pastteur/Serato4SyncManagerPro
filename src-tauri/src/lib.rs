@@ -840,6 +840,32 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn remove_lost_tracks(
+        app: AppHandle,
+        mp3_path: String,
+        serato_path: String,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "sound_seal.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--remove-lost");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+        cmd.arg("--serato");
+        cmd.arg(&serato_path);
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Erro ao executar sound_seal.py --remove-lost: {e}"))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result: String = stdout.lines().last().unwrap_or("{}").to_string();
+        Ok(result)
+    }
+
+    #[tauri::command]
     pub async fn match_tracks(
         app: AppHandle,
         input_type: String,
@@ -1188,6 +1214,7 @@ pub fn run() {
             commands::scan_missing_relocate,
             commands::relink_track,
             commands::batch_relink_tracks,
+            commands::remove_lost_tracks,
             commands::match_tracks,
             commands::scan_audio_health,
             commands::repair_track_online,

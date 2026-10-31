@@ -42,10 +42,10 @@ AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.
 # Padrões rápidos e seguros de remoção de domínios, sites e sujeiras de download da web
 NOISE_PATTERNS = [
     re.compile(r'\[\s*(?:www|http)[^\]]*\]?', re.IGNORECASE),
-    re.compile(r'\b(?:by\s+)?www[^\s\-]*\s*(?:RadioFLy|ws|com|net|org)?\b', re.IGNORECASE),
+    # Domínios com ou sem protocolo, respeitando limites de palavras e glued names (ex: .NetWallace -> Wallace)
+    re.compile(r'\b(?:https?://)?(?:www\.)[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|net|org|website|site|top|ru|io|co|me|vip|cc|club|online|link|info|ws|biz|fm|dj|mp3s?)(?=[A-Z\s\-_]|$)', re.IGNORECASE),
+    re.compile(r'\b(?:by\s+)?www\s*RadioFLy(?:\s*ws)?\b', re.IGNORECASE),
     re.compile(r'\bRadioFLy\s*ws\b', re.IGNORECASE),
-    # Domínios completos ou com glued text (ex: wWw.FunkNeurotico.NetWallace -> Wallace)
-    re.compile(r'\b(?:https?://)?(?:www\.)[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|website|ws|biz|fm|dj|mp3s?)(?=[A-Z\s\-_]|$)', re.IGNORECASE),
     re.compile(r'\b(?:myfreemp3|123savemp3|spotidown|mp3clan|convert2mp3|y2mate|savefrom|360ytmp3)\.[a-z]{2,5}\b', re.IGNORECASE),
     re.compile(r'\bmy-free-mp3s?\.com\b', re.IGNORECASE),
     re.compile(r'\bwww[a-z0-9\-]+(?:com|net|br|org)[a-z0-9\-]*\b', re.IGNORECASE),
@@ -53,8 +53,15 @@ NOISE_PATTERNS = [
     re.compile(r'\b[a-zA-Z0-9\-]+\s+spb\s+ru\b', re.IGNORECASE),
     re.compile(r'tarapiwww\b', re.IGNORECASE),
     re.compile(r'(?:^|\s)www[\.\-_/]*(?:\s|$)', re.IGNORECASE),
+    re.compile(r'\s+www\s*$', re.IGNORECASE),
+    re.compile(r'\s+www\.\s*$', re.IGNORECASE),
     re.compile(r'\bwww\b[\.\-_/]*', re.IGNORECASE),
     re.compile(r'^\s*www\.\s*', re.IGNORECASE),
+    # Tags de videoclipes / YouTube / Qualidade que NÃO são nomes nem álbuns
+    re.compile(r'[\(\[]\s*(?:clipe|vídeo|video|áudio|audio|webclipe|lyric\s*video|music\s*video|official\s*(?:video|audio|music\s*video|lyric\s*video)?)\s*(?:oficial)?(?:\s*\(?[0-9]{3,4}p\)?|\s*\(?hd\)?|\s*\(?4k\)?)?\s*[\)\]]', re.IGNORECASE),
+    re.compile(r'\b(?:clipe|vídeo|video|áudio|audio|webclipe)\s*oficial\b', re.IGNORECASE),
+    re.compile(r'[\(\[]\s*(?:hd|hq|4k|1080p|720p)\s*[\)\]]', re.IGNORECASE),
+    re.compile(r'\s*-\s*(?:clipe|vídeo|video|áudio|audio|webclipe)\s*oficial\b', re.IGNORECASE),
     re.compile(r'-[a-f0-9]{6,8}\b', re.IGNORECASE),
     re.compile(r'\[\s*Release\s*Date\s*[-–]\s*\d{4}\s*\]', re.IGNORECASE),
     re.compile(r'\[FDM\]', re.IGNORECASE),
@@ -90,7 +97,7 @@ PALCOMP3_UPLOADERS = {
 TRAILING_BPM_KEY = re.compile(r'\s*\.\s*\d{2,3}(?:\.\d+)?\s*\.\s*[A-G][b#]?(?:m|maj|min)?\s*$', re.IGNORECASE)
 TRAILING_DOTS = re.compile(r'[\s\._]+$')
 TRAILING_PUNCT = re.compile(r'(?<=\s)[\._]+$|\.{2,}$|[\s_]+$')
-LEADING_TRACK_NUM = re.compile(r'^\d{1,3}\s*[-–.]\s*')
+LEADING_TRACK_NUM = re.compile(r'^\d{1,3}(?:\s*[-–.]\s*|\s+)(?=[A-Za-zÀ-ÿ])')
 
 TAG_CACHE_DB = Path.home() / ".serato_tag_cache.sqlite"
 _SEEDED_TITLES = set()
@@ -372,7 +379,12 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
 
     # 2. Remove URLs e sujeiras de download da web
     for pattern in NOISE_PATTERNS:
-        text = pattern.sub('', text)
+        text = pattern.sub(' ', text)
+
+    # Normaliza hífens e espaçamentos uniformes
+    text = re.sub(r'\s*-\s*', ' - ', text)
+    text = re.sub(r'\s*-\s*-\s*', ' - ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
 
     # 3. Extrai e remove cauda/marcadores de BPM e Key (ex: " . 80 . Fm", " . 130 . Dm", " . 128")
     detected_bpm = ""
@@ -394,8 +406,8 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         detected_bpm = bpm_isolated.group(1)
         text = re.sub(r'\s*\.\s*\d{2,3}(?:\.\d+)?\s*(?:\.|$)', ' ', text)
 
-    # 4. Remove numeração de faixa inicial se houver (ex: "01 - ", "11. ")
-    text = re.sub(r'^\d{1,3}\s*[-–.]\s*', '', text)
+    # 4. Remove numeração de faixa inicial se houver (ex: "01 - ", "11. ", "09 ")
+    text = LEADING_TRACK_NUM.sub('', text)
 
     # 5. Remove duplicação de parênteses/colchetes: ex (Single Version) (Single Version)
     text = re.sub(r'(\([^\)]+\))\s*\1', r'\1', text, flags=re.IGNORECASE)
@@ -425,6 +437,16 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
             continue
         if p_clean.lower() not in [u.lower() for u in unique_parts]:
             unique_parts.append(p_clean)
+
+    # Deduplica artista repetido entre Parte 0 e Parte 1 (ex: "Rich Gang feat..." e "Rich Gang ft...")
+    if len(unique_parts) >= 2:
+        def norm_art_comp(a):
+            a = unicodedata.normalize('NFKD', a or '').encode('ASCII', 'ignore').decode('utf-8').lower()
+            a = re.sub(r'\s+(?:feat\.?|ft\.?)\s+', ' feat ', a)
+            a = re.sub(r'[^\w\s]', '', a)
+            return re.sub(r'\s+', ' ', a).strip()
+        if norm_art_comp(unique_parts[0]) == norm_art_comp(unique_parts[1]):
+            unique_parts.pop(1)
 
     # Detecção de Compilação Russa / Coletânea / Uploaders de sites
     if unique_parts and (unique_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va'] or unique_parts[0].lower() in PALCOMP3_UPLOADERS):
@@ -512,6 +534,16 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     title = p_tit or clean_ex_tit
     album = p_alb or clean_ex_alb
 
+    # Se album for termo de vídeo, qualidade ou clipe, descarta para nunca sujar o nome completo
+    if album:
+        alb_lower = album.lower().strip()
+        if re.search(r'\b(?:clipe|vídeo|video|áudio|audio|webclipe|lyric|oficial|official|hd|4k|1080p|720p)\b', alb_lower):
+            album = ""
+        elif re.search(r'\b(?:remix|mix|edit|bootleg|dub|extended|radio|version|versão|vip|rework)\b', alb_lower):
+            if alb_lower not in title.lower():
+                title = f"{title} ({album})"
+            album = ""
+
     if artist and (artist.lower() in INVALID_ARTISTS or re.match(r'^\d+$', artist)):
         artist = ""
 
@@ -520,7 +552,7 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         if not re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', title, re.IGNORECASE):
             title = clean_ex_tit
 
-    # Detecção e remoção de Artista Duplicado no Título!
+    # Detecção e remoção avançada de Artista Duplicado no Título!
     if artist and title:
         art_clean = re.escape(artist.strip())
         title_stripped = re.sub(r'^' + art_clean + r'\s*[-–:]*\s*', '', title, flags=re.IGNORECASE).strip()
@@ -530,6 +562,26 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
             title_glued = re.sub(r'^' + art_clean + r'(?=[A-Z0-9])', '', title, flags=re.IGNORECASE).strip()
             if title_glued and title_glued != title:
                 title = title_glued
+
+        # Artista com feat/ft que difere na escrita (ex: "feat." vs "ft." ou colado)
+        tokens = re.split(r'\s+(?:feat\.?|ft\.?)\s+', artist, flags=re.IGNORECASE)
+        if len(tokens) == 2:
+            art1, art2 = re.escape(tokens[0].strip()), re.escape(tokens[1].strip())
+            t_feat = re.sub(rf'^{art1}\s+(?:feat\.?|ft\.?)\s+{art2}\s*[-–:]*\s*', '', title, flags=re.IGNORECASE).strip()
+            if t_feat and t_feat != title:
+                title = t_feat
+            t_glued = re.sub(rf'^{art1}\s+(?:feat\.?|ft\.?)\s+{art2}(?=[A-Z0-9])', '', title, flags=re.IGNORECASE).strip()
+            if t_glued and t_glued != title:
+                title = t_glued
+
+        # Artista principal antes de vírgula ou feat
+        main_art = re.split(r'\s+(?:feat\.?|ft\.?|vs\.?|x|&|,)\s+', artist, flags=re.IGNORECASE)[0].strip()
+        if len(main_art) >= 3:
+            main_esc = re.escape(main_art)
+            t_main = re.sub(r'^' + main_esc + r'(?:\s+(?:feat\.?|ft\.?|vs\.?|x|&|,)\s+[^–-]+?)?\s*[-–:]+\s*', '', title, flags=re.IGNORECASE).strip()
+            if t_main and t_main != title:
+                title = t_main
+
         if artist.strip().lower() == title.strip().lower():
             artist = ""
 
@@ -964,8 +1016,8 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False)
                 if crate_raiz:
                     audio.tags['TCON'] = TCON(encoding=3, text=crate_raiz)
 
-                # Salva preservando tags Serato Markers
-                audio.save()
+                # Salva preservando tags Serato Markers (ID3v2.3 obrigatório para Serato DJ)
+                audio.save(v2_version=3)
             else:
                 if novo_titulo:
                     audio['title'] = [novo_titulo]
@@ -1110,26 +1162,6 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                 needs_rename = (rename_files and f_norm != target_name and not is_collision_duplicate)
                 needs_clean = not is_name_clean
 
-                # Checagem leve de tags ID3 para garantir que faixas com nome limpo mas tags sujas/desalinhadas sejam ajustadas
-                if not needs_clean and not needs_rename and mutagen is not None:
-                    try:
-                        audio_check = mutagen.File(str(Path(root) / f))
-                        if audio_check is not None:
-                            a_cur = str(audio_check.get('TPE1', [''])[0]) if 'TPE1' in audio_check else (str(audio_check.get('artist', [''])[0]) if 'artist' in audio_check else "")
-                            t_cur = str(audio_check.get('TIT2', [''])[0]) if 'TIT2' in audio_check else (str(audio_check.get('title', [''])[0]) if 'title' in audio_check else "")
-                            a_cur_nfc = unicodedata.normalize('NFC', a_cur).strip().lower()
-                            t_cur_nfc = unicodedata.normalize('NFC', t_cur).strip().lower()
-                            res_a_nfc = unicodedata.normalize('NFC', clean_quick["artist"]).strip().lower() if clean_quick["artist"] else ""
-                            res_t_nfc = unicodedata.normalize('NFC', clean_quick["title"]).strip().lower() if clean_quick["title"] else ""
-                            if res_a_nfc:
-                                if a_cur_nfc != res_a_nfc or t_cur_nfc != res_t_nfc:
-                                    needs_clean = True
-                            else:
-                                if t_cur_nfc != res_t_nfc or not t_cur_nfc:
-                                    needs_clean = True
-                    except Exception:
-                        pass
-
                 if needs_clean or needs_rename:
                     files_to_process.append((Path(root) / f, rel_folder, f, ext))
 
@@ -1195,7 +1227,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                         audio.tags['TALB'] = TALB(encoding=3, text=clean_res['album'])
                     if clean_res['crate_raiz']:
                         audio.tags['TCON'] = TCON(encoding=3, text=clean_res['crate_raiz'])
-                    audio.save()
+                    # CRÍTICO: ID3v2.3 obrigatório para Serato DJ Pro (v2.4 não é lido)
+                    audio.save(v2_version=3)
                 else:
                     if clean_res['title']: audio['title'] = [clean_res['title']]
                     if clean_res['artist']: audio['artist'] = [clean_res['artist']]
@@ -1247,8 +1280,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
         except Exception as e:
             errors.append(f"{filename}: {e}")
 
-        # Streaming de progresso a cada 10 arquivos ou no final
-        if idx % 10 == 0 or idx == total:
+        # Streaming de progresso a cada 5 arquivos ou no final
+        if idx % 5 == 0 or idx == total:
             pct = round((idx / total) * 100, 1)
             print(json.dumps({
                 "tipo": "progresso",

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw } from 'lucide-react';
+import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw, XCircle } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 interface SoundSealProps {
@@ -43,6 +43,10 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     atualizados: number;
     faixa_atual: string;
   } | null>(null);
+
+  // Remover faixas perdidas das crates do Serato
+  const [isRemovingLost, setIsRemovingLost] = useState<boolean>(false);
+  const [removeLostResult, setRemoveLostResult] = useState<any>(null);
 
   // Modal de Confirmação em Tela (sem popups nativos que travam)
   const [modalConfig, setModalConfig] = useState<{
@@ -370,6 +374,46 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     });
   };
 
+  // Remover faixas perdidas de todas as crates do Serato
+  const handleRemoveLostTracks = () => {
+    if (!seratoPath || !mp3Path) {
+      onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de remover faixas perdidas.');
+      return;
+    }
+    const totalLost = relocateResults.length;
+    setModalConfig({
+      isOpen: true,
+      title: '🗑️ Remover Faixas Perdidas das Crates',
+      message: `Deseja remover as ${totalLost} faixas perdidas das crates do Serato?\n\n⚠️ Esta ação reescreve os arquivos .crate eliminando referências a arquivos inexistentes.\n\nBackups .bak serão criados automaticamente. Reinicie o Serato DJ após a operação.`,
+      confirmText: `Remover ${totalLost} Referências Perdidas`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRemovingLost(true);
+        setRemoveLostResult(null);
+        onAddLog(`🗑️ Removendo ${totalLost} faixas perdidas de todas as crates do Serato...`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const resJson = await invoke<string>('remove_lost_tracks', { mp3Path, seratoPath });
+            const data = JSON.parse(resJson);
+            setRemoveLostResult(data);
+            if (data.sucesso) {
+              onAddLog(`✅ Concluído! ${data.total_removidas} entradas removidas de ${data.crates_afetadas?.length || 0} crates. Reinicie o Serato DJ para ver as mudanças.`);
+              handleScanRelocate();
+            } else {
+              onAddLog(`❌ Erro: ${data.erro || 'Desconhecido'}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha ao remover faixas: ${e}`);
+        } finally {
+          setIsRemovingLost(false);
+        }
+      }
+    });
+  };
+
   // Religar faixa individual
   const handleRelinkSingle = async (relPath: string, sourcePath: string, nome: string) => {
     onAddLog(`⚡ Relocate: Religando ${nome} ao Serato...`);
@@ -533,6 +577,19 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                 <Search className={`w-3.5 h-3.5 ${isScanningRelocate ? 'animate-spin' : ''}`} />
                 <span>{isScanningRelocate ? 'Procurando...' : '🔍 Rastrear Músicas Perdidas'}</span>
               </button>
+
+              {relocateResults.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleRemoveLostTracks}
+                  disabled={isScanningRelocate || isRelinkingBatch || isRemovingLost}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-900/70 hover:bg-rose-800 text-rose-200 border border-rose-700/50 shadow-lg shadow-rose-950/40 transition disabled:opacity-30 cursor-pointer"
+                  title="Remove entradas inexistentes de todas as crates do Serato (backup .bak automático)"
+                >
+                  <XCircle className={`w-3.5 h-3.5 ${isRemovingLost ? 'animate-spin' : ''}`} />
+                  <span>{isRemovingLost ? 'Removendo das Crates...' : `🗑️ Remover Perdidas das Crates (${relocateResults.length})`}</span>
+                </button>
+              )}
             </>
           )}
         </div>
