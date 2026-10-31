@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 export interface TagDoctorItem {
@@ -73,8 +73,10 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
   const [totalFound, setTotalFound] = useState<number>(0);
   const [totalDirty, setTotalDirty] = useState<number>(0);
-  const [page, setPage] = useState<number>(1);
-  const pageSize = 50;
+  const [displayLimit, setDisplayLimit] = useState<number>(0); // 0 = Sem limite / Tudo numa lista só
+  const [statusFilter, setStatusFilter] = useState<'all' | 'dirty' | 'clean'>('all');
+  const [sortField, setSortField] = useState<'arquivo' | 'crate' | 'tag' | 'bpm' | 'status'>('status');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
 
@@ -128,14 +130,15 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
-  // Carrega lista de faixas conforme filtros e paginação
+  // Carrega lista de faixas conforme filtros (tudo numa lista só ou com limite customizável)
   const loadScan = async (
-    targetPage: number = page,
+    targetPage: number = 1,
     search: string = searchTerm,
     crate: string = selectedCrate,
     sub: string = selectedSubcrate,
     incSubs: boolean = includeSubcrates,
-    mode: 'full' | 'crate' | 'dj' = namingMode
+    mode: 'full' | 'crate' | 'dj' = namingMode,
+    limit: number = displayLimit
   ) => {
     if (!mp3Path) {
       onAddLog('⚠️ Selecione a pasta MP3 Master antes de rodar o Higienizador de Tags.');
@@ -155,11 +158,10 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
       const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
       if (isTauri) {
         const { invoke } = await import('@tauri-apps/api/core');
-        const offset = (targetPage - 1) * pageSize;
         const resJson = await invoke<string>('scan_tags_doctor', {
           mp3Path,
-          limit: pageSize,
-          offset,
+          limit: limit <= 0 ? 0 : limit,
+          offset: 0,
           search: search || null,
           crateRaiz: crate || null,
           subcrate: sub || null,
@@ -186,6 +188,60 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // Itens filtrados e ordenados em tempo real (sem abas)
+  const filteredAndSortedItems = useMemo(() => {
+    let result = [...items];
+
+    if (statusFilter === 'dirty') {
+      result = result.filter(it => it.precisa_limpeza);
+    } else if (statusFilter === 'clean') {
+      result = result.filter(it => !it.precisa_limpeza);
+    }
+
+    result.sort((a, b) => {
+      let cmp = 0;
+      if (sortField === 'arquivo') {
+        cmp = a.arquivo_atual.localeCompare(b.arquivo_atual, undefined, { numeric: true, sensitivity: 'base' });
+      } else if (sortField === 'crate') {
+        cmp = (a.crate_completa || a.crate_raiz).localeCompare(b.crate_completa || b.crate_raiz);
+      } else if (sortField === 'tag') {
+        const artA = `${a.artista_sugerido || ''} - ${a.titulo_sugerido || ''}`;
+        const artB = `${b.artista_sugerido || ''} - ${b.titulo_sugerido || ''}`;
+        cmp = artA.localeCompare(artB, undefined, { numeric: true, sensitivity: 'base' });
+      } else if (sortField === 'bpm') {
+        const bpmA = parseFloat(a.bpm) || 0;
+        const bpmB = parseFloat(b.bpm) || 0;
+        cmp = bpmA - bpmB;
+      } else if (sortField === 'status') {
+        cmp = (a.precisa_limpeza === b.precisa_limpeza) ? 0 : a.precisa_limpeza ? 1 : -1;
+      }
+      return sortOrder === 'asc' ? cmp : -cmp;
+    });
+
+    return result;
+  }, [items, statusFilter, sortField, sortOrder]);
+
+  const handleSort = (field: 'arquivo' | 'crate' | 'tag' | 'bpm' | 'status') => {
+    if (sortField === field) {
+      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortOrder(field === 'status' ? 'desc' : 'asc');
+    }
+  };
+
+  const handleSelectAllDisplayed = () => {
+    setSelectedIds(new Set(filteredAndSortedItems.map(it => it.id)));
+  };
+
+  const handleSelectOnlyPending = () => {
+    setSelectedIds(new Set(filteredAndSortedItems.filter(it => it.precisa_limpeza).map(it => it.id)));
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedIds(new Set());
   };
 
   // Escuta eventos de streaming do batch apply
@@ -232,27 +288,32 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     };
   }, [mp3Path]);
 
-  // Identificação inteligente de Artistas Faltantes via MusicBrainz e Catálogo Local
+  // Identificação inteligente de Artistas e Títulos Faltantes via MusicBrainz e Catálogo Local
   const handleEnrichArtists = async () => {
     setIsEnriching(true);
-    onAddLog('🔍 Consultando base de metadados e MusicBrainz para identificar artistas faltantes...');
+    onAddLog('🔍 Consultando base de metadados e MusicBrainz para auto-completar artistas e títulos...');
     try {
       const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
       if (isTauri) {
         const { invoke } = await import('@tauri-apps/api/core');
+        const targetItems = selectedIds.size > 0
+          ? items.filter(it => selectedIds.has(it.id))
+          : items;
+
         const resJson = await invoke<string>('enrich_missing_artists', {
-          itemsJson: JSON.stringify(items)
+          itemsJson: JSON.stringify(targetItems)
         });
         const data = JSON.parse(resJson);
         if (data.sucesso && data.items) {
-          setItems(data.items);
-          onAddLog(`✅ ${data.total_enriquecidos} artista(s) identificado(s) e preenchido(s) com sucesso via MusicBrainz / Catálogo!`);
+          const updatedMap = new Map<string, TagDoctorItem>(data.items.map((it: TagDoctorItem) => [it.id, it]));
+          setItems(prev => prev.map(it => updatedMap.get(it.id) || it));
+          onAddLog(`✅ ${data.total_enriquecidos} faixa(s) enriquecida(s) com Artista & Título via MusicBrainz / Catálogo!`);
         } else {
           onAddLog(`ℹ️ Nenhuma nova correspondência encontrada.`);
         }
       }
     } catch (e) {
-      onAddLog(`❌ Erro ao identificar artistas: ${e}`);
+      onAddLog(`❌ Erro ao auto-completar artistas e títulos: ${e}`);
     } finally {
       setIsEnriching(false);
     }
@@ -327,7 +388,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
             if (data.sucesso) {
               onAddLog(`🎯 Concluído! ${data.atualizados} música(s) atualizadas com sucesso nas tags oficiais.`);
-              loadScan(page, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
             } else {
               onAddLog(`❌ Erro ao gravar tags: ${data.erro}`);
             }
@@ -401,21 +462,18 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   const handleCrateChange = (crateName: string) => {
     setSelectedCrate(crateName);
     setSelectedSubcrate(''); // Reseta subcrate
-    setPage(1);
     loadScan(1, searchTerm, crateName, '', includeSubcrates);
   };
 
   // Mudança de Subcrate
   const handleSubcrateChange = (subPath: string) => {
     setSelectedSubcrate(subPath);
-    setPage(1);
     loadScan(1, searchTerm, selectedCrate, subPath, includeSubcrates);
   };
 
   // Toggle incluir subcrates
   const handleToggleIncludeSubcrates = (inc: boolean) => {
     setIncludeSubcrates(inc);
-    setPage(1);
     loadScan(1, searchTerm, selectedCrate, selectedSubcrate, inc);
   };
 
@@ -486,28 +544,28 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             <span>{isLoading ? 'Analisando...' : '🔍 Escanear'}</span>
           </button>
 
-          {/* Botão Aplicar Página */}
+          {/* Botão Aplicar Selecionadas */}
           <button
             type="button"
             onClick={handleApplyCleanPage}
             disabled={isLoading || isApplying || isBatchApplying || selectedIds.size === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 transition disabled:opacity-40 cursor-pointer"
-            title="Aplica as tags somente para as faixas selecionadas nesta página"
+            title="Aplica as tags somente para as faixas selecionadas"
           >
             <Sparkles className="w-3.5 h-3.5 text-serato-cyan" />
-            <span>{isApplying ? 'Gravando...' : `✍️ Aplicar Página (${selectedIds.size})`}</span>
+            <span>{isApplying ? 'Gravando...' : `✍️ Aplicar Selecionadas (${selectedIds.size})`}</span>
           </button>
 
-          {/* Botão Auto-Identificar Artistas via MusicBrainz */}
+          {/* Botão Auto-Identificar Artistas e Títulos via MusicBrainz */}
           <button
             type="button"
             onClick={handleEnrichArtists}
             disabled={isLoading || isApplying || isBatchApplying || isEnriching || items.length === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border border-cyan-700/60 transition disabled:opacity-40 cursor-pointer shadow-sm"
-            title="Consulta o catálogo e MusicBrainz para identificar o artista das faixas que estão sem artista"
+            title="Consulta o catálogo e MusicBrainz para identificar artistas e títulos das faixas que estão sem artista ou desconhecidas"
           >
             <Music className={`w-3.5 h-3.5 ${isEnriching ? 'animate-spin text-serato-gold' : 'text-serato-cyan'}`} />
-            <span>{isEnriching ? 'Identificando...' : '🎧 Auto-Completar Artistas'}</span>
+            <span>{isEnriching ? 'Identificando...' : '🎧 Auto-Completar Artistas & Títulos'}</span>
           </button>
 
           {/* Botão de Execução em Lote por Crate ou Biblioteca */}
@@ -609,7 +667,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             onChange={(e) => {
               const newMode = e.target.value as 'full' | 'crate' | 'dj';
               setNamingMode(newMode);
-              loadScan(page, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, newMode);
+              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, newMode);
             }}
             className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer"
           >
@@ -679,39 +737,211 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         </div>
       )}
 
+      {/* Barra de Filtros Rápidos, Seleção e Exibição Contínua */}
+      <div className="bg-serato-header/50 border border-serato-cardBorder p-2 rounded-lg flex flex-wrap items-center justify-between gap-3 shrink-0">
+        {/* Pílulas de Status */}
+        <div className="flex items-center gap-1.5 bg-serato-dark/80 p-1 rounded-lg border border-serato-cardBorder text-xs">
+          <button
+            type="button"
+            onClick={() => setStatusFilter('all')}
+            className={`px-2.5 py-1 rounded font-semibold transition cursor-pointer ${
+              statusFilter === 'all'
+                ? 'bg-serato-card text-white shadow-sm border border-serato-cardBorder'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            Todas ({items.length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter('dirty')}
+            className={`px-2.5 py-1 rounded font-semibold transition cursor-pointer flex items-center gap-1.5 ${
+              statusFilter === 'dirty'
+                ? 'bg-amber-950/40 text-amber-300 shadow-sm border border-amber-600/50'
+                : 'text-slate-400 hover:text-amber-400'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-serato-gold inline-block"></span>
+            Para Ajustar ({items.filter(it => it.precisa_limpeza).length})
+          </button>
+          <button
+            type="button"
+            onClick={() => setStatusFilter('clean')}
+            className={`px-2.5 py-1 rounded font-semibold transition cursor-pointer flex items-center gap-1.5 ${
+              statusFilter === 'clean'
+                ? 'bg-emerald-950/40 text-emerald-300 shadow-sm border border-emerald-600/50'
+                : 'text-slate-400 hover:text-emerald-400'
+            }`}
+          >
+            <span className="w-2 h-2 rounded-full bg-serato-neonGreen inline-block"></span>
+            Limpas ({items.filter(it => !it.precisa_limpeza).length})
+          </button>
+        </div>
+
+        {/* Botões de Seleção Rápida */}
+        <div className="flex items-center gap-2 text-xs">
+          <button
+            type="button"
+            onClick={handleSelectAllDisplayed}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-800 text-slate-300 border border-serato-cardBorder cursor-pointer transition font-medium"
+            title="Seleciona todas as faixas exibidas na lista para aplicação imediata"
+          >
+            <CheckSquare className="w-3.5 h-3.5 text-serato-cyan" />
+            <span>Selecionar Tudo ({filteredAndSortedItems.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleSelectOnlyPending}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-800 text-amber-300 border border-amber-600/40 cursor-pointer transition font-medium"
+            title="Seleciona apenas as faixas que precisam de ajuste"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-serato-gold" />
+            <span>Selecionar Pendentes ({filteredAndSortedItems.filter(it => it.precisa_limpeza).length})</span>
+          </button>
+
+          {selectedIds.size > 0 && (
+            <button
+              type="button"
+              onClick={handleDeselectAll}
+              className="flex items-center gap-1 px-2 py-1 rounded text-slate-400 hover:text-slate-200 cursor-pointer transition"
+            >
+              <Square className="w-3.5 h-3.5" />
+              <span>Desmarcar ({selectedIds.size})</span>
+            </button>
+          )}
+        </div>
+
+        {/* Seletor de Limite de Exibição (Sem Abas) */}
+        <div className="flex items-center gap-2 text-xs">
+          <span className="text-slate-400 font-medium">Exibição:</span>
+          <select
+            value={displayLimit}
+            onChange={(e) => {
+              const newLimit = parseInt(e.target.value, 10);
+              setDisplayLimit(newLimit);
+              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, namingMode, newLimit);
+            }}
+            className="bg-serato-dark border border-serato-cardBorder text-slate-200 font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer"
+          >
+            <option value={0}>♾️ Toda a Biblioteca (sem abas)</option>
+            <option value={1000}>1.000 faixas</option>
+            <option value={500}>500 faixas</option>
+            <option value={200}>200 faixas</option>
+          </select>
+        </div>
+      </div>
+
       {/* Tabela De / Para (Antes vs Depois) */}
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
         <div className="overflow-y-auto flex-1">
           <table className="w-full text-left text-xs">
-            <thead className="bg-serato-header text-serato-muted font-mono uppercase text-[10px] border-b border-serato-cardBorder sticky top-0 z-10">
+            <thead className="bg-serato-header text-serato-muted font-mono uppercase text-[10px] border-b border-serato-cardBorder sticky top-0 z-10 select-none">
               <tr>
-                <th className="py-2 px-3 w-8 text-center">
+                <th className="py-2.5 px-3 w-8 text-center">
                   <input
                     type="checkbox"
-                    checked={items.length > 0 && selectedIds.size === items.length}
-                    onChange={toggleSelectAll}
-                    className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0"
+                    checked={filteredAndSortedItems.length > 0 && selectedIds.size === filteredAndSortedItems.length}
+                    onChange={() => {
+                      if (selectedIds.size === filteredAndSortedItems.length) {
+                        setSelectedIds(new Set());
+                      } else {
+                        setSelectedIds(new Set(filteredAndSortedItems.map(it => it.id)));
+                      }
+                    }}
+                    className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0 cursor-pointer"
                   />
                 </th>
-                <th className="py-2 px-3">Como Está no Disco (Original)</th>
-                <th className="py-2 px-3 w-36">Crate / Pasta Raiz</th>
-                <th className="py-2 px-3 w-6 text-center"></th>
-                <th className="py-2 px-3">Tags Oficiais & Nome Sugerido</th>
-                <th className="py-2 px-3 w-28 text-center">BPM & Tom</th>
-                <th className="py-2 px-3 w-16 text-center">Status</th>
+
+                <th 
+                  onClick={() => handleSort('arquivo')} 
+                  className="py-2.5 px-3 cursor-pointer hover:text-white transition"
+                  title="Clique para ordenar por nome do arquivo no disco"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Como Está no Disco (Original)</span>
+                    {sortField === 'arquivo' ? (
+                      sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-serato-cyan" /> : <ArrowDown className="w-3 h-3 text-serato-cyan" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 opacity-30" />
+                    )}
+                  </div>
+                </th>
+
+                <th 
+                  onClick={() => handleSort('crate')} 
+                  className="py-2.5 px-3 w-40 cursor-pointer hover:text-white transition"
+                  title="Clique para ordenar por Crate / Pasta"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Crate / Pasta Raiz</span>
+                    {sortField === 'crate' ? (
+                      sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-serato-cyan" /> : <ArrowDown className="w-3 h-3 text-serato-cyan" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 opacity-30" />
+                    )}
+                  </div>
+                </th>
+
+                <th className="py-2.5 px-3 w-6 text-center"></th>
+
+                <th 
+                  onClick={() => handleSort('tag')} 
+                  className="py-2.5 px-3 cursor-pointer hover:text-white transition"
+                  title="Clique para ordenar por Artista & Título Sugerido"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span>Tags Oficiais & Nome Sugerido</span>
+                    {sortField === 'tag' ? (
+                      sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-serato-cyan" /> : <ArrowDown className="w-3 h-3 text-serato-cyan" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 opacity-30" />
+                    )}
+                  </div>
+                </th>
+
+                <th 
+                  onClick={() => handleSort('bpm')} 
+                  className="py-2.5 px-3 w-28 text-center cursor-pointer hover:text-white transition"
+                  title="Clique para ordenar por BPM"
+                >
+                  <div className="flex items-center justify-center gap-1.5">
+                    <span>BPM & Tom</span>
+                    {sortField === 'bpm' ? (
+                      sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-serato-cyan" /> : <ArrowDown className="w-3 h-3 text-serato-cyan" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 opacity-30" />
+                    )}
+                  </div>
+                </th>
+
+                <th 
+                  onClick={() => handleSort('status')} 
+                  className="py-2.5 px-3 w-20 text-center cursor-pointer hover:text-white transition"
+                  title="Clique para ordenar por Status (Ajustar primeiro ou Limpo primeiro)"
+                >
+                  <div className="flex items-center justify-center gap-1.5">
+                    <span>Status</span>
+                    {sortField === 'status' ? (
+                      sortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-serato-cyan" /> : <ArrowDown className="w-3 h-3 text-serato-cyan" />
+                    ) : (
+                      <ArrowUpDown className="w-3 h-3 opacity-30" />
+                    )}
+                  </div>
+                </th>
               </tr>
             </thead>
             <tbody className="divide-y divide-serato-cardBorder/40 font-mono text-[11px]">
-              {items.length === 0 ? (
+              {filteredAndSortedItems.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="text-center py-12 text-slate-500 font-sans">
                     <Music className="w-8 h-8 opacity-20 text-serato-cyan mx-auto mb-2" />
-                    <p className="font-semibold text-slate-400">Nenhuma faixa carregada no momento.</p>
-                    <p className="text-xs text-slate-600 mt-1">Selecione uma Crate ou clique em "Escanear" para analisar e ver as melhorias sugeridas.</p>
+                    <p className="font-semibold text-slate-400">Nenhuma faixa encontrada com os filtros atuais.</p>
+                    <p className="text-xs text-slate-600 mt-1">Experimente alternar o filtro de status ou a busca por texto.</p>
                   </td>
                 </tr>
               ) : (
-                items.map((item) => {
+                filteredAndSortedItems.map((item) => {
                   const isSelected = selectedIds.has(item.id);
                   const suggestedFileName = getSuggestedName(item, namingMode);
 
@@ -820,43 +1050,21 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           </table>
         </div>
 
-        {/* Paginação */}
-        <div className="bg-serato-header px-3 py-2 border-t border-serato-cardBorder flex items-center justify-between text-xs text-serato-muted shrink-0">
-          <div>
-            Exibindo página <b className="text-white">{page}</b> de <b className="text-white">{Math.max(1, Math.ceil(totalFound / pageSize))}</b> ({totalFound.toLocaleString()} faixas no escopo selecionado)
+        {/* Rodapé da Lista Contínua (Sem Abas de 50) */}
+        <div className="bg-serato-header px-4 py-2.5 border-t border-serato-cardBorder flex items-center justify-between text-xs text-serato-muted shrink-0 font-mono">
+          <div className="flex items-center gap-2">
+            <span>Exibindo <b className="text-white">{filteredAndSortedItems.length.toLocaleString()}</b> de <b className="text-white">{items.length.toLocaleString()}</b> faixas na lista contínua</span>
+            {totalDirty > 0 && (
+              <span className="text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40 font-semibold text-[11px]">
+                ⚠️ {totalDirty.toLocaleString()} precisam de ajuste no escopo total
+              </span>
+            )}
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                const newP = Math.max(1, page - 1);
-                setPage(newP);
-                loadScan(newP, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
-              }}
-              disabled={page <= 1 || isLoading}
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 disabled:opacity-30 border border-serato-cardBorder cursor-pointer"
-            >
-              <ChevronLeft className="w-3.5 h-3.5" />
-              <span>Anterior</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => {
-                const maxP = Math.ceil(totalFound / pageSize);
-                if (page < maxP) {
-                  const newP = page + 1;
-                  setPage(newP);
-                  loadScan(newP, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
-                }
-              }}
-              disabled={page >= Math.ceil(totalFound / pageSize) || isLoading}
-              className="flex items-center gap-1 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 disabled:opacity-30 border border-serato-cardBorder cursor-pointer"
-            >
-              <span>Próxima</span>
-              <ChevronRight className="w-3.5 h-3.5" />
-            </button>
+          <div className="flex items-center gap-3">
+            <span className="text-serato-cyan font-bold">
+              {selectedIds.size > 0 ? `☑️ ${selectedIds.size.toLocaleString()} faixa(s) selecionada(s)` : 'Nenhuma selecionada'}
+            </span>
           </div>
         </div>
       </div>

@@ -13,6 +13,7 @@ preservando 100% dos marcadores Serato (GEOB Markers, Beatgrids, BPM e Key).
 import sys
 import os
 import re
+import html
 import shutil
 import datetime
 import json
@@ -38,12 +39,24 @@ DEFAULT_BACKUPS_DIR = Path.home() / "pasync" / "backups"
 SERATO_INTERNAL_DB = Path.home() / "Library" / "Application Support" / "Serato" / "Library" / "master.sqlite"
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
-# Padrões rápidos e seguros de remoção de domínios, sites e sujeiras de download da web (sem catastrophic backtracking)
+# Padrões rápidos e seguros de remoção de domínios, sites e sujeiras de download da web
 NOISE_PATTERNS = [
-    re.compile(r'\b(?:https?://)?(?:www\.)?[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|mp3s?)\b(?:/[^\s\)]*)?', re.IGNORECASE),
+    re.compile(r'\[\s*(?:www|http)[^\]]*\]?', re.IGNORECASE),
+    re.compile(r'\bby\s+www\b.*?(?:ws|com|net|org|\s|$)', re.IGNORECASE),
+    # Domínios completos ou com glued text (ex: wWw.FunkNeurotico.NetWallace -> Wallace)
+    re.compile(r'\b(?:https?://)?(?:www\.)[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|website|ws|biz|fm|dj|mp3s?)(?=[A-Z\s\-_]|$)', re.IGNORECASE),
     re.compile(r'\b(?:myfreemp3|123savemp3|spotidown|mp3clan|convert2mp3|y2mate|savefrom|360ytmp3)\.[a-z]{2,5}\b', re.IGNORECASE),
     re.compile(r'\bmy-free-mp3s?\.com\b', re.IGNORECASE),
-    re.compile(r'\bwww\.[a-zA-Z0-9\-]+\.[a-z]{2,5}\b', re.IGNORECASE),
+    re.compile(r'\bwww[a-z0-9\-]+(?:com|net|br|org)[a-z0-9\-]*\b', re.IGNORECASE),
+    re.compile(r'\bwww\s+[a-zA-Z0-9\-]+\s+(?:es|ru|com|net|org|top|biz)\b', re.IGNORECASE),
+    re.compile(r'\b[a-zA-Z0-9\-]+\s+spb\s+ru\b', re.IGNORECASE),
+    re.compile(r'tarapiwww\b', re.IGNORECASE),
+    re.compile(r'\bwww\b[\.\-_/]*', re.IGNORECASE),
+    re.compile(r'^\s*www\.\s*', re.IGNORECASE),
+    re.compile(r'-[a-f0-9]{6,8}\b', re.IGNORECASE),
+    re.compile(r'\[\s*Release\s*Date\s*[-–]\s*\d{4}\s*\]', re.IGNORECASE),
+    re.compile(r'\[FDM\]', re.IGNORECASE),
+    re.compile(r'\bKondZilla\b', re.IGNORECASE),
     re.compile(r'\b\d{2,3}\s*kbps\b', re.IGNORECASE),
     re.compile(r'\[dj\s*pool\]', re.IGNORECASE),
     re.compile(r'\(dj\s*pool\)', re.IGNORECASE),
@@ -53,9 +66,23 @@ NOISE_PATTERNS = [
     re.compile(r'\(\d{3}\s*kbps\)', re.IGNORECASE),
     re.compile(r'\(official\s*(?:audio|video|music\s*video|lyric\s*video)?\)', re.IGNORECASE),
     re.compile(r'\[official\s*(?:audio|video|music\s*video|lyric\s*video)?\]', re.IGNORECASE),
+    re.compile(r'\s*-\s*cópia(?:\s*\d+)?\b', re.IGNORECASE),
+    re.compile(r'\s*-\s*copy(?:\s*\d+)?\b', re.IGNORECASE),
+    re.compile(r'\s*\(\d+\)\s*$'),
     re.compile(r'_\-_'),
     re.compile(r'-\s*-'),
 ]
+
+INVALID_ARTISTS = {
+    "rock nacional", "rock nacional 80s", "rock nacional anos 80", "mpb", "funk",
+    "sertanejo", "pop rock", "black", "axe", "axé", "pagode", "samba", "samba rock", "samba rock seu jorge",
+    "desconhecido", "unknown", "sem artista", "artista desconhecido", "various", "various artists",
+    "va", "v.a.", "320kbps", "128kbps", "256kbps", "192kbps", "sbornik", "download", "musica", "música"
+}
+
+PALCOMP3_UPLOADERS = {
+    "brazilfunkoficial", "detonafunkbsb", "funkneurotico", "portaldofunk", "sistemasertanejo"
+}
 
 # Padrão de BPM/Key no final do nome: ex: " . 80 . Fm", " . 128 . Am", " . 96 . C#"
 TRAILING_BPM_KEY = re.compile(r'\s*\.\s*\d{2,3}(?:\.\d+)?\s*\.\s*[A-G][b#]?(?:m|maj|min)?\s*$', re.IGNORECASE)
@@ -113,15 +140,25 @@ def get_cached_artist(title: str) -> str:
 
 
 def seed_tag_cache(title: str, artist: str):
-    """Alimenta o cache com títulos e artistas conhecidos da biblioteca."""
+    """Alimenta o cache com títulos e artistas conhecidos da biblioteca com validação rigorosa."""
     norm = normalize_title_for_lookup(title)
     if not norm or not artist or norm in _SEEDED_TITLES:
         return
+    art_clean = artist.strip()
+    art_lower = art_clean.lower()
+    # Rejeita números puros (ex: "01", "06"), bitrates, gêneros e "Desconhecido"
+    if re.match(r'^\d+$', art_lower) or art_lower in INVALID_ARTISTS or art_lower in PALCOMP3_UPLOADERS:
+        return
+    if re.search(r'\b(?:kbps|www|http|\.com|\.net|\.org)\b', art_lower):
+        return
+    if norm == normalize_title_for_lookup(art_clean):
+        return
+
     _SEEDED_TITLES.add(norm)
     try:
         conn = sqlite3.connect(str(TAG_CACHE_DB))
         conn.execute("INSERT OR IGNORE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, 100);",
-                     (norm, artist.strip(), title.strip()))
+                     (norm, art_clean, title.strip()))
         conn.commit()
         conn.close()
     except Exception:
@@ -130,19 +167,32 @@ def seed_tag_cache(title: str, artist: str):
 
 def lookup_musicbrainz_artist(title: str, crate: str = "") -> str:
     """Consulta MusicBrainz na nuvem com fallback no cache local."""
-    norm = normalize_title_for_lookup(title)
-    if not norm:
-        return ""
+    art, _ = lookup_musicbrainz_track(title, crate=crate)
+    return art
 
-    cached = get_cached_artist(title)
-    if cached:
-        return cached
+
+def lookup_musicbrainz_track(title: str, artist: str = "", crate: str = ""):
+    """Consulta MusicBrainz na nuvem com fallback no cache local, retornando (artista, título)."""
+    norm_t = normalize_title_for_lookup(title)
+    if not norm_t and not artist:
+        return "", ""
+
+    if norm_t:
+        cached_art = get_cached_artist(title)
+        if cached_art:
+            return cached_art, title
 
     # Consulta endpoint público do MusicBrainz
     try:
         import urllib.request
         import urllib.parse
-        q = f'recording:"{title}"'
+        if title and artist:
+            q = f'artist:"{artist}" AND recording:"{title}"'
+        elif title:
+            q = f'recording:"{title}"'
+        else:
+            q = f'artist:"{artist}"'
+
         url = f'https://musicbrainz.org/ws/2/recording/?query={urllib.parse.quote(q)}&fmt=json&limit=3'
         req = urllib.request.Request(url, headers={'User-Agent': 'Serato4SyncPro/1.0 (contact@serato4sync.pro)'})
         with urllib.request.urlopen(req, timeout=3.5) as res:
@@ -151,39 +201,66 @@ def lookup_musicbrainz_artist(title: str, crate: str = "") -> str:
             if recs:
                 best = recs[0]
                 art = best.get('artist-credit', [{}])[0].get('name', '')
+                tit = best.get('title', '')
                 score = int(best.get('score', 0))
-                if art and score >= 75:
-                    conn = sqlite3.connect(str(TAG_CACHE_DB))
-                    conn.execute("INSERT OR REPLACE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, ?);",
-                                 (norm, art.strip(), best.get('title', title), score))
-                    conn.commit()
-                    conn.close()
-                    return art.strip()
+                if (art or tit) and score >= 70:
+                    if norm_t and art:
+                        conn = sqlite3.connect(str(TAG_CACHE_DB))
+                        conn.execute("INSERT OR REPLACE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, ?);",
+                                     (norm_t, art.strip(), tit.strip() or title, score))
+                        conn.commit()
+                        conn.close()
+                    return art.strip(), tit.strip()
     except Exception:
         pass
-    return ""
+    return "", ""
 
 
 def enrich_missing_artists(items: list):
-    """Identifica artistas para itens sem artista usando MusicBrainz e Cache."""
+    """Identifica artistas e títulos para itens usando MusicBrainz e Cache."""
     init_tag_cache()
     enriched_count = 0
     updated_items = []
 
     for item in items:
-        art = (item.get("artista_sugerido") or "").strip()
+        art = (item.get("artista_sugerido") or item.get("artista_atual") or "").strip()
         tit = (item.get("titulo_sugerido") or item.get("titulo_atual") or "").strip()
         crate = item.get("crate_raiz") or ""
 
-        if not art and tit:
-            found_art = lookup_musicbrainz_artist(tit, crate)
-            if found_art:
+        # Descarta valores inválidos como "Desconhecido", "06", gêneros ou uploaders
+        if art.lower() in INVALID_ARTISTS or art.lower() in PALCOMP3_UPLOADERS or re.match(r'^\d+$', art):
+            art = ""
+
+        # Verifica se é genérico (Track 01, Faixa 1, etc.)
+        is_generic_title = bool(re.match(r'^(?:track|faixa|audio|pista|musica|música)\s*\d+$', tit, re.IGNORECASE))
+
+        # Se não tem artista, ou não tem título, ou título é genérico
+        if not art or not tit or is_generic_title:
+            found_art, found_tit = lookup_musicbrainz_track(tit if not is_generic_title else "", art, crate)
+
+            # Se não encontrou pelo título, tenta pelo stem do arquivo caso tenha hífens
+            if not found_art and not found_tit and item.get("arquivo_atual"):
+                stem = Path(item["arquivo_atual"]).stem
+                parts = [p.strip() for p in stem.split(' - ') if p.strip()]
+                if len(parts) >= 2:
+                    found_art, found_tit = lookup_musicbrainz_track(parts[1], parts[0], crate)
+
+            changed = False
+            if found_art and found_art.lower() not in INVALID_ARTISTS and found_art != art:
                 item["artista_sugerido"] = found_art
+                art = found_art
+                changed = True
+            if found_tit and (not tit or is_generic_title):
+                item["titulo_sugerido"] = found_tit
+                tit = found_tit
+                changed = True
+
+            if changed:
                 ext = Path(item["caminho"]).suffix if item.get("caminho") else ".mp3"
                 clean_res = clean_track_name(
-                    Path(item.get("caminho", "")).stem or tit,
+                    Path(item.get("caminho", "")).stem or f"{art} - {tit}",
                     rel_folder=item.get("crate_completa") or item.get("crate_raiz", ""),
-                    existing_artist=found_art,
+                    existing_artist=art,
                     existing_title=tit
                 )
                 item["arquivo_sugerido"] = f"{clean_res['fmt_completo']}{ext}"
@@ -276,8 +353,10 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     deduplica repetições infinitas de crates/álbuns no nome, deduplica artistas
     no título e garante consistência e idempotência total (f(f(x)) == f(x)).
     """
-    # 0. Normalização Unicode NFC
-    text = unicodedata.normalize('NFC', filename_no_ext)
+    # 0. Normalização Unicode NFC e decodificação de entidades HTML (&amp; etc.)
+    text = html.unescape(unicodedata.normalize('NFC', filename_no_ext))
+    if text.count('+') > 2:
+        text = text.replace('+', ' ')
 
     # 1. Identificação da Crate Raiz e Hierarquia (com normalização NFC e sem underscore)
     folder_parts = [p for p in rel_folder.replace(' -> ', '/').replace('\\', '/').split('/') if p]
@@ -345,14 +424,36 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         if p_clean.lower() not in [u.lower() for u in unique_parts]:
             unique_parts.append(p_clean)
 
-    # Detecção de Compilação Russa / Coletânea ('Sbornik', 'Various Artists', 'VA')
-    if unique_parts and unique_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va']:
+    # Detecção de Compilação Russa / Coletânea / Uploaders de sites
+    if unique_parts and (unique_parts[0].lower() in ['sbornik', 'various', 'various artists', 'v.a.', 'va'] or unique_parts[0].lower() in PALCOMP3_UPLOADERS):
         unique_parts = unique_parts[1:]
 
+    # Kebab-case / slugified download title handling (ex: thiago-brava-amiga-parceira-part-mc...)
+    if len(unique_parts) == 1 and unique_parts[0].count('-') >= 3 and ' - ' not in unique_parts[0]:
+        slug_text = re.sub(r'^-+', '', unique_parts[0]).replace('-', ' ').strip()
+        unique_parts = [slug_text]
+
+    # Separação de Artista-Título colados sem espaço (ex: Jamiroquai-Cosmic Girl, RÜFÜS-Brighter)
+    if len(unique_parts) == 1:
+        m_hyphen = re.match(r'^([A-Za-z0-9\s&]+?)-([A-Z0-9].+)$', unique_parts[0])
+        if m_hyphen:
+            p_art_cand = m_hyphen.group(1).strip()
+            p_tit_cand = m_hyphen.group(2).strip()
+            if p_art_cand.lower() not in INVALID_ARTISTS and len(p_art_cand) >= 2:
+                unique_parts = [p_art_cand, p_tit_cand]
+
+    # Correção de bandas compostas separadas erroneamente pelo traço
+    if len(unique_parts) >= 2 and unique_parts[0].lower() == 'g' and unique_parts[1].lower().startswith('eazy'):
+        unique_parts[0] = 'G-Eazy'
+        unique_parts[1] = re.sub(r'^eazy\s*[-–:]*\s*', '', unique_parts[1], flags=re.IGNORECASE).strip()
+    elif len(unique_parts) >= 2 and unique_parts[0].lower() == 'blink' and ('182' in unique_parts[1].lower()):
+        unique_parts[0] = 'Blink-182'
+        unique_parts[1] = re.sub(r'^182\s*[-–:]*\s*', '', unique_parts[1], flags=re.IGNORECASE).strip()
+
     # 10. Sanitiza tags existentes passadas via Mutagen
-    clean_ex_art = unicodedata.normalize('NFC', existing_artist).replace('_', ' ').strip() if existing_artist else ""
-    clean_ex_tit = unicodedata.normalize('NFC', existing_title).replace('_', ' ').strip() if existing_title else ""
-    clean_ex_alb = unicodedata.normalize('NFC', existing_album).replace('_', ' ').strip() if existing_album else ""
+    clean_ex_art = html.unescape(unicodedata.normalize('NFC', existing_artist)).replace('_', ' ').strip() if existing_artist else ""
+    clean_ex_tit = html.unescape(unicodedata.normalize('NFC', existing_title)).replace('_', ' ').strip() if existing_title else ""
+    clean_ex_alb = html.unescape(unicodedata.normalize('NFC', existing_album)).replace('_', ' ').strip() if existing_album else ""
 
     for pattern in NOISE_PATTERNS:
         if clean_ex_art: clean_ex_art = pattern.sub('', clean_ex_art)
@@ -361,6 +462,8 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
 
     if clean_ex_art:
         clean_ex_art = TRAILING_PUNCT.sub('', clean_ex_art).strip(' -–:').strip()
+        if re.match(r'^\d+$', clean_ex_art) or clean_ex_art.lower() in INVALID_ARTISTS or clean_ex_art.lower() in PALCOMP3_UPLOADERS:
+            clean_ex_art = ""
 
     if clean_ex_tit:
         clean_ex_tit = TRAILING_BPM_KEY.sub('', clean_ex_tit)
@@ -407,6 +510,9 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     title = p_tit or clean_ex_tit
     album = p_alb or clean_ex_alb
 
+    if artist and (artist.lower() in INVALID_ARTISTS or re.match(r'^\d+$', artist)):
+        artist = ""
+
     # Se a tag de título tem versão rica que o nome do arquivo perdeu, recupera
     if clean_ex_tit and re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', clean_ex_tit, re.IGNORECASE):
         if not re.search(r'[\(\[].*(?:remix|mix|feat|ft\.|ao vivo|live|acustic|acústic|vers|edit|bootleg|dub)[\)\]]', title, re.IGNORECASE):
@@ -415,9 +521,13 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # Detecção e remoção de Artista Duplicado no Título!
     if artist and title:
         art_clean = re.escape(artist.strip())
-        title_stripped = re.sub(r'^' + art_clean + r'\s*[-–:]\s*', '', title, flags=re.IGNORECASE).strip()
+        title_stripped = re.sub(r'^' + art_clean + r'\s*[-–:]*\s*', '', title, flags=re.IGNORECASE).strip()
         if title_stripped:
             title = title_stripped
+        if len(artist) > 4:
+            title_glued = re.sub(r'^' + art_clean + r'(?=[A-Z0-9])', '', title, flags=re.IGNORECASE).strip()
+            if title_glued and title_glued != title:
+                title = title_glued
         if artist.strip().lower() == title.strip().lower():
             artist = ""
 
@@ -431,7 +541,7 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # Se ainda não tem artista, consulta o cache de títulos conhecidos / MusicBrainz
     if not artist and title:
         cached_art = get_cached_artist(title)
-        if cached_art:
+        if cached_art and cached_art.lower() not in INVALID_ARTISTS:
             artist = cached_art
 
     # Casos especiais de bandas compostas abreviadas:
@@ -573,6 +683,7 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
     items = []
     total_found = 0
     total_dirty = 0
+    effective_limit = 999999 if limit <= 0 else limit
 
     search_lower = search_filter.strip().lower() if search_filter else ""
 
@@ -638,7 +749,7 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                     total_dirty += 1
 
                 # Apenas lê tags ID3 pesadas via mutagen para os itens da página atual
-                if total_found > offset and len(items) < limit:
+                if total_found > offset and len(items) < effective_limit:
                     full_path = Path(root) / f
                     artist_current = ""
                     title_current = ""
@@ -710,15 +821,17 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                     if artist_current and title_current:
                         seed_tag_cache(title_current, artist_current)
 
+                    # Normalização Unicode NFC para eliminar falsos positivos de acentos (NFD vs NFC APFS)
+                    art_nfc = unicodedata.normalize('NFC', artist_current).strip().lower() if artist_current else ""
+                    tit_nfc = unicodedata.normalize('NFC', title_current).strip().lower() if title_current else ""
+                    res_art_nfc = unicodedata.normalize('NFC', clean_res["artist"]).strip().lower() if clean_res["artist"] else ""
+                    res_tit_nfc = unicodedata.normalize('NFC', clean_res["title"]).strip().lower() if clean_res["title"] else ""
+
                     # Verifica se as tags ID3 oficiais já estão limpas e coincidem com Artista e Título limpos
-                    if clean_res["artist"]:
-                        tags_clean = bool(
-                            artist_current and title_current and
-                            artist_current.strip().lower() == clean_res["artist"].strip().lower() and
-                            title_current.strip().lower() == clean_res["title"].strip().lower()
-                        )
+                    if res_art_nfc:
+                        tags_clean = bool(art_nfc and tit_nfc and art_nfc == res_art_nfc and tit_nfc == res_tit_nfc)
                     else:
-                        tags_clean = bool(title_current and title_current.strip().lower() == clean_res["title"].strip().lower())
+                        tags_clean = bool(tit_nfc and tit_nfc == res_tit_nfc)
 
                     needs_clean = not (is_item_name_clean and tags_clean)
 
@@ -926,6 +1039,26 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
 
                 needs_rename = (rename_files and f_norm != target_name)
                 needs_clean = not is_name_clean
+
+                # Checagem leve de tags ID3 para garantir que faixas com nome limpo mas tags sujas/desalinhadas sejam ajustadas
+                if not needs_clean and not needs_rename and mutagen is not None:
+                    try:
+                        audio_check = mutagen.File(str(Path(root) / f))
+                        if audio_check is not None:
+                            a_cur = str(audio_check.get('TPE1', [''])[0]) if 'TPE1' in audio_check else (str(audio_check.get('artist', [''])[0]) if 'artist' in audio_check else "")
+                            t_cur = str(audio_check.get('TIT2', [''])[0]) if 'TIT2' in audio_check else (str(audio_check.get('title', [''])[0]) if 'title' in audio_check else "")
+                            a_cur_nfc = unicodedata.normalize('NFC', a_cur).strip().lower()
+                            t_cur_nfc = unicodedata.normalize('NFC', t_cur).strip().lower()
+                            res_a_nfc = unicodedata.normalize('NFC', clean_quick["artist"]).strip().lower() if clean_quick["artist"] else ""
+                            res_t_nfc = unicodedata.normalize('NFC', clean_quick["title"]).strip().lower() if clean_quick["title"] else ""
+                            if res_a_nfc:
+                                if a_cur_nfc != res_a_nfc or t_cur_nfc != res_t_nfc:
+                                    needs_clean = True
+                            else:
+                                if t_cur_nfc != res_t_nfc or not t_cur_nfc:
+                                    needs_clean = True
+                    except Exception:
+                        pass
 
                 if needs_clean or needs_rename:
                     files_to_process.append((Path(root) / f, rel_folder, f, ext))
