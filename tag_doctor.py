@@ -774,6 +774,20 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                 # Uma faixa já tem o nome limpo no disco se bate com qualquer um dos padrões oficiais válidos
                 f_norm = unicodedata.normalize('NFC', f)
                 is_name_clean = (f_norm == clean_dj or f_norm == clean_crate or f_norm == clean_full)
+
+                # Identifica se é uma duplicata física legítima no disco com sufixo (1), (2) ou "- cópia"
+                is_collision_duplicate = False
+                if not is_name_clean:
+                    m_dup = re.search(r'(\s*\(\d+\)|\s*-\s*c[oó]pia)$', name_no_ext, re.IGNORECASE)
+                    if m_dup:
+                        base_name_stem = name_no_ext[:m_dup.start()].strip()
+                        base_candidate = Path(root) / f"{base_name_stem}{ext}"
+                        if base_candidate.exists() and not os.path.samefile(Path(root) / f, base_candidate):
+                            base_norm = unicodedata.normalize('NFC', f"{base_name_stem}{ext}")
+                            if base_norm == clean_dj or base_norm == clean_crate or base_norm == clean_full:
+                                is_collision_duplicate = True
+                                is_name_clean = True
+
                 if not is_name_clean:
                     total_dirty += 1
 
@@ -858,7 +872,7 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                         item_target = item_clean_full
 
                     f_norm = unicodedata.normalize('NFC', f)
-                    is_item_name_clean = (f_norm == item_clean_dj or f_norm == item_clean_crate or f_norm == item_clean_full)
+                    is_item_name_clean = (f_norm == item_clean_dj or f_norm == item_clean_crate or f_norm == item_clean_full or is_collision_duplicate)
 
                     if artist_current and title_current:
                         seed_tag_cache(title_current, artist_current)
@@ -876,15 +890,6 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                         tags_clean = bool(tit_nfc and tit_nfc == res_tit_nfc)
 
                     needs_clean = not (is_item_name_clean and tags_clean)
-
-                    is_duplicate_collision = False
-                    if needs_clean:
-                        try:
-                            target_candidate = Path(root) / item_target
-                            if target_candidate.exists() and not os.path.samefile(full_path, target_candidate):
-                                is_duplicate_collision = True
-                        except Exception:
-                            pass
 
                     items.append({
                         "id": f"tag-{total_found}",
@@ -909,7 +914,7 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                         "key": final_key,
                         "formato": ext.upper().replace('.', ''),
                         "precisa_limpeza": needs_clean,
-                        "duplicata_hd": is_duplicate_collision
+                        "duplicata_hd": is_collision_duplicate
                     })
 
     return {
@@ -1082,6 +1087,19 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                 f_norm = unicodedata.normalize('NFC', f)
                 is_name_clean = (f_norm == clean_dj or f_norm == clean_crate or f_norm == clean_full)
 
+                # Identifica se é uma duplicata física legítima no disco com sufixo (1), (2) ou "- cópia"
+                is_collision_duplicate = False
+                if not is_name_clean:
+                    m_dup = re.search(r'(\s*\(\d+\)|\s*-\s*c[oó]pia)$', name_no_ext, re.IGNORECASE)
+                    if m_dup:
+                        base_name_stem = name_no_ext[:m_dup.start()].strip()
+                        base_candidate = Path(root) / f"{base_name_stem}{ext}"
+                        if base_candidate.exists() and not os.path.samefile(Path(root) / f, base_candidate):
+                            base_norm = unicodedata.normalize('NFC', f"{base_name_stem}{ext}")
+                            if base_norm == clean_dj or base_norm == clean_crate or base_norm == clean_full:
+                                is_collision_duplicate = True
+                                is_name_clean = True
+
                 if naming_mode == 'dj':
                     target_name = clean_dj
                 elif naming_mode == 'crate':
@@ -1089,7 +1107,7 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                 else:
                     target_name = clean_full
 
-                needs_rename = (rename_files and f_norm != target_name)
+                needs_rename = (rename_files and f_norm != target_name and not is_collision_duplicate)
                 needs_clean = not is_name_clean
 
                 # Checagem leve de tags ID3 para garantir que faixas com nome limpo mas tags sujas/desalinhadas sejam ajustadas

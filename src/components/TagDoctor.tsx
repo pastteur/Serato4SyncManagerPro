@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter } from 'lucide-react';
+import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 export interface TagDoctorItem {
@@ -533,11 +533,13 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   };
 
   // Rótulo do botão em lote
-  const batchButtonLabel = selectedSubcrate
-    ? `⚡ Aplicar na Subcrate (${totalDirty.toLocaleString()})`
-    : selectedCrate
-      ? `⚡ Aplicar na Crate ${selectedCrate} (${totalDirty.toLocaleString()})`
-      : `⚡ Aplicar na Biblioteca (${totalDirty.toLocaleString()})`;
+  const batchButtonLabel = totalDirty === 0
+    ? 'Tudo 100% Higienizado'
+    : selectedSubcrate
+      ? `⚡ Aplicar na Subcrate (${totalDirty.toLocaleString()})`
+      : selectedCrate
+        ? `⚡ Aplicar na Crate ${selectedCrate} (${totalDirty.toLocaleString()})`
+        : `⚡ Aplicar na Biblioteca (${totalDirty.toLocaleString()})`;
 
   return (
     <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3 relative">
@@ -740,6 +742,25 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           />
         </div>
       </div>
+
+      {/* Alerta de renomeação no HD desativada */}
+      {!renameFilesOnDisk && totalDirty > 0 && (
+        <div className="w-full bg-amber-950/40 border border-amber-600/50 rounded-lg px-3 py-2 flex items-center justify-between text-xs text-amber-300 shrink-0">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-serato-gold shrink-0" />
+            <span>
+              <b>Atenção:</b> A opção <u>Renomear arquivos no HD</u> está desmarcada. Para retirar definitivamente essas {totalDirty} faixas da lista e padronizar os nomes físicos no disco, marque a caixa acima antes de aplicar.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRenameFilesOnDisk(true)}
+            className="text-[11px] underline font-bold hover:text-white cursor-pointer ml-3 whitespace-nowrap bg-amber-900/60 hover:bg-amber-800 px-2 py-1 rounded border border-amber-600/60 transition"
+          >
+            Ativar Renomeação no HD
+          </button>
+        </div>
+      )}
 
       {/* Barra de Status e Progresso em Tempo Real durante a Varredura */}
       {isLoading && (
