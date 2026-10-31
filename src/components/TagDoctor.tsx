@@ -25,6 +25,7 @@ export interface TagDoctorItem {
   key: string;
   formato: string;
   precisa_limpeza: boolean;
+  duplicata_hd?: boolean;
 }
 
 export interface CrateSubInfo {
@@ -69,6 +70,15 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     percentual: number;
     atualizados: number;
     faixa_atual: string;
+  } | null>(null);
+
+  // Scan Execution Progress State (Barra de Status em Tempo Real)
+  const [scanProgress, setScanProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    crate: string;
+    faixa: string;
   } | null>(null);
 
   const [totalFound, setTotalFound] = useState<number>(0);
@@ -188,6 +198,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
       onAddLog(`❌ Falha ao invocar scan_tags_doctor: ${e}`);
     } finally {
       setIsLoading(false);
+      setScanProgress(null);
     }
   };
 
@@ -255,15 +266,28 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     setSelectedIds(new Set());
   };
 
-  // Escuta eventos de streaming do batch apply
+  // Escuta eventos de streaming do batch apply e do scan progress
   useEffect(() => {
     let unlistenProgress: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
+    let unlistenScanProgress: (() => void) | undefined;
 
     const setupListeners = async () => {
       const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
       if (isTauri) {
         const { listen } = await import('@tauri-apps/api/event');
+
+        unlistenScanProgress = await listen<any>('tag-doctor-scan-progress', (event) => {
+          const payload = event.payload;
+          setScanProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            crate: payload.crate || '',
+            faixa: payload.faixa || '',
+          });
+        });
+
         unlistenProgress = await listen<any>('tag-doctor-batch-progress', (event) => {
           const payload = event.payload;
           setBatchProgress({
@@ -294,6 +318,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     loadCrates();
 
     return () => {
+      if (unlistenScanProgress) unlistenScanProgress();
       if (unlistenProgress) unlistenProgress();
       if (unlistenFinished) unlistenFinished();
     };
@@ -716,6 +741,56 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         </div>
       </div>
 
+      {/* Barra de Status e Progresso em Tempo Real durante a Varredura */}
+      {isLoading && (
+        <div className="bg-slate-900/90 border border-serato-cyan/60 p-3.5 rounded-xl shadow-2xl flex flex-col gap-2 shrink-0 backdrop-blur animate-in fade-in duration-200">
+          <div className="flex items-center justify-between text-xs font-bold text-white">
+            <span className="flex items-center gap-2 text-serato-cyan">
+              <RefreshCw className="w-4 h-4 text-serato-cyan animate-spin" />
+              <span>
+                {scanProgress
+                  ? `Analisando ${scanProgress.crate ? `Crate "${scanProgress.crate}"` : 'Biblioteca Completa'}...`
+                  : 'Iniciando varredura rápida de tags ID3 e nomes...'}
+              </span>
+            </span>
+            <span className="font-mono text-serato-cyan font-bold text-sm">
+              {scanProgress ? `${scanProgress.percentual}%` : 'Carregando...'}
+              {scanProgress && scanProgress.total > 0 && (
+                <span className="text-xs text-slate-400 font-normal ml-2">
+                  ({scanProgress.processados.toLocaleString()} / {scanProgress.total.toLocaleString()} faixas)
+                </span>
+              )}
+            </span>
+          </div>
+
+          {/* Barra de Progresso com Gradiente Serato */}
+          <div className="w-full bg-slate-950 rounded-full h-3 border border-serato-cardBorder overflow-hidden shadow-inner">
+            <div
+              className={`h-3 transition-all duration-150 rounded-full ${
+                scanProgress
+                  ? 'bg-gradient-to-r from-cyan-500 via-serato-cyan to-blue-500 shadow-lg shadow-cyan-500/30'
+                  : 'bg-gradient-to-r from-serato-cyan to-blue-600 animate-pulse w-full'
+              }`}
+              style={scanProgress ? { width: `${Math.min(100, Math.max(1, scanProgress.percentual))}%` } : undefined}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
+            <span className="truncate max-w-[75%]">
+              {scanProgress?.faixa ? (
+                <>🎵 Em análise: <b className="text-slate-200">{scanProgress.faixa}</b></>
+              ) : (
+                <>⚡ Leitura de alta velocidade (checagem de nomes, tags e Serato cues)...</>
+              )}
+            </span>
+            <span className="text-serato-cyan/90 font-semibold flex items-center gap-1">
+              <span className="inline-block w-2 h-2 rounded-full bg-serato-cyan animate-ping mr-1" />
+              Varrendo disco
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Modal / Overlay de Progresso em Tempo Real quando Executando em Lote */}
       {isBatchApplying && batchProgress && (
         <div className="bg-cyan-950/40 border border-serato-cyan/50 p-4 rounded-xl shadow-xl flex flex-col gap-2 shrink-0 animate-pulse">
@@ -1053,15 +1128,22 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
                       {/* Status */}
                       <td className="py-2 px-3 text-center">
-                        {item.precisa_limpeza ? (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-gold/20 text-serato-gold border border-serato-gold/30 font-bold">
-                            Ajustar
-                          </span>
-                        ) : (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-neonGreen/20 text-serato-neonGreen border border-serato-neonGreen/30 font-bold">
-                            Limpo
-                          </span>
-                        )}
+                        <div className="flex flex-col items-center gap-1">
+                          {item.precisa_limpeza ? (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-gold/20 text-serato-gold border border-serato-gold/30 font-bold">
+                              Ajustar
+                            </span>
+                          ) : (
+                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-neonGreen/20 text-serato-neonGreen border border-serato-neonGreen/30 font-bold">
+                              Limpo
+                            </span>
+                          )}
+                          {item.duplicata_hd && (
+                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950/60 text-amber-300 border border-amber-800/50" title="Já existe outro arquivo no disco com o nome limpo pretendido. Trata-se de uma duplicata no disco.">
+                              ⚠️ Duplicata HD
+                            </span>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

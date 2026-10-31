@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle, ExternalLink, ArrowRight, FolderPlus, FileText, Globe } from 'lucide-react';
 
 interface TrackMatcherProps {
@@ -20,6 +20,30 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
   const [isMatching, setIsMatching] = useState<boolean>(false);
   const [matchResult, setMatchResult] = useState<any>(null);
   const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
+
+  // Filtros de busca e status para os resultados
+  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'found' | 'missing'>('all');
+
+  const filteredEncontradas = useMemo(() => {
+    if (!matchResult?.encontradas) return [];
+    if (!searchTerm.trim()) return matchResult.encontradas;
+    const q = searchTerm.toLowerCase();
+    return matchResult.encontradas.filter((it: any) =>
+      it.solicitado?.toLowerCase().includes(q) ||
+      it.arquivo_local?.toLowerCase().includes(q) ||
+      it.caminho_completo?.toLowerCase().includes(q)
+    );
+  }, [matchResult, searchTerm]);
+
+  const filteredFaltantes = useMemo(() => {
+    if (!matchResult?.faltantes) return [];
+    if (!searchTerm.trim()) return matchResult.faltantes;
+    const q = searchTerm.toLowerCase();
+    return matchResult.faltantes.filter((it: any) =>
+      it.solicitado?.toLowerCase().includes(q)
+    );
+  }, [matchResult, searchTerm]);
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -215,6 +239,58 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           )}
         </div>
 
+        {/* Barra de Filtros e Busca */}
+        {matchResult && (
+          <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div className="relative flex-1 min-w-[220px]">
+              <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Filtrar faixas solicitadas ou arquivos locais no HD..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setStatusFilter('all')}
+                className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                  statusFilter === 'all'
+                    ? 'bg-serato-card text-white border-serato-cyan/50 shadow-sm'
+                    : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                }`}
+              >
+                Todas ({(matchResult.encontradas?.length || 0) + (matchResult.faltantes?.length || 0)})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('found')}
+                className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                  statusFilter === 'found'
+                    ? 'bg-emerald-950/60 text-emerald-300 border-emerald-600/60 shadow-sm'
+                    : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                }`}
+              >
+                No HD ({matchResult.encontradas?.length || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('missing')}
+                className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                  statusFilter === 'missing'
+                    ? 'bg-rose-950/60 text-rose-300 border-rose-600/60 shadow-sm'
+                    : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                }`}
+              >
+                Faltantes ({matchResult.faltantes?.length || 0})
+              </button>
+            </div>
+          </div>
+        )}
+
         <div className="overflow-y-auto flex-1 p-2 space-y-1.5 text-xs font-mono">
           {!matchResult ? (
             <div className="py-12 text-center text-slate-500 font-sans">
@@ -224,8 +300,8 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
             </div>
           ) : (
             <>
-              {matchResult.encontradas && matchResult.encontradas.map((item: any, idx: number) => (
-                <div key={idx} className="bg-serato-card border border-emerald-900/40 p-2 rounded flex items-center justify-between hover:bg-emerald-950/20">
+              {(statusFilter === 'all' || statusFilter === 'found') && filteredEncontradas.map((item: any, idx: number) => (
+                <div key={`found-${idx}`} className="bg-serato-card border border-emerald-900/40 p-2 rounded flex items-center justify-between hover:bg-emerald-950/20">
                   <div className="flex items-center gap-2 truncate max-w-xl">
                     <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.2 rounded font-bold">
                       {item.score}% MATCH
@@ -248,8 +324,8 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 </div>
               ))}
 
-              {matchResult.faltantes && matchResult.faltantes.map((item: any, idx: number) => (
-                <div key={idx} className="bg-serato-card border border-rose-950/50 p-2 rounded flex items-center justify-between opacity-80">
+              {(statusFilter === 'all' || statusFilter === 'missing') && filteredFaltantes.map((item: any, idx: number) => (
+                <div key={`missing-${idx}`} className="bg-serato-card border border-rose-950/50 p-2 rounded flex items-center justify-between opacity-80">
                   <div className="flex items-center gap-2 truncate max-w-xl">
                     <span className="text-[10px] bg-rose-950 text-rose-400 px-1.5 py-0.2 rounded font-bold">
                       FALTANDO
@@ -259,6 +335,12 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                   <span className="text-[10px] text-serato-orange">Não encontrada no HD</span>
                 </div>
               ))}
+
+              {filteredEncontradas.length === 0 && filteredFaltantes.length === 0 && (
+                <div className="py-8 text-center text-slate-500 font-sans">
+                  Nenhuma faixa corresponde ao filtro "{searchTerm}".
+                </div>
+              )}
             </>
           )}
         </div>

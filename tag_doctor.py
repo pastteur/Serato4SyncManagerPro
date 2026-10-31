@@ -42,7 +42,8 @@ AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.
 # Padrões rápidos e seguros de remoção de domínios, sites e sujeiras de download da web
 NOISE_PATTERNS = [
     re.compile(r'\[\s*(?:www|http)[^\]]*\]?', re.IGNORECASE),
-    re.compile(r'\bby\s+www\b.*?(?:ws|com|net|org|\s|$)', re.IGNORECASE),
+    re.compile(r'\b(?:by\s+)?www[^\s\-]*\s*(?:RadioFLy|ws|com|net|org)?\b', re.IGNORECASE),
+    re.compile(r'\bRadioFLy\s*ws\b', re.IGNORECASE),
     # Domínios completos ou com glued text (ex: wWw.FunkNeurotico.NetWallace -> Wallace)
     re.compile(r'\b(?:https?://)?(?:www\.)[a-zA-Z0-9\-]+(?:\.[a-zA-Z0-9\-]+)*\.(?:com|re|net|org|top|ru|io|co|me|vip|cc|club|site|online|link|info|website|ws|biz|fm|dj|mp3s?)(?=[A-Z\s\-_]|$)', re.IGNORECASE),
     re.compile(r'\b(?:myfreemp3|123savemp3|spotidown|mp3clan|convert2mp3|y2mate|savefrom|360ytmp3)\.[a-z]{2,5}\b', re.IGNORECASE),
@@ -51,6 +52,7 @@ NOISE_PATTERNS = [
     re.compile(r'\bwww\s+[a-zA-Z0-9\-]+\s+(?:es|ru|com|net|org|top|biz)\b', re.IGNORECASE),
     re.compile(r'\b[a-zA-Z0-9\-]+\s+spb\s+ru\b', re.IGNORECASE),
     re.compile(r'tarapiwww\b', re.IGNORECASE),
+    re.compile(r'(?:^|\s)www[\.\-_/]*(?:\s|$)', re.IGNORECASE),
     re.compile(r'\bwww\b[\.\-_/]*', re.IGNORECASE),
     re.compile(r'^\s*www\.\s*', re.IGNORECASE),
     re.compile(r'-[a-f0-9]{6,8}\b', re.IGNORECASE),
@@ -114,8 +116,8 @@ def init_tag_cache():
 
 
 def normalize_title_for_lookup(t: str) -> str:
-    """Normaliza título removendo parênteses e pontuação para busca fonética."""
-    t = unicodedata.normalize('NFC', t or '')
+    """Normaliza título removendo acentos, parênteses e pontuação para busca fonética e correspondência uniforme."""
+    t = unicodedata.normalize('NFKD', t or '').encode('ASCII', 'ignore').decode('utf-8')
     t = re.sub(r'[\(\[\{].*?[\)\]\}]', '', t)
     t = re.sub(r'[^\w\s]', '', t)
     return re.sub(r'\s+', ' ', t).strip().lower()
@@ -703,6 +705,22 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
             "items": []
         }
 
+    # Pré-contagem ultrarrápida (0.05s) para cálculo exato de progresso
+    total_audio_files = 0
+    for root, dirs, files in os.walk(str(target_dir)):
+        if '/.' in root or '\\.' in root:
+            continue
+        total_audio_files += sum(1 for f in files if not f.startswith('.') and Path(f).suffix.lower() in AUDIO_EXTENSIONS)
+
+    print(json.dumps({
+        "tipo": "progresso",
+        "processados": 0,
+        "total": total_audio_files,
+        "percentual": 0.0,
+        "crate": crate_raiz or "Biblioteca Completa",
+        "faixa": "Iniciando análise das faixas..."
+    }, ensure_ascii=False), flush=True)
+
     for root, dirs, files in os.walk(str(target_dir)):
         # Ignora lixeiras e pastas ocultas
         if '/.' in root or '\\.' in root:
@@ -723,6 +741,17 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
             ext = Path(f).suffix.lower()
             if ext in AUDIO_EXTENSIONS:
                 total_found += 1
+
+                if total_found % 150 == 0 or total_found == total_audio_files:
+                    pct = round((total_found / max(1, total_audio_files)) * 100, 1)
+                    print(json.dumps({
+                        "tipo": "progresso",
+                        "processados": total_found,
+                        "total": total_audio_files,
+                        "percentual": pct,
+                        "crate": rel_folder,
+                        "faixa": f
+                    }, ensure_ascii=False), flush=True)
 
                 # Filtro de busca se houver
                 if search_lower and search_lower not in f.lower():
@@ -848,6 +877,15 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
 
                     needs_clean = not (is_item_name_clean and tags_clean)
 
+                    is_duplicate_collision = False
+                    if needs_clean:
+                        try:
+                            target_candidate = Path(root) / item_target
+                            if target_candidate.exists() and not os.path.samefile(full_path, target_candidate):
+                                is_duplicate_collision = True
+                        except Exception:
+                            pass
+
                     items.append({
                         "id": f"tag-{total_found}",
                         "caminho": str(full_path),
@@ -870,7 +908,8 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                         "bpm": final_bpm,
                         "key": final_key,
                         "formato": ext.upper().replace('.', ''),
-                        "precisa_limpeza": needs_clean
+                        "precisa_limpeza": needs_clean,
+                        "duplicata_hd": is_duplicate_collision
                     })
 
     return {
@@ -1278,7 +1317,7 @@ def main():
             include_subcrates=not args.no_subcrates,
             naming_mode=args.naming_mode
         )
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps({"tipo": "resultado", "dados": res}, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.enrich_artists:

@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Database, ShieldCheck, History, RotateCcw, CheckCircle2, AlertTriangle, FileArchive, FolderOpen } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Database, ShieldCheck, History, RotateCcw, CheckCircle2, AlertTriangle, FileArchive, FolderOpen, Search } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 interface BackupManagerProps {
@@ -14,6 +14,16 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
   const [backups, setBackups] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isRestoring, setIsRestoring] = useState<boolean>(false);
+  const [searchTerm, setSearchTerm] = useState<string>('');
+
+  const filteredBackups = useMemo(() => {
+    if (!searchTerm.trim()) return backups;
+    const q = searchTerm.toLowerCase();
+    return backups.filter((b: any) =>
+      b.nome?.toLowerCase().includes(q) ||
+      b.data?.toLowerCase().includes(q)
+    );
+  }, [backups, searchTerm]);
 
   // Modal de Confirmação em Tela
   const [modalConfig, setModalConfig] = useState<{
@@ -146,19 +156,33 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
       {/* Lista de Backups */}
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
         <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs text-serato-muted font-mono flex items-center justify-between">
-          <span>{backups.length} Snapshots Armazenados</span>
+          <span>{filteredBackups.length} de {backups.length} Snapshots Armazenados</span>
           <span>Local: ~/pasync/backups/</span>
         </div>
 
+        {/* Barra de Busca de Backups */}
+        <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex items-center gap-2 shrink-0">
+          <div className="relative flex-1">
+            <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Filtrar backups por data ou nome do arquivo..."
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-neonGreen transition font-sans"
+            />
+          </div>
+        </div>
+
         <div className="overflow-y-auto flex-1 p-2 space-y-2">
-          {backups.length === 0 ? (
+          {filteredBackups.length === 0 ? (
             <div className="py-12 text-center text-slate-500 text-xs">
               <Database className="w-8 h-8 opacity-20 text-serato-neonGreen mx-auto mb-2" />
-              <p>Nenhum snapshot gravado no momento.</p>
-              <p className="text-slate-600 mt-1">Clique em "Criar Novo Snapshot Agora" para proteger sua base.</p>
+              <p>Nenhum snapshot encontrado.</p>
+              <p className="text-slate-600 mt-1">Ajuste o filtro de busca ou clique em "Criar Novo Snapshot Agora".</p>
             </div>
           ) : (
-            backups.map((item, idx) => (
+            filteredBackups.map((item, idx) => (
               <div key={idx} className="bg-serato-card border border-serato-cardBorder p-3 rounded-lg flex items-center justify-between hover:bg-white/[0.02]">
                 <div className="flex items-center gap-3">
                   <div className="p-2 rounded bg-serato-dark border border-white/5 text-serato-neonGreen">

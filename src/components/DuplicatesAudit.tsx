@@ -43,6 +43,8 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     onConfirm: () => {}
   });
 
+  const [statusQuickFilter, setStatusQuickFilter] = useState<'all' | 'suffix' | 'selected'>('all');
+
   // Filtra itens deletados
   const activeDuplicates = useMemo(() => {
     return duplicates.filter(d => !deletedIds.has(d.id));
@@ -68,9 +70,16 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
       const folderName = d.copia.split('/').pop() || '';
       const matchesFolder = selectedFolderFilter === 'all' || folderName === selectedFolderFilter;
 
-      return matchesSearch && matchesFolder;
+      let matchesQuick = true;
+      if (statusQuickFilter === 'suffix') {
+        matchesQuick = /\(\d+\)|-\s*cópia/i.test(d.nome);
+      } else if (statusQuickFilter === 'selected') {
+        matchesQuick = selectedBatchIds.has(d.id);
+      }
+
+      return matchesSearch && matchesFolder && matchesQuick;
     });
-  }, [activeDuplicates, searchTerm, selectedFolderFilter]);
+  }, [activeDuplicates, searchTerm, selectedFolderFilter, statusQuickFilter, selectedBatchIds]);
 
   // Estatísticas por pasta
   const folderStats = useMemo(() => {
@@ -342,6 +351,44 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                   <option key={folder} value={folder}>{folder}</option>
                 ))}
               </select>
+
+              {/* Pílulas de Filtro Rápido */}
+              <div className="flex items-center gap-1 bg-serato-dark p-0.5 rounded-lg border border-serato-cardBorder">
+                <button
+                  type="button"
+                  onClick={() => setStatusQuickFilter('all')}
+                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                    statusQuickFilter === 'all'
+                      ? 'bg-serato-card text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Todas
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStatusQuickFilter('suffix')}
+                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                    statusQuickFilter === 'suffix'
+                      ? 'bg-amber-950/60 text-amber-300 border border-amber-600/50 shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                  title="Filtra cópias com sufixo (1) ou - cópia"
+                >
+                  (1) / cópia
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setStatusQuickFilter('selected')}
+                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                    statusQuickFilter === 'selected'
+                      ? 'bg-serato-card text-serato-cyan shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Selecionadas ({selectedBatchIds.size})
+                </button>
+              </div>
             </div>
 
             {/* Ações Rápidas de Seleção */}

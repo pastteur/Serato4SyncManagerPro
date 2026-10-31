@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -59,6 +59,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     message: '',
     onConfirm: () => {}
   });
+
+  // Filtros de Busca e Status para Sound Seal e Relocate
+  const [sealSearch, setSealSearch] = useState<string>('');
+  const [sealFilter, setSealFilter] = useState<'all' | 'selected' | 'moreThan2'>('all');
+  const [relocateSearch, setRelocateSearch] = useState<string>('');
+  const [relocateFilter, setRelocateFilter] = useState<'all' | 'withCandidate' | 'noCandidate'>('all');
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -143,6 +149,43 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       if (unlistenFinished) unlistenFinished();
     };
   }, []);
+
+  // Listas filtradas com busca e status em tempo real
+  const filteredDuplicatesBySound = useMemo(() => {
+    let result = [...duplicatesBySound];
+    if (sealSearch.trim()) {
+      const q = sealSearch.toLowerCase();
+      result = result.filter(g =>
+        g.seal?.toLowerCase().includes(q) ||
+        (g.faixas || []).some((f: any) => f.caminho?.toLowerCase().includes(q) || f.nome?.toLowerCase().includes(q))
+      );
+    }
+    if (sealFilter === 'selected') {
+      result = result.filter(g =>
+        (g.faixas || []).some((f: any) => selectedCopyPaths.has(f.caminho))
+      );
+    } else if (sealFilter === 'moreThan2') {
+      result = result.filter(g => g.total_copias > 2);
+    }
+    return result;
+  }, [duplicatesBySound, sealSearch, sealFilter, selectedCopyPaths]);
+
+  const filteredRelocateResults = useMemo(() => {
+    let result = [...relocateResults];
+    if (relocateSearch.trim()) {
+      const q = relocateSearch.toLowerCase();
+      result = result.filter(r =>
+        r.faixa_perdida?.toLowerCase().includes(q) ||
+        (r.candidatos || []).some((c: any) => c.nome?.toLowerCase().includes(q) || c.caminho?.toLowerCase().includes(q))
+      );
+    }
+    if (relocateFilter === 'withCandidate') {
+      result = result.filter(r => r.candidatos && r.candidatos.length > 0);
+    } else if (relocateFilter === 'noCandidate') {
+      result = result.filter(r => !r.candidatos || r.candidatos.length === 0);
+    }
+    return result;
+  }, [relocateResults, relocateSearch, relocateFilter]);
 
   // Iniciar varredura do Sound Seal
   const handleStartSealScan = async () => {
@@ -552,7 +595,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
             <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs font-semibold text-slate-200 flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3">
-                <span>Cópias Reconhecidas por Assinatura Sonora ({duplicatesBySound.length} grupos identificados)</span>
+                <span>Cópias Reconhecidas por Assinatura Sonora ({filteredDuplicatesBySound.length} de {duplicatesBySound.length} grupos)</span>
                 
                 {/* Botões Rápidos de Seleção */}
                 <div className="flex items-center gap-1.5 ml-2">
@@ -576,15 +619,65 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
               <span className="text-[10px] text-serato-muted font-mono">Mesmo som, nomes ou tags divergentes</span>
             </div>
 
+            {/* Barra de Filtros e Busca da Sub-Aba Sound Seal */}
+            <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="relative flex-1 min-w-[220px]">
+                <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  value={sealSearch}
+                  onChange={(e) => setSealSearch(e.target.value)}
+                  placeholder="Filtrar por nome de faixa, caminho ou selo SHA-256..."
+                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
+                />
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setSealFilter('all')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                    sealFilter === 'all'
+                      ? 'bg-serato-card text-white border-serato-cyan/50 shadow-sm'
+                      : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                  }`}
+                >
+                  Todas ({duplicatesBySound.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSealFilter('selected')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                    sealFilter === 'selected'
+                      ? 'bg-amber-950/60 text-amber-300 border-amber-600/60 shadow-sm'
+                      : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                  }`}
+                >
+                  Marcadas para Excluir
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSealFilter('moreThan2')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                    sealFilter === 'moreThan2'
+                      ? 'bg-serato-card text-serato-gold border-serato-gold/50 shadow-sm'
+                      : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                  }`}
+                >
+                  &gt; 2 Cópias
+                </button>
+              </div>
+            </div>
+
             <div className="overflow-y-auto flex-1 p-2 space-y-2">
-              {duplicatesBySound.length === 0 ? (
+              {filteredDuplicatesBySound.length === 0 ? (
                 <div className="py-12 text-center text-slate-500 text-xs">
                   <Music className="w-8 h-8 opacity-20 text-serato-cyan mx-auto mb-2" />
-                  <p>Nenhuma cópia redundante de som identificada ainda.</p>
-                  <p className="text-[11px] text-slate-600 mt-1">Clique em "Iniciar Sound Seal" para rodar a indexação acústica contínua.</p>
+                  <p>Nenhuma cópia encontrada com os filtros selecionados.</p>
+                  <p className="text-[11px] text-slate-600 mt-1">Ajuste a busca ou clique em "Iniciar Sound Seal" para rodar a indexação acústica contínua.</p>
                 </div>
               ) : (
-                duplicatesBySound.map((group, idx) => (
+                filteredDuplicatesBySound.map((group: any, idx: number) => (
                   <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-2.5 space-y-1.5 text-xs">
                     <div className="flex items-center justify-between font-mono text-[10px] text-serato-muted border-b border-white/5 pb-1">
                       <span className="text-serato-cyan font-bold">SELO SHA-256: {group.seal.substring(0, 18)}...</span>
@@ -726,15 +819,65 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           )}
 
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
+            {/* Barra de Filtros e Busca da Sub-Aba Relocate */}
+            <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="relative flex-1 min-w-[220px]">
+                <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+                <input
+                  type="text"
+                  value={relocateSearch}
+                  onChange={(e) => setRelocateSearch(e.target.value)}
+                  placeholder="Filtrar por nome da faixa perdida ou pasta Serato..."
+                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
+                />
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setRelocateFilter('all')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                    relocateFilter === 'all'
+                      ? 'bg-serato-card text-white border-serato-orange/50 shadow-sm'
+                      : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                  }`}
+                >
+                  Todas ({relocateResults.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRelocateFilter('withCandidate')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                    relocateFilter === 'withCandidate'
+                      ? 'bg-emerald-950/60 text-emerald-300 border-emerald-600/60 shadow-sm'
+                      : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                  }`}
+                >
+                  Com Candidato
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRelocateFilter('noCandidate')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                    relocateFilter === 'noCandidate'
+                      ? 'bg-rose-950/60 text-rose-300 border-rose-600/60 shadow-sm'
+                      : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                  }`}
+                >
+                  Sem Candidato
+                </button>
+              </div>
+            </div>
+
             <div className="overflow-y-auto flex-1 p-2 space-y-2">
-              {relocateResults.length === 0 ? (
+              {filteredRelocateResults.length === 0 ? (
                 <div className="py-12 text-center text-slate-500 text-xs">
                   <CheckCircle2 className="w-8 h-8 opacity-20 text-emerald-400 mx-auto mb-2" />
-                  <p className="font-semibold text-slate-300">Nenhuma faixa perdida reportada no momento.</p>
-                  <p className="text-slate-600 mt-1">Todas as faixas das suas crates foram encontradas no disco.</p>
+                  <p className="font-semibold text-slate-300">Nenhuma faixa perdida encontrada com os filtros selecionados.</p>
+                  <p className="text-slate-600 mt-1">Ajuste o termo de busca ou verifique suas crates.</p>
                 </div>
               ) : (
-                relocateResults.map((item, idx) => {
+                filteredRelocateResults.map((item: any, idx: number) => {
                   const bestCandidate = item.candidatos && item.candidatos.length > 0 ? item.candidatos[0] : null;
                   const isChecked = selectedRelinkItems.has(item.faixa_perdida);
 

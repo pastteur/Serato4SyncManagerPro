@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2, Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2, Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree, Search } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -61,6 +61,28 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     message: '',
     onConfirm: () => {}
   });
+
+  // Filtros de busca e severidade
+  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [severityFilter, setSeverityFilter] = useState<'all' | 'error' | 'warning'>('all');
+
+  const filteredItems = useMemo(() => {
+    let result = [...items];
+    if (searchTerm.trim()) {
+      const q = searchTerm.toLowerCase();
+      result = result.filter(i =>
+        i.arquivo.toLowerCase().includes(q) ||
+        i.caminho.toLowerCase().includes(q) ||
+        (i.diagnostico && i.diagnostico.toLowerCase().includes(q))
+      );
+    }
+    if (severityFilter === 'error') {
+      result = result.filter(i => i.status === 'corrompido' || i.severidade === 'critica' || i.severidade === 'alta');
+    } else if (severityFilter === 'warning') {
+      result = result.filter(i => i.status !== 'corrompido' && i.severidade !== 'critica');
+    }
+    return result;
+  }, [items, searchTerm, severityFilter]);
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
@@ -566,24 +588,74 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <div className="flex items-center gap-2">
             <input
               type="checkbox"
-              checked={items.length > 0 && selectedIds.size === items.length}
+              checked={filteredItems.length > 0 && selectedIds.size === filteredItems.length}
               onChange={toggleSelectAll}
               className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0"
             />
-            <span>{items.length} Faixas nesta Categoria</span>
+            <span>{filteredItems.length} de {items.length} Faixas</span>
           </div>
           <span>Ações: 🌐 Baixar 320k • 👁️ Finder • 🗑️ Lixeira</span>
         </div>
 
+        {/* Barra de Busca e Filtros Rápidos */}
+        <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
+          <div className="relative flex-1 min-w-[240px]">
+            <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Filtrar faixas por nome, caminho ou detalhe do diagnóstico..."
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
+            />
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setSeverityFilter('all')}
+              className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                severityFilter === 'all'
+                  ? 'bg-serato-card text-white border-rose-500/50 shadow-sm'
+                  : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+              }`}
+            >
+              Todas ({items.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSeverityFilter('error')}
+              className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                severityFilter === 'error'
+                  ? 'bg-rose-950/60 text-rose-300 border-rose-600/60 shadow-sm'
+                  : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+              }`}
+            >
+              Críticas / Erros
+            </button>
+            <button
+              type="button"
+              onClick={() => setSeverityFilter('warning')}
+              className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                severityFilter === 'warning'
+                  ? 'bg-amber-950/60 text-amber-300 border-amber-600/60 shadow-sm'
+                  : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+              }`}
+            >
+              Avisos / Curtas
+            </button>
+          </div>
+        </div>
+
         <div className="overflow-y-auto flex-1 p-2 space-y-2">
-          {items.length === 0 ? (
+          {filteredItems.length === 0 ? (
             <div className="py-12 text-center text-slate-500 text-xs">
               <CheckCircle2 className="w-8 h-8 opacity-20 text-emerald-400 mx-auto mb-2" />
-              <p className="font-semibold text-slate-300">Nenhum problema encontrado nesta categoria.</p>
-              <p className="text-slate-600 mt-1">Selecione uma Crate ou clique em "Auditar Saúde" para varrer o acervo.</p>
+              <p className="font-semibold text-slate-300">Nenhum problema encontrado com os filtros ativos.</p>
+              <p className="text-slate-600 mt-1">Ajuste a busca ou selecione outra categoria.</p>
             </div>
           ) : (
-            items.map((item) => {
+            filteredItems.map((item) => {
               const isSelected = selectedIds.has(item.id);
 
               return (

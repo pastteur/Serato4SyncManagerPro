@@ -396,6 +396,7 @@ mod commands {
     #[tauri::command]
     pub async fn scan_tags_doctor(
         app: AppHandle,
+        window: Window,
         mp3_path: String,
         limit: Option<usize>,
         offset: Option<usize>,
@@ -447,13 +448,44 @@ mod commands {
             }
         }
 
-        let output = cmd.output().map_err(|e| format!("Falha ao executar scanner: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Erro no scanner: {} {}", stdout, stderr));
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Falha ao executar scanner: {}", e))?;
+
+        let mut final_json = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            for line_res in reader.lines() {
+                if let Ok(line) = line_res {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('{') {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window.emit("tag-doctor-scan-progress", parsed);
+                                continue;
+                            } else if tipo == "resultado" {
+                                if let Some(dados) = parsed.get("dados") {
+                                    final_json = dados.to_string();
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if final_json.is_empty() && trimmed.starts_with('{') {
+                        final_json = trimmed.to_string();
+                    }
+                }
+            }
         }
-        Ok(stdout)
+
+        let status = child.wait().map_err(|e| format!("Falha ao aguardar scanner: {}", e))?;
+        if !status.success() && final_json.is_empty() {
+            return Err("Erro na execução do scanner".to_string());
+        }
+
+        Ok(final_json)
     }
 
     #[tauri::command]

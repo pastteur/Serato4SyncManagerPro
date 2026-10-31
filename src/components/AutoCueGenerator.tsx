@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Target, Sparkles, CheckCircle2, Play, Music, ArrowRight, RefreshCw, Layers, FolderTree, Zap, Eye } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Target, Sparkles, CheckCircle2, Play, Music, ArrowRight, RefreshCw, Layers, FolderTree, Zap, Eye, Search } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -60,6 +60,30 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
+
+  // Filtros de busca e status para Hot Cues
+  const [searchTerm, setSearchTerm] = useState<string>('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'hasCues' | 'selected'>('all');
+
+  const filteredTracks = useMemo(() => {
+    let result = [...tracks];
+    if (searchTerm.trim()) {
+      const q = searchTerm.toLowerCase();
+      result = result.filter(t =>
+        t.arquivo.toLowerCase().includes(q) ||
+        t.pasta.toLowerCase().includes(q) ||
+        t.caminho.toLowerCase().includes(q)
+      );
+    }
+    if (statusFilter === 'pending') {
+      result = result.filter(t => !t.tem_cues);
+    } else if (statusFilter === 'hasCues') {
+      result = result.filter(t => t.tem_cues);
+    } else if (statusFilter === 'selected') {
+      result = result.filter(t => selectedTrackIds.has(t.id));
+    }
+    return result;
+  }, [tracks, searchTerm, statusFilter, selectedTrackIds]);
 
   // Carrega lista de Crates
   const loadCrates = async () => {
@@ -451,24 +475,74 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
             <div className="flex items-center gap-2">
               <input
                 type="checkbox"
-                checked={tracks.length > 0 && selectedTrackIds.size === tracks.length}
+                checked={filteredTracks.length > 0 && selectedTrackIds.size === filteredTracks.length}
                 onChange={toggleSelectAll}
                 className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0"
               />
-              <span>Faixas ({tracks.length})</span>
+              <span>Faixas ({filteredTracks.length} de {tracks.length})</span>
             </div>
             <span>Clique para Prévia dos 5 Cues</span>
           </div>
 
+          {/* Barra de Busca e Filtros Rápidos de Cues */}
+          <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Filtrar por nome de faixa, pasta ou caminho..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-gold transition font-sans"
+              />
+            </div>
+
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setStatusFilter('all')}
+                className={`text-[11px] px-2 py-0.5 rounded-lg font-medium transition cursor-pointer border ${
+                  statusFilter === 'all'
+                    ? 'bg-serato-card text-white border-serato-gold/50 shadow-sm'
+                    : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                }`}
+              >
+                Todas ({tracks.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('pending')}
+                className={`text-[11px] px-2 py-0.5 rounded-lg font-medium transition cursor-pointer border ${
+                  statusFilter === 'pending'
+                    ? 'bg-amber-950/60 text-amber-300 border-amber-600/60 shadow-sm'
+                    : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                }`}
+              >
+                Pendentes ({pendentesCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setStatusFilter('hasCues')}
+                className={`text-[11px] px-2 py-0.5 rounded-lg font-medium transition cursor-pointer border ${
+                  statusFilter === 'hasCues'
+                    ? 'bg-emerald-950/60 text-emerald-300 border-emerald-600/60 shadow-sm'
+                    : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
+                }`}
+              >
+                Com Cues ({gravadasCount})
+              </button>
+            </div>
+          </div>
+
           <div className="overflow-y-auto flex-1 divide-y divide-serato-cardBorder/40">
-            {tracks.length === 0 ? (
+            {filteredTracks.length === 0 ? (
               <div className="py-16 text-center text-slate-500 text-xs">
                 <Music className="w-8 h-8 opacity-20 text-serato-gold mx-auto mb-2" />
-                <p className="font-semibold text-slate-300">Nenhuma faixa carregada.</p>
-                <p className="text-slate-600 mt-1">Selecione uma Crate acima ou clique em "Mapear Crate".</p>
+                <p className="font-semibold text-slate-300">Nenhuma faixa encontrada com os filtros selecionados.</p>
+                <p className="text-slate-600 mt-1">Ajuste o termo de busca ou selecione outra Crate.</p>
               </div>
             ) : (
-              tracks.map((t) => {
+              filteredTracks.map((t) => {
                 const isCurrent = selectedFile === t.caminho;
                 const isSelected = selectedTrackIds.has(t.id);
 
