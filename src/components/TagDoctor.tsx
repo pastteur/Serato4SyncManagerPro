@@ -74,6 +74,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
   const [totalFound, setTotalFound] = useState<number>(0);
   const [totalDirty, setTotalDirty] = useState<number>(0);
   const [displayLimit, setDisplayLimit] = useState<number>(0); // 0 = Sem limite / Tudo numa lista só
+  const [visibleCount, setVisibleCount] = useState<number>(100); // Janela virtual de rolagem contínua (zero travamento)
   const [statusFilter, setStatusFilter] = useState<'all' | 'dirty' | 'clean'>('all');
   const [sortField, setSortField] = useState<'arquivo' | 'crate' | 'tag' | 'bpm' | 'status'>('status');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
@@ -222,6 +223,16 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
     return result;
   }, [items, statusFilter, sortField, sortOrder]);
+
+  // Reseta a paginação virtual de rolagem contínua ao alterar filtros ou busca
+  useEffect(() => {
+    setVisibleCount(100);
+  }, [statusFilter, sortField, sortOrder, searchTerm, selectedCrate, selectedSubcrate]);
+
+  // Apenas a fatia visível no DOM para manter a UI a 60 FPS estáveis sem travamento
+  const visibleItems = useMemo(() => {
+    return filteredAndSortedItems.slice(0, visibleCount);
+  }, [filteredAndSortedItems, visibleCount]);
 
   const handleSort = (field: 'arquivo' | 'crate' | 'tag' | 'bpm' | 'status') => {
     if (sortField === field) {
@@ -834,7 +845,17 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
       {/* Tabela De / Para (Antes vs Depois) */}
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
-        <div className="overflow-y-auto flex-1">
+        <div 
+          className="overflow-y-auto flex-1"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 350) {
+              if (visibleCount < filteredAndSortedItems.length) {
+                setVisibleCount(prev => Math.min(prev + 100, filteredAndSortedItems.length));
+              }
+            }
+          }}
+        >
           <table className="w-full text-left text-xs">
             <thead className="bg-serato-header text-serato-muted font-mono uppercase text-[10px] border-b border-serato-cardBorder sticky top-0 z-10 select-none">
               <tr>
@@ -941,7 +962,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                   </td>
                 </tr>
               ) : (
-                filteredAndSortedItems.map((item) => {
+                visibleItems.map((item) => {
                   const isSelected = selectedIds.has(item.id);
                   const suggestedFileName = getSuggestedName(item, namingMode);
 
@@ -1046,6 +1067,21 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                   );
                 })
               )}
+
+              {/* Gatilho de rolagem contínua sem travar o DOM */}
+              {visibleCount < filteredAndSortedItems.length && (
+                <tr>
+                  <td colSpan={7} className="text-center py-3 bg-serato-dark/40 border-t border-serato-cardBorder">
+                    <button
+                      type="button"
+                      onClick={() => setVisibleCount(prev => Math.min(prev + 200, filteredAndSortedItems.length))}
+                      className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-serato-cyan border border-slate-700 font-medium cursor-pointer transition shadow-sm"
+                    >
+                      ⬇️ Carregar mais faixas (+200) ou continue rolando a tela... (exibindo {visibleItems.length.toLocaleString()} de {filteredAndSortedItems.length.toLocaleString()})
+                    </button>
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -1053,7 +1089,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         {/* Rodapé da Lista Contínua (Sem Abas de 50) */}
         <div className="bg-serato-header px-4 py-2.5 border-t border-serato-cardBorder flex items-center justify-between text-xs text-serato-muted shrink-0 font-mono">
           <div className="flex items-center gap-2">
-            <span>Exibindo <b className="text-white">{filteredAndSortedItems.length.toLocaleString()}</b> de <b className="text-white">{items.length.toLocaleString()}</b> faixas na lista contínua</span>
+            <span>Exibindo <b className="text-white">{visibleItems.length.toLocaleString()}</b> de <b className="text-white">{filteredAndSortedItems.length.toLocaleString()}</b> faixas na lista contínua</span>
             {totalDirty > 0 && (
               <span className="text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40 font-semibold text-[11px]">
                 ⚠️ {totalDirty.toLocaleString()} precisam de ajuste no escopo total

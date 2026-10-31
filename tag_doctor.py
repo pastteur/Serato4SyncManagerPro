@@ -751,58 +751,71 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                 # Apenas lê tags ID3 pesadas via mutagen para os itens da página atual
                 if total_found > offset and len(items) < effective_limit:
                     full_path = Path(root) / f
-                    artist_current = ""
-                    title_current = ""
-                    album_current = ""
-                    genre_current = ""
-                    bpm_current = ""
-                    key_current = ""
 
-                    if mutagen:
-                        try:
-                            audio = mutagen.File(str(full_path))
-                            if audio is not None:
-                                if 'TIT2' in audio:
-                                    title_current = str(audio['TIT2'])
-                                elif 'title' in audio:
-                                    title_current = str(audio['title'][0])
+                    if is_name_clean:
+                        # Otimização ultrarrápida: se o arquivo já está 100% no padrão limpo,
+                        # aproveita os metadados higienizados sem leitura redundante de disco com mutagen
+                        clean_res = clean_quick
+                        artist_current = clean_quick["artist"]
+                        title_current = clean_quick["title"]
+                        album_current = clean_quick["album"]
+                        genre_current = clean_quick["crate_raiz"]
+                        final_bpm = clean_quick["detected_bpm"]
+                        final_key = clean_quick["detected_key"]
+                    else:
+                        # Faixa com nome sujo/fora do padrão: lê mutagen para recuperar dados originais
+                        artist_current = ""
+                        title_current = ""
+                        album_current = ""
+                        genre_current = ""
+                        bpm_current = ""
+                        key_current = ""
 
-                                if 'TPE1' in audio:
-                                    artist_current = str(audio['TPE1'])
-                                elif 'artist' in audio:
-                                    artist_current = str(audio['artist'][0])
+                        if mutagen:
+                            try:
+                                audio = mutagen.File(str(full_path))
+                                if audio is not None:
+                                    if 'TIT2' in audio:
+                                        title_current = str(audio['TIT2'])
+                                    elif 'title' in audio:
+                                        title_current = str(audio['title'][0])
 
-                                if 'TALB' in audio:
-                                    album_current = str(audio['TALB'])
-                                elif 'album' in audio:
-                                    album_current = str(audio['album'][0])
+                                    if 'TPE1' in audio:
+                                        artist_current = str(audio['TPE1'])
+                                    elif 'artist' in audio:
+                                        artist_current = str(audio['artist'][0])
 
-                                if 'TCON' in audio:
-                                    genre_current = str(audio['TCON'])
-                                elif 'genre' in audio:
-                                    genre_current = str(audio['genre'][0])
+                                    if 'TALB' in audio:
+                                        album_current = str(audio['TALB'])
+                                    elif 'album' in audio:
+                                        album_current = str(audio['album'][0])
 
-                                if 'TBPM' in audio:
-                                    bpm_current = str(audio['TBPM'])
-                                elif 'bpm' in audio:
-                                    bpm_current = str(audio['bpm'][0])
+                                    if 'TCON' in audio:
+                                        genre_current = str(audio['TCON'])
+                                    elif 'genre' in audio:
+                                        genre_current = str(audio['genre'][0])
 
-                                if 'TKEY' in audio:
-                                    key_current = str(audio['TKEY'])
-                                elif 'initialkey' in audio:
-                                    key_current = str(audio['initialkey'][0])
-                        except Exception:
-                            pass
+                                    if 'TBPM' in audio:
+                                        bpm_current = str(audio['TBPM'])
+                                    elif 'bpm' in audio:
+                                        bpm_current = str(audio['bpm'][0])
 
-                    clean_res = clean_track_name(
-                        name_no_ext,
-                        rel_folder=rel_folder,
-                        existing_artist=artist_current,
-                        existing_title=title_current,
-                        existing_album=album_current
-                    )
-                    final_bpm = bpm_current or clean_res["detected_bpm"]
-                    final_key = key_current or clean_res["detected_key"]
+                                    if 'TKEY' in audio:
+                                        key_current = str(audio['TKEY'])
+                                    elif 'initialkey' in audio:
+                                        key_current = str(audio['initialkey'][0])
+                            except Exception:
+                                pass
+
+                        clean_res = clean_track_name(
+                            name_no_ext,
+                            rel_folder=rel_folder,
+                            existing_artist=artist_current,
+                            existing_title=title_current,
+                            existing_album=album_current
+                        )
+                        final_bpm = bpm_current or clean_res["detected_bpm"]
+                        final_key = key_current or clean_res["detected_key"]
 
                     item_clean_dj = f"{clean_res['fmt_dj']}{ext}"
                     item_clean_crate = f"{clean_res['fmt_crate']}{ext}"
