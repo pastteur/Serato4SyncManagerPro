@@ -225,13 +225,17 @@ def lookup_musicbrainz_track(title: str, artist: str = "", crate: str = ""):
     return "", ""
 
 
-def enrich_missing_artists(items: list):
-    """Identifica artistas e títulos para itens usando MusicBrainz e Cache."""
+def enrich_missing_artists(items: list, stream_progress: bool = True):
+    """Identifica artistas e títulos para itens usando MusicBrainz e Cache com streaming de progresso."""
     init_tag_cache()
+    total = len(items)
+    if stream_progress:
+        print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
     enriched_count = 0
     updated_items = []
 
-    for item in items:
+    for idx, item in enumerate(items, 1):
         art = (item.get("artista_sugerido") or item.get("artista_atual") or "").strip()
         tit = (item.get("titulo_sugerido") or item.get("titulo_atual") or "").strip()
         crate = item.get("crate_raiz") or ""
@@ -281,11 +285,28 @@ def enrich_missing_artists(items: list):
 
         updated_items.append(item)
 
-    return {
+        track_display = item.get("arquivo_atual") or (Path(item.get("caminho", "")).name if item.get("caminho") else "")
+        if stream_progress and (idx % 2 == 0 or idx == total or total <= 30):
+            pct = round((idx / max(1, total)) * 100, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": idx,
+                "total": total,
+                "percentual": pct,
+                "enriquecidos": enriched_count,
+                "faixa_atual": track_display
+            }, ensure_ascii=False), flush=True)
+
+    res = {
         "sucesso": True,
+        "enriquecidos": enriched_count,
         "total_enriquecidos": enriched_count,
+        "total": total,
         "items": updated_items
     }
+    if stream_progress:
+        print(json.dumps({"tipo": "fim", **res}, ensure_ascii=False), flush=True)
+    return res
 
 
 
@@ -979,15 +1000,22 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
     }
 
 
-def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False):
-    """Aplica as tags limpas diretamente nos arquivos preservando tags Serato."""
+def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False, stream_progress: bool = True):
+    """Aplica as tags limpas diretamente nos arquivos preservando tags Serato com streaming de progresso."""
     if not mutagen:
-        return {"sucesso": False, "erro": "Mutagen não está instalado no sistema."}
+        res = {"sucesso": False, "erro": "Mutagen não está instalado no sistema."}
+        if stream_progress:
+            print(json.dumps({"tipo": "fim", **res}, ensure_ascii=False), flush=True)
+        return res
+
+    total = len(items_to_apply)
+    if stream_progress:
+        print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
 
     updated_count = 0
     errors = []
 
-    for item in items_to_apply:
+    for idx, item in enumerate(items_to_apply, 1):
         file_path = Path(item["caminho"])
         if not file_path.exists():
             continue
@@ -1075,12 +1103,27 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False)
         except Exception as e:
             errors.append(f"{file_path.name}: {e}")
 
-    return {
+        if stream_progress and (idx % 2 == 0 or idx == total or total <= 30):
+            pct = round((idx / max(1, total)) * 100, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": idx,
+                "total": total,
+                "percentual": pct,
+                "atualizados": updated_count,
+                "faixa_atual": file_path.name
+            }, ensure_ascii=False), flush=True)
+
+    res = {
         "sucesso": True,
         "atualizados": updated_count,
-        "total_solicitados": len(items_to_apply),
+        "total": total,
+        "total_solicitados": total,
         "erros": errors[:10]
     }
+    if stream_progress:
+        print(json.dumps({"tipo": "fim", **res}, ensure_ascii=False), flush=True)
+    return res
 
 
 def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
@@ -1380,11 +1423,10 @@ def main():
                     items = json.load(f)
             else:
                 items = json.loads(args.enrich_artists)
-            res = enrich_missing_artists(items)
-            print(json.dumps(res, ensure_ascii=False))
+            res = enrich_missing_artists(items, stream_progress=True)
             sys.exit(0 if res.get("sucesso") else 1)
         except Exception as e:
-            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)
 
     if args.apply_tags:
@@ -1396,11 +1438,10 @@ def main():
                     items = json.load(f)
             else:
                 items = json.loads(args.apply_tags)
-            res = apply_cleaned_tags(items, rename_files_on_disk=args.rename_files)
-            print(json.dumps(res, ensure_ascii=False))
+            res = apply_cleaned_tags(items, rename_files_on_disk=args.rename_files, stream_progress=True)
             sys.exit(0 if res.get("sucesso") else 1)
         except Exception as e:
-            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)
 
     parser.print_help()

@@ -553,6 +553,13 @@ mod commands {
                 }
             };
 
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for _ in reader.lines() {}
+                });
+            }
+
             if let Some(stdout) = child.stdout.take() {
                 let reader = BufReader::new(stdout);
                 for line_res in reader.lines() {
@@ -578,10 +585,12 @@ mod commands {
     #[tauri::command]
     pub async fn apply_tags_doctor(
         app: AppHandle,
+        window: Window,
         items_json: String,
         rename_files: Option<bool>,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let script = find_python_script(Some(&app), "tag_doctor.py");
+        let window_clone = window.clone();
 
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!(
@@ -594,32 +603,68 @@ mod commands {
         std::fs::write(&temp_file, &items_json)
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
-        cmd.arg("--apply-tags");
-        cmd.arg(&temp_file);
-        if let Some(true) = rename_files {
-            cmd.arg("--rename-files");
-        }
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--apply-tags");
+            cmd.arg(&temp_file);
+            if let Some(true) = rename_files {
+                cmd.arg("--rename-files");
+            }
 
-        let output = cmd.output();
-        let _ = std::fs::remove_file(&temp_file);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
 
-        let output = output.map_err(|e| format!("Falha ao executar aplicação de tags: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Erro ao aplicar tags: {} {}", stdout, stderr));
-        }
-        Ok(stdout)
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&temp_file);
+                    let _ = window_clone.emit("tag-doctor-apply-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for _ in reader.lines() {}
+                });
+            }
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("tag-doctor-apply-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("tag-doctor-apply-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&temp_file);
+        });
+
+        Ok(())
     }
 
     #[tauri::command]
     pub async fn enrich_missing_artists(
         app: AppHandle,
+        window: Window,
         items_json: String,
-    ) -> Result<String, String> {
+    ) -> Result<(), String> {
         let script = find_python_script(Some(&app), "tag_doctor.py");
+        let window_clone = window.clone();
 
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!(
@@ -632,21 +677,55 @@ mod commands {
         std::fs::write(&temp_file, &items_json)
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
-        cmd.arg("--enrich-artists");
-        cmd.arg(&temp_file);
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--enrich-artists");
+            cmd.arg(&temp_file);
 
-        let output = cmd.output();
-        let _ = std::fs::remove_file(&temp_file);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
 
-        let output = output.map_err(|e| format!("Falha ao executar enriquecimento: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Erro ao enriquecer artistas: {} {}", stdout, stderr));
-        }
-        Ok(stdout)
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = std::fs::remove_file(&temp_file);
+                    let _ = window_clone.emit("tag-doctor-enrich-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stderr) = child.stderr.take() {
+                std::thread::spawn(move || {
+                    let reader = BufReader::new(stderr);
+                    for _ in reader.lines() {}
+                });
+            }
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("tag-doctor-enrich-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("tag-doctor-enrich-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+            let _ = std::fs::remove_file(&temp_file);
+        });
+
+        Ok(())
     }
 
     #[tauri::command]

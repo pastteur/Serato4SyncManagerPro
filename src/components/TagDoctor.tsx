@@ -72,6 +72,24 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     faixa_atual: string;
   } | null>(null);
 
+  // Apply Selected Progress State (Barra de Status Aplicar Selecionadas)
+  const [applyProgress, setApplyProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    atualizados: number;
+    faixa_atual: string;
+  } | null>(null);
+
+  // Enrich Missing Artists & Titles Progress State (Barra de Status Auto-Completar)
+  const [enrichProgress, setEnrichProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    enriquecidos: number;
+    faixa_atual: string;
+  } | null>(null);
+
   // Scan Execution Progress State (Barra de Status em Tempo Real)
   const [scanProgress, setScanProgress] = useState<{
     processados: number;
@@ -266,11 +284,15 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     setSelectedIds(new Set());
   };
 
-  // Escuta eventos de streaming do batch apply e do scan progress
+  // Escuta eventos de streaming do batch apply, apply selected, enrich e scan progress
   useEffect(() => {
     let unlistenProgress: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
     let unlistenScanProgress: (() => void) | undefined;
+    let unlistenApplyProgress: (() => void) | undefined;
+    let unlistenApplyFinished: (() => void) | undefined;
+    let unlistenEnrichProgress: (() => void) | undefined;
+    let unlistenEnrichFinished: (() => void) | undefined;
 
     const setupListeners = async () => {
       const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -288,6 +310,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           });
         });
 
+        // Batch Apply Events
         unlistenProgress = await listen<any>('tag-doctor-batch-progress', (event) => {
           const payload = event.payload;
           setBatchProgress({
@@ -311,6 +334,58 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             onAddLog(`❌ Erro no processamento em lote: ${payload.erro || 'Desconhecido'}`);
           }
         });
+
+        // Apply Selected Progress Events
+        unlistenApplyProgress = await listen<any>('tag-doctor-apply-progress', (event) => {
+          const payload = event.payload;
+          setApplyProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            atualizados: payload.atualizados || 0,
+            faixa_atual: payload.faixa_atual || '',
+          });
+        });
+
+        unlistenApplyFinished = await listen<any>('tag-doctor-apply-finished', (event) => {
+          const payload = event.payload;
+          setIsApplying(false);
+          setApplyProgress(null);
+          if (payload.sucesso) {
+            onAddLog(`🎉 Tags gravadas com sucesso em ${payload.atualizados} de ${payload.total || payload.total_solicitados || 0} faixa(s)!`);
+            loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+            loadCrates();
+          } else {
+            onAddLog(`❌ Erro ao gravar tags: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
+
+        // Enrich Artists Progress Events
+        unlistenEnrichProgress = await listen<any>('tag-doctor-enrich-progress', (event) => {
+          const payload = event.payload;
+          setEnrichProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            enriquecidos: payload.enriquecidos || 0,
+            faixa_atual: payload.faixa_atual || '',
+          });
+        });
+
+        unlistenEnrichFinished = await listen<any>('tag-doctor-enrich-finished', (event) => {
+          const payload = event.payload;
+          setIsEnriching(false);
+          setEnrichProgress(null);
+          if (payload.sucesso) {
+            if (payload.items && payload.items.length > 0) {
+              const updatedMap = new Map<string, TagDoctorItem>(payload.items.map((it: TagDoctorItem) => [it.id, it]));
+              setItems(prev => prev.map(it => updatedMap.get(it.id) || it));
+            }
+            onAddLog(`✅ ${payload.enriquecidos || payload.total_enriquecidos || 0} faixa(s) identificadas com Artista & Título via MusicBrainz / Catálogo!`);
+          } else {
+            onAddLog(`❌ Erro ao auto-completar: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
       }
     };
 
@@ -321,37 +396,53 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
       if (unlistenScanProgress) unlistenScanProgress();
       if (unlistenProgress) unlistenProgress();
       if (unlistenFinished) unlistenFinished();
+      if (unlistenApplyProgress) unlistenApplyProgress();
+      if (unlistenApplyFinished) unlistenApplyFinished();
+      if (unlistenEnrichProgress) unlistenEnrichProgress();
+      if (unlistenEnrichFinished) unlistenEnrichFinished();
     };
   }, [mp3Path]);
 
   // Identificação inteligente de Artistas e Títulos Faltantes via MusicBrainz e Catálogo Local
   const handleEnrichArtists = async () => {
+    const targetItems = selectedIds.size > 0
+      ? items.filter(it => selectedIds.has(it.id))
+      : items;
+
+    if (targetItems.length === 0) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Música Carregada',
+        message: 'Por favor, carregue músicas na tabela antes de executar o auto-completar.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
+      return;
+    }
+
+    setEnrichProgress({
+      processados: 0,
+      total: targetItems.length,
+      percentual: 0,
+      enriquecidos: 0,
+      faixa_atual: 'Iniciando identificação...'
+    });
     setIsEnriching(true);
-    onAddLog('🔍 Consultando base de metadados e MusicBrainz para auto-completar artistas e títulos...');
+    onAddLog(`🔍 Consultando metadados e MusicBrainz para ${targetItems.length} faixa(s)...`);
+
     try {
       const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
       if (isTauri) {
         const { invoke } = await import('@tauri-apps/api/core');
-        const targetItems = selectedIds.size > 0
-          ? items.filter(it => selectedIds.has(it.id))
-          : items;
-
-        const resJson = await invoke<string>('enrich_missing_artists', {
+        await invoke('enrich_missing_artists', {
           itemsJson: JSON.stringify(targetItems)
         });
-        const data = JSON.parse(resJson);
-        if (data.sucesso && data.items) {
-          const updatedMap = new Map<string, TagDoctorItem>(data.items.map((it: TagDoctorItem) => [it.id, it]));
-          setItems(prev => prev.map(it => updatedMap.get(it.id) || it));
-          onAddLog(`✅ ${data.total_enriquecidos} faixa(s) enriquecida(s) com Artista & Título via MusicBrainz / Catálogo!`);
-        } else {
-          onAddLog(`ℹ️ Nenhuma nova correspondência encontrada.`);
-        }
       }
     } catch (e) {
-      onAddLog(`❌ Erro ao auto-completar artistas e títulos: ${e}`);
-    } finally {
       setIsEnriching(false);
+      setEnrichProgress(null);
+      onAddLog(`❌ Erro ao auto-completar artistas e títulos: ${e}`);
     }
   };
 
@@ -403,12 +494,19 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
 
     setModalConfig({
       isOpen: true,
-      title: 'Aplicar Correções na Página',
+      title: 'Aplicar Correções Selecionadas',
       message: msg,
       confirmText: `Aplicar em ${selectedItems.length} Faixas`,
       variant: 'info',
       onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setApplyProgress({
+          processados: 0,
+          total: selectedItems.length,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando gravação...'
+        });
         setIsApplying(true);
         onAddLog(`✍️ Gravando tags higienizadas em ${selectedItems.length} arquivo(s)...`);
 
@@ -416,23 +514,15 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
           if (isTauri) {
             const { invoke } = await import('@tauri-apps/api/core');
-            const resJson = await invoke<string>('apply_tags_doctor', {
+            await invoke('apply_tags_doctor', {
               itemsJson: JSON.stringify(selectedItems),
               renameFiles: renameFilesOnDisk
             });
-            const data = JSON.parse(resJson);
-
-            if (data.sucesso) {
-              onAddLog(`🎯 Concluído! ${data.atualizados} música(s) atualizadas com sucesso nas tags oficiais.`);
-              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
-            } else {
-              onAddLog(`❌ Erro ao gravar tags: ${data.erro}`);
-            }
           }
         } catch (e) {
-          onAddLog(`❌ Falha ao gravar tags: ${e}`);
-        } finally {
           setIsApplying(false);
+          setApplyProgress(null);
+          onAddLog(`❌ Falha ao gravar tags: ${e}`);
         }
       }
     });
@@ -582,28 +672,44 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             <span>{isLoading ? 'Analisando...' : '🔍 Escanear'}</span>
           </button>
 
-          {/* Botão Aplicar Selecionadas */}
+          {/* Botão Aplicar Selecionadas com Status em Tempo Real */}
           <button
             type="button"
             onClick={handleApplyCleanPage}
-            disabled={isLoading || isApplying || isBatchApplying || selectedIds.size === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 transition disabled:opacity-40 cursor-pointer"
-            title="Aplica as tags somente para as faixas selecionadas"
+            disabled={isLoading || isApplying || isBatchApplying || isEnriching || selectedIds.size === 0}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+              isApplying
+                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500 shadow-lg shadow-emerald-900/40 animate-pulse'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-600 disabled:opacity-40'
+            }`}
+            title="Aplica as tags e renomeia somente para as faixas selecionadas"
           >
-            <Sparkles className="w-3.5 h-3.5 text-serato-cyan" />
-            <span>{isApplying ? 'Gravando...' : `✍️ Aplicar Selecionadas (${selectedIds.size})`}</span>
+            <Sparkles className={`w-3.5 h-3.5 ${isApplying ? 'animate-spin text-emerald-400' : 'text-serato-cyan'}`} />
+            <span>
+              {isApplying
+                ? `✍️ Gravando... ${applyProgress ? `${applyProgress.percentual}% (${applyProgress.processados}/${applyProgress.total})` : ''}`
+                : `✍️ Aplicar Selecionadas (${selectedIds.size})`}
+            </span>
           </button>
 
-          {/* Botão Auto-Identificar Artistas e Títulos via MusicBrainz */}
+          {/* Botão Auto-Identificar Artistas e Títulos via MusicBrainz com Status em Tempo Real */}
           <button
             type="button"
             onClick={handleEnrichArtists}
             disabled={isLoading || isApplying || isBatchApplying || isEnriching || items.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border border-cyan-700/60 transition disabled:opacity-40 cursor-pointer shadow-sm"
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer shadow-sm ${
+              isEnriching
+                ? 'bg-sky-950/90 text-sky-300 border-sky-500 shadow-lg shadow-sky-900/40 animate-pulse'
+                : 'bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border-cyan-700/60 disabled:opacity-40'
+            }`}
             title="Consulta o catálogo e MusicBrainz para identificar artistas e títulos das faixas que estão sem artista ou desconhecidas"
           >
-            <Music className={`w-3.5 h-3.5 ${isEnriching ? 'animate-spin text-serato-gold' : 'text-serato-cyan'}`} />
-            <span>{isEnriching ? 'Identificando...' : '🎧 Auto-Completar Artistas & Títulos'}</span>
+            <Music className={`w-3.5 h-3.5 ${isEnriching ? 'animate-bounce text-sky-300' : 'text-serato-cyan'}`} />
+            <span>
+              {isEnriching
+                ? `🎧 Identificando... ${enrichProgress ? `${enrichProgress.percentual}% (${enrichProgress.processados}/${enrichProgress.total})` : ''}`
+                : '🎧 Auto-Completar Artistas & Títulos'}
+            </span>
           </button>
 
           {/* Botão de Execução em Lote por Crate ou Biblioteca */}
@@ -839,6 +945,70 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             </span>
             <span className="text-serato-neonGreen font-semibold">
               ✅ {batchProgress.atualizados.toLocaleString()} faixas ajustadas
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Barra de Status e Progresso em Tempo Real: Aplicando Faixas Selecionadas */}
+      {isApplying && applyProgress && (
+        <div className="bg-emerald-950/50 border border-emerald-500/60 p-4 rounded-xl shadow-2xl flex flex-col gap-2 shrink-0 animate-in fade-in duration-200">
+          <div className="flex items-center justify-between text-xs font-bold text-white">
+            <span className="flex items-center gap-2 text-emerald-400">
+              <Sparkles className="w-4 h-4 text-emerald-400 animate-spin" />
+              <span>Gravando tags ID3 oficiais nas faixas selecionadas...</span>
+            </span>
+            <span className="font-mono text-emerald-300 font-bold text-sm">
+              {applyProgress.percentual}% ({applyProgress.processados.toLocaleString()} / {applyProgress.total.toLocaleString()} faixas)
+            </span>
+          </div>
+
+          {/* Barra de Progresso com Gradiente Esmeralda */}
+          <div className="w-full bg-slate-950 rounded-full h-3 border border-emerald-900/60 overflow-hidden shadow-inner">
+            <div
+              className="bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 h-3 transition-all duration-150 rounded-full shadow-lg shadow-emerald-500/30"
+              style={{ width: `${Math.min(100, Math.max(1, applyProgress.percentual))}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
+            <span className="truncate max-w-[70%]">
+              🎵 Faixa atual: <b className="text-slate-200">{applyProgress.faixa_atual || 'Gravando tags...'}</b>
+            </span>
+            <span className="text-serato-neonGreen font-semibold shrink-0">
+              ✅ {applyProgress.atualizados.toLocaleString()} gravada(s)
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Barra de Status e Progresso em Tempo Real: Auto-Completando Artistas & Títulos */}
+      {isEnriching && enrichProgress && (
+        <div className="bg-sky-950/50 border border-sky-500/60 p-4 rounded-xl shadow-2xl flex flex-col gap-2 shrink-0 animate-in fade-in duration-200">
+          <div className="flex items-center justify-between text-xs font-bold text-white">
+            <span className="flex items-center gap-2 text-sky-400">
+              <Music className="w-4 h-4 text-sky-400 animate-bounce" />
+              <span>Auto-Completando Artistas & Títulos via Nuvem/Cache e MusicBrainz...</span>
+            </span>
+            <span className="font-mono text-sky-300 font-bold text-sm">
+              {enrichProgress.percentual}% ({enrichProgress.processados.toLocaleString()} / {enrichProgress.total.toLocaleString()} faixas)
+            </span>
+          </div>
+
+          {/* Barra de Progresso com Gradiente Índigo/Sky */}
+          <div className="w-full bg-slate-950 rounded-full h-3 border border-sky-900/60 overflow-hidden shadow-inner">
+            <div
+              className="bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 h-3 transition-all duration-150 rounded-full shadow-lg shadow-sky-500/30"
+              style={{ width: `${Math.min(100, Math.max(1, enrichProgress.percentual))}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
+            <span className="truncate max-w-[70%]">
+              🔍 Consultando: <b className="text-slate-200">{enrichProgress.faixa_atual || 'Pesquisando na base...'}</b>
+            </span>
+            <span className="text-sky-300 font-semibold shrink-0">
+              ✨ {enrichProgress.enriquecidos.toLocaleString()} identificada(s)
             </span>
           </div>
         </div>
