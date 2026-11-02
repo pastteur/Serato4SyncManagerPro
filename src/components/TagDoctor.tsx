@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle } from 'lucide-react';
+import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle, FileSpreadsheet } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 export interface TagDoctorItem {
@@ -467,6 +467,96 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
+  // Exportar faixas em planilha CSV compatível com Excel e Numbers (UTF-8 com BOM e separador ;)
+  const handleExportCsv = () => {
+    if (items.length === 0) {
+      onAddLog('⚠️ Nenhuma faixa carregada no momento para exportar.');
+      return;
+    }
+
+    // Prioridade de exportação: faixas selecionadas > faixas que precisam de ajuste > todas as faixas do escopo
+    let targetItems: TagDoctorItem[] = [];
+    let exportContext = '';
+
+    if (selectedIds.size > 0) {
+      targetItems = items.filter(it => selectedIds.has(it.id));
+      exportContext = `${targetItems.length} faixa(s) selecionada(s)`;
+    } else {
+      const dirtyItems = items.filter(it => it.precisa_limpeza);
+      if (dirtyItems.length > 0) {
+        targetItems = dirtyItems;
+        exportContext = `${dirtyItems.length} faixa(s) pendente(s) de ajuste`;
+      } else {
+        targetItems = items;
+        exportContext = `todas as ${items.length} faixa(s) do escopo atual`;
+      }
+    }
+
+    const headers = [
+      'Status',
+      'Como Está no Disco (Original)',
+      'Nome Sugerido Padronizado',
+      'Artista Atual (ID3)',
+      'Artista Sugerido',
+      'Título Atual (ID3)',
+      'Título Sugerido',
+      'Álbum Atual (ID3)',
+      'Álbum Sugerido',
+      'Crate Raiz',
+      'Crate Completa',
+      'BPM',
+      'Tom Musical',
+      'Formato',
+      'Caminho Completo no Disco'
+    ];
+
+    const escapeCsv = (val: string | number | undefined | null) => {
+      if (val === undefined || val === null) return '""';
+      const str = String(val).replace(/"/g, '""');
+      return `"${str}"`;
+    };
+
+    const rows = targetItems.map(it => [
+      escapeCsv(it.precisa_limpeza ? 'Precisa de Ajuste' : 'Higienizada'),
+      escapeCsv(it.arquivo_atual),
+      escapeCsv(getSuggestedName(it, namingMode)),
+      escapeCsv(it.artista_atual || ''),
+      escapeCsv(it.artista_sugerido || ''),
+      escapeCsv(it.titulo_atual || ''),
+      escapeCsv(it.titulo_sugerido || ''),
+      escapeCsv(it.album_atual || ''),
+      escapeCsv(it.album_sugerido || ''),
+      escapeCsv(it.crate_raiz || ''),
+      escapeCsv(it.crate_completa || ''),
+      escapeCsv(it.bpm || ''),
+      escapeCsv(it.key || ''),
+      escapeCsv(it.formato || ''),
+      escapeCsv(it.caminho || '')
+    ].join(';'));
+
+    // UTF-8 BOM (\uFEFF) para compatibilidade perfeita com Excel no Windows e Mac
+    const csvContent = '\uFEFF' + [headers.map(escapeCsv).join(';'), ...rows].join('\r\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    const cratePrefix = selectedCrate ? selectedCrate.replace(/[\s/\\:]+/g, '_') : 'biblioteca';
+    const filename = `relatorio_tag_doctor_${cratePrefix}_${timestamp}.csv`;
+
+    link.setAttribute('href', url);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    onAddLog(`📊 Planilha CSV exportada com sucesso: ${exportContext} salvas em "${filename}".`);
+  };
+
   // Aplicação de tags para as faixas selecionadas da página
   const handleApplyCleanPage = () => {
     const selectedItems = items
@@ -670,6 +760,24 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
             <span>{isLoading ? 'Analisando...' : '🔍 Escanear'}</span>
+          </button>
+
+          {/* Botão de Exportar Planilha CSV */}
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={isLoading || items.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900/90 text-emerald-300 border border-emerald-700/60 transition disabled:opacity-40 cursor-pointer shadow-sm"
+            title="Exporta a lista de faixas para planilha CSV com UTF-8 (compatível com Excel e Numbers)"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
+            <span>
+              {selectedIds.size > 0
+                ? `📊 Exportar CSV (${selectedIds.size})`
+                : totalDirty > 0
+                  ? `📊 Exportar Ajustes (${totalDirty})`
+                  : `📊 Exportar CSV (${items.length})`}
+            </span>
           </button>
 
           {/* Botão Aplicar Selecionadas com Status em Tempo Real */}

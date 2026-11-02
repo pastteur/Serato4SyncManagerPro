@@ -402,8 +402,10 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     for pattern in NOISE_PATTERNS:
         text = pattern.sub(' ', text)
 
-    # Normaliza hífens e espaçamentos uniformes
-    text = re.sub(r'\s*-\s*', ' - ', text)
+    # Normaliza apenas travessões (–, —) e hífens delimitadores que possuem ao menos um espaço
+    # PRESERVANDO palavras compostas e nomes artísticos com hífen intra-palavra (ex: Blink-182, Homem-Aranha, T-Pain, G-Eazy)
+    text = re.sub(r'[\u2013\u2014]', '-', text)
+    text = re.sub(r'(?:\s+-\s*|\s*-\s+|\s*--+\s*)', ' - ', text)
     text = re.sub(r'\s*-\s*-\s*', ' - ', text)
     text = re.sub(r'\s+', ' ', text).strip()
 
@@ -443,10 +445,12 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # 7. Separação Inteligente: split por " - "
     raw_parts = [unicodedata.normalize('NFC', p.strip()) for p in text.split(" - ") if p.strip()]
 
-    # 8. Remove todas as ocorrências de Crate Raiz embutidas no nome do arquivo
+    # 8. Remove todas as ocorrências de Crate Raiz embutidas no nome do arquivo (com suporte a Unicode NFC)
     non_crate_parts = []
+    crate_norm_lower = crate_raiz.lower().replace('_', ' ')
     for p in raw_parts:
-        if crate_raiz and p.lower() == crate_raiz.lower():
+        p_norm = unicodedata.normalize('NFC', p).lower().replace('_', ' ')
+        if crate_norm_lower and (p_norm == crate_norm_lower or p_norm == crate_norm_lower.replace(' ', '')):
             continue
         non_crate_parts.append(p)
 
@@ -456,7 +460,8 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         p_clean = TRAILING_PUNCT.sub('', p).strip(" -–:").strip()
         if not p_clean:
             continue
-        if p_clean.lower() not in [u.lower() for u in unique_parts]:
+        p_norm = unicodedata.normalize('NFC', p_clean).lower()
+        if p_norm not in [unicodedata.normalize('NFC', u).lower() for u in unique_parts]:
             unique_parts.append(p_clean)
 
     # Deduplica artista repetido entre Parte 0 e Parte 1 (ex: "Rich Gang feat..." e "Rich Gang ft...")
@@ -528,12 +533,13 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # Determina partes base a partir de unique_parts
     if len(unique_parts) >= 3:
         p_art = unique_parts[0]
-        p_tit = unique_parts[1]
-        p_alb = unique_parts[2]
+        # Se for um medley / pot-pourri de 3 ou mais faixas, preserva todas as faixas subsequentes no título
+        p_tit = " - ".join(unique_parts[1:])
+        p_alb = clean_ex_alb
     elif len(unique_parts) == 2:
         p_art = unique_parts[0]
         p_tit = unique_parts[1]
-        p_alb = ""
+        p_alb = clean_ex_alb
     elif len(unique_parts) == 1:
         if clean_ex_art and clean_ex_art.lower() != unique_parts[0].lower():
             p_art = clean_ex_art
@@ -541,7 +547,7 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         else:
             p_art = ""
             p_tit = unique_parts[0]
-        p_alb = ""
+        p_alb = clean_ex_alb
     else:
         p_art, p_tit, p_alb = "", "", ""
 
@@ -989,6 +995,11 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                         "precisa_limpeza": needs_clean,
                         "duplicata_hd": is_collision_duplicate
                     })
+
+    # Se carregou toda a biblioteca (limit <= 0), garante que total_dirty seja 100% idêntico
+    # à contagem real de items com precisa_limpeza para eliminar qualquer divergência entre botão e tabela
+    if limit <= 0 and items:
+        total_dirty = sum(1 for it in items if it.get("precisa_limpeza"))
 
     return {
         "sucesso": True,
