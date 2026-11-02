@@ -43,9 +43,10 @@ export interface CrateInfo {
 interface TagDoctorProps {
   mp3Path: string;
   onAddLog: (message: string) => void;
+  onOpenFileInFinder?: (filePath: string) => void;
 }
 
-export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
+export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenFileInFinder }) => {
   const [items, setItems] = useState<TagDoctorItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isApplying, setIsApplying] = useState<boolean>(false);
@@ -713,6 +714,24 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
+  // Revelar pasta ou arquivo diretamente no Finder
+  const handleRevealFinder = async (caminho: string) => {
+    if (onOpenFileInFinder) {
+      onOpenFileInFinder(caminho);
+    } else {
+      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+      if (isTauri) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          await invoke('open_file_in_finder', { path: caminho });
+          onAddLog(`🔍 Arquivo revelado no Finder: ${caminho.split('/').pop()}`);
+        } catch (err) {
+          onAddLog(`⚠️ Não foi possível revelar arquivo: ${err}`);
+        }
+      }
+    }
+  };
+
   // Contagem dinâmica e consistente de faixas que precisam de ajuste
   const dirtyCount = useMemo(() => items.filter(it => it.precisa_limpeza).length, [items]);
   const effectiveDirty = items.length > 0 ? dirtyCount : totalDirty;
@@ -1223,14 +1242,19 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                         </div>
                       </td>
 
-                      {/* Crate / Pasta Raiz */}
+                      {/* Crate / Pasta Raiz com Link Direto para o Finder */}
                       <td className="py-2 px-3">
-                        <div className="flex items-center gap-1.5">
-                          <Folder className="w-3.5 h-3.5 text-serato-orange shrink-0" />
-                          <span className="font-sans font-semibold text-slate-200 text-xs px-2 py-0.5 rounded bg-serato-card border border-serato-cardBorder truncate max-w-[130px]" title={item.crate_completa || item.crate_raiz}>
+                        <button
+                          type="button"
+                          onClick={() => handleRevealFinder(item.caminho)}
+                          className="flex items-center gap-1.5 group cursor-pointer text-left hover:opacity-90 transition p-0.5 rounded focus:outline-none"
+                          title={`📂 Revelar no Finder:\n${item.caminho}`}
+                        >
+                          <Folder className="w-3.5 h-3.5 text-serato-orange shrink-0 group-hover:scale-110 transition-transform group-hover:text-amber-400" />
+                          <span className="font-sans font-semibold text-slate-200 text-xs px-2 py-0.5 rounded bg-serato-card border border-serato-cardBorder group-hover:border-serato-orange/60 group-hover:text-white transition truncate max-w-[130px] underline decoration-slate-600/60 group-hover:decoration-serato-orange">
                             {item.crate_completa || item.crate_raiz || 'Geral'}
                           </span>
-                        </div>
+                        </button>
                       </td>
 
                       {/* Seta indicadora */}

@@ -526,6 +526,7 @@ export const App: React.FC = () => {
             <TagDoctor
               mp3Path={mp3Path}
               onAddLog={addLog}
+              onOpenFileInFinder={handleOpenFileInFinder}
             />
           </div>
 
