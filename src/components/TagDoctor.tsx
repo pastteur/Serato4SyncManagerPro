@@ -722,44 +722,40 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         : `⚡ Aplicar na Biblioteca (${totalDirty.toLocaleString()})`;
 
   return (
-    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3 relative">
+    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-2.5 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-2 relative">
       
-      {/* Top Banner & Ações Rápidas */}
-      <div className="flex flex-wrap items-center justify-between pb-3 border-b border-serato-cardBorder shrink-0 gap-3">
-        <div>
-          <h3 className="text-sm font-bold text-white flex items-center gap-2">
+      {/* Barra de Título & Ações Principais (Compacta) */}
+      <div className="flex flex-wrap items-center justify-between pb-1.5 border-b border-serato-cardBorder shrink-0 gap-2">
+        <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <Tag className="w-4 h-4 text-serato-cyan" />
-            <span>Higienizador de Tags ID3 & Padronizador de Nomes</span>
-            <span className="text-[10px] bg-serato-neonGreen/20 text-serato-neonGreen px-2 py-0.5 rounded-full border border-serato-neonGreen/30 font-mono">
-              Preservação 100% de Remixes, BPM, Key & Cues
+            <h3 className="text-xs font-bold text-white tracking-tight">Tag Doctor</h3>
+          </div>
+          <span className="text-[10px] bg-serato-neonGreen/15 text-serato-neonGreen px-1.5 py-0.5 rounded-full border border-serato-neonGreen/30 font-mono hidden sm:inline-block">
+            100% Cues & Key
+          </span>
+          <div className="h-3 w-[1px] bg-serato-cardBorder hidden sm:block" />
+          <div className="flex items-center gap-2 text-[11px] font-mono">
+            <span className="text-slate-400">
+              Escopo: <b className="text-serato-cyan">{totalFound.toLocaleString()}</b>
             </span>
-          </h3>
-          <p className="text-[11px] text-serato-muted">
-            Limpa propagandas da web, preserva todas as versões e remixes, identifica a Crate raiz e grava tags oficiais sem tocar na base do Serato.
-          </p>
+            <span className="text-slate-400">
+              Ajustes: <b className={totalDirty > 0 ? "text-amber-400 font-bold" : "text-slate-400"}>{totalDirty.toLocaleString()}</b>
+            </span>
+          </div>
         </div>
 
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Botão de Backup do Banco */}
-          <button
-            type="button"
-            onClick={handleBackupDb}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-serato-card hover:bg-slate-700 text-slate-200 border border-serato-cardBorder transition cursor-pointer"
-            title="Gera cópia de segurança do master.sqlite do Serato"
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-serato-neonGreen" />
-            <span>{backupStatus || 'Backup master.sqlite'}</span>
-          </button>
-
+        <div className="flex items-center gap-1.5 flex-wrap">
           {/* Botão de Analisar */}
           <button
             type="button"
             onClick={() => loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
             disabled={isLoading || isApplying || isBatchApplying}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-serato-card hover:bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 transition disabled:opacity-40 cursor-pointer"
+            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-serato-card hover:bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 transition disabled:opacity-40 cursor-pointer"
+            title="Escanear e auditar tags ID3"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-            <span>{isLoading ? 'Analisando...' : '🔍 Escanear'}</span>
+            <RefreshCw className={`w-3 h-3 ${isLoading ? 'animate-spin' : ''}`} />
+            <span>{isLoading ? 'Analisando...' : 'Escanear'}</span>
           </button>
 
           {/* Botão de Exportar Planilha CSV */}
@@ -767,168 +763,136 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             type="button"
             onClick={handleExportCsv}
             disabled={isLoading || items.length === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900/90 text-emerald-300 border border-emerald-700/60 transition disabled:opacity-40 cursor-pointer shadow-sm"
-            title="Exporta a lista de faixas para planilha CSV com UTF-8 (compatível com Excel e Numbers)"
+            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900/90 text-emerald-300 border border-emerald-700/60 transition disabled:opacity-40 cursor-pointer"
+            title="Exportar faixas para planilha CSV com UTF-8"
           >
-            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-400" />
-            <span>
-              {selectedIds.size > 0
-                ? `📊 Exportar CSV (${selectedIds.size})`
-                : totalDirty > 0
-                  ? `📊 Exportar Ajustes (${totalDirty})`
-                  : `📊 Exportar CSV (${items.length})`}
-            </span>
+            <FileSpreadsheet className="w-3 h-3 text-emerald-400" />
+            <span>Exportar CSV</span>
           </button>
 
-          {/* Botão Aplicar Selecionadas com Status em Tempo Real */}
+          {/* Botão Aplicar Selecionadas */}
           <button
             type="button"
             onClick={handleApplyCleanPage}
             disabled={isLoading || isApplying || isBatchApplying || isEnriching || selectedIds.size === 0}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${
+            className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold border transition cursor-pointer ${
               isApplying
-                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500 shadow-lg shadow-emerald-900/40 animate-pulse'
+                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500 shadow-md animate-pulse'
                 : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-600 disabled:opacity-40'
             }`}
-            title="Aplica as tags e renomeia somente para as faixas selecionadas"
+            title="Grava tags oficiais e renomeia apenas faixas selecionadas"
           >
-            <Sparkles className={`w-3.5 h-3.5 ${isApplying ? 'animate-spin text-emerald-400' : 'text-serato-cyan'}`} />
+            <Sparkles className={`w-3 h-3 ${isApplying ? 'animate-spin text-emerald-400' : 'text-serato-cyan'}`} />
             <span>
               {isApplying
-                ? `✍️ Gravando... ${applyProgress ? `${applyProgress.percentual}% (${applyProgress.processados}/${applyProgress.total})` : ''}`
-                : `✍️ Aplicar Selecionadas (${selectedIds.size})`}
+                ? `Gravando... ${applyProgress ? `${applyProgress.percentual}%` : ''}`
+                : `Aplicar Selecionadas (${selectedIds.size})`}
             </span>
           </button>
 
-          {/* Botão Auto-Identificar Artistas e Títulos via MusicBrainz com Status em Tempo Real */}
+          {/* Botão Auto-Completar */}
           <button
             type="button"
             onClick={handleEnrichArtists}
             disabled={isLoading || isApplying || isBatchApplying || isEnriching || items.length === 0}
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer shadow-sm ${
+            className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold border transition cursor-pointer ${
               isEnriching
-                ? 'bg-sky-950/90 text-sky-300 border-sky-500 shadow-lg shadow-sky-900/40 animate-pulse'
+                ? 'bg-sky-950/90 text-sky-300 border-sky-500 animate-pulse'
                 : 'bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border-cyan-700/60 disabled:opacity-40'
             }`}
-            title="Consulta o catálogo e MusicBrainz para identificar artistas e títulos das faixas que estão sem artista ou desconhecidas"
+            title="Identifica artistas e títulos ausentes via MusicBrainz e base inteligente"
           >
-            <Music className={`w-3.5 h-3.5 ${isEnriching ? 'animate-bounce text-sky-300' : 'text-serato-cyan'}`} />
+            <Music className={`w-3 h-3 ${isEnriching ? 'animate-bounce text-sky-300' : 'text-serato-cyan'}`} />
             <span>
               {isEnriching
-                ? `🎧 Identificando... ${enrichProgress ? `${enrichProgress.percentual}% (${enrichProgress.processados}/${enrichProgress.total})` : ''}`
-                : '🎧 Auto-Completar Artistas & Títulos'}
+                ? `Auto-Completando... ${enrichProgress ? `${enrichProgress.percentual}%` : ''}`
+                : 'Auto-Completar'}
             </span>
           </button>
 
-          {/* Botão de Execução em Lote por Crate ou Biblioteca */}
+          {/* Botão Aplicar em Lote */}
           <button
             type="button"
             onClick={handleBatchApplyCrate}
             disabled={isLoading || isApplying || isBatchApplying || totalFound === 0}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-orange via-amber-500 to-serato-gold hover:opacity-90 text-black shadow-lg shadow-serato-orange/20 transition disabled:opacity-40 cursor-pointer"
-            title="Processa e higieniza todas as faixas da Crate ou subcrate de uma só vez"
+            className="flex items-center gap-1 px-3 py-1 rounded text-xs font-bold bg-gradient-to-r from-serato-orange via-amber-500 to-serato-gold hover:opacity-90 text-black shadow-md transition disabled:opacity-40 cursor-pointer"
+            title="Processa e higieniza todas as faixas do escopo de uma só vez"
           >
-            <Zap className={`w-3.5 h-3.5 ${isBatchApplying ? 'animate-bounce' : ''}`} />
+            <Zap className={`w-3 h-3 ${isBatchApplying ? 'animate-bounce' : ''}`} />
             <span>{isBatchApplying ? 'Processando Lote...' : batchButtonLabel}</span>
+          </button>
+
+          {/* Botão de Backup */}
+          <button
+            type="button"
+            onClick={handleBackupDb}
+            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-serato-card hover:bg-slate-700 text-slate-300 border border-serato-cardBorder transition cursor-pointer"
+            title="Gera cópia de segurança do master.sqlite do Serato"
+          >
+            <ShieldCheck className="w-3 h-3 text-serato-neonGreen" />
+            <span>{backupStatus || 'Backup'}</span>
           </button>
         </div>
       </div>
 
-      {/* Barra de Filtro Inteligente por Crate & Subcrate */}
-      <div className="bg-serato-header/70 border border-serato-cardBorder p-2.5 rounded-lg flex flex-wrap items-center justify-between gap-3 shrink-0">
+      {/* Barra de Filtros, Nomenclatura e Busca (Compacta) */}
+      <div className="bg-serato-header/70 border border-serato-cardBorder p-1.5 rounded-lg flex flex-wrap items-center justify-between gap-2 shrink-0 text-xs">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-            <FolderTree className="w-4 h-4 text-serato-orange" />
-            <span>Filtrar por Crate:</span>
-          </span>
+          {/* Seletor Crate */}
+          <div className="flex items-center gap-1">
+            <FolderTree className="w-3.5 h-3.5 text-serato-orange shrink-0" />
+            <select
+              value={selectedCrate}
+              onChange={(e) => handleCrateChange(e.target.value)}
+              disabled={isLoading || isBatchApplying}
+              className="bg-serato-dark border border-serato-cardBorder text-slate-200 text-xs font-semibold rounded px-2 py-1 focus:outline-none focus:border-serato-orange cursor-pointer max-w-[210px]"
+            >
+              <option value="">📁 Todas as Crates ({totalLibraryCount > 0 ? `${totalLibraryCount.toLocaleString()} faixas` : 'Biblioteca'})</option>
+              {cratesList.map(c => (
+                <option key={c.nome} value={c.nome}>
+                  📁 {c.nome} ({c.total.toLocaleString()})
+                </option>
+              ))}
+            </select>
+          </div>
 
-          {/* Seletor Crate Raiz */}
-          <select
-            value={selectedCrate}
-            onChange={(e) => handleCrateChange(e.target.value)}
-            disabled={isLoading || isBatchApplying}
-            className="bg-serato-dark border border-serato-cardBorder text-slate-200 text-xs font-semibold rounded px-2.5 py-1.5 focus:outline-none focus:border-serato-orange cursor-pointer max-w-[240px]"
-          >
-            <option value="">📁 Todas as Crates ({totalLibraryCount > 0 ? `${totalLibraryCount.toLocaleString()} faixas` : 'Biblioteca Completa'})</option>
-            {cratesList.map(c => (
-              <option key={c.nome} value={c.nome}>
-                📁 {c.nome} ({c.total.toLocaleString()} faixas)
-              </option>
-            ))}
-          </select>
-
-          {/* Seletor de Subcrate (quando uma crate está ativa) */}
-          {selectedCrate && (
-            <div className="flex items-center gap-2 ml-1">
-              <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer bg-serato-dark px-2 py-1 rounded border border-serato-cardBorder">
-                <input
-                  type="checkbox"
-                  checked={includeSubcrates && !selectedSubcrate}
-                  onChange={(e) => handleToggleIncludeSubcrates(e.target.checked)}
-                  disabled={!!selectedSubcrate || isBatchApplying}
-                  className="rounded border-slate-700 bg-serato-dark text-serato-orange focus:ring-0"
-                />
-                <span className="text-[11px] font-medium">Incluir todas as subcrates ({activeCrateData?.subcrates.length || 0})</span>
-              </label>
-
-              {activeCrateData && activeCrateData.subcrates.length > 0 && (
-                <select
-                  value={selectedSubcrate}
-                  onChange={(e) => handleSubcrateChange(e.target.value)}
-                  disabled={isLoading || isBatchApplying}
-                  className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2.5 py-1.5 focus:outline-none focus:border-serato-cyan cursor-pointer max-w-[200px]"
-                >
-                  <option value="">↳ Todas as Subcrates ({activeCrateData.total.toLocaleString()} faixas)</option>
-                  {activeCrateData.subcrates.map(sub => (
-                    <option key={sub.caminho_rel} value={sub.caminho_rel}>
-                      ↳ {sub.nome} ({sub.total} faixas)
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
+          {/* Seletor Subcrate */}
+          {selectedCrate && activeCrateData && activeCrateData.subcrates.length > 0 && (
+            <select
+              value={selectedSubcrate}
+              onChange={(e) => handleSubcrateChange(e.target.value)}
+              disabled={isLoading || isBatchApplying}
+              className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2 py-1 focus:outline-none focus:border-serato-cyan cursor-pointer max-w-[180px]"
+            >
+              <option value="">↳ Todas Subcrates ({activeCrateData.total.toLocaleString()})</option>
+              {activeCrateData.subcrates.map(sub => (
+                <option key={sub.caminho_rel} value={sub.caminho_rel}>
+                  ↳ {sub.nome} ({sub.total})
+                </option>
+              ))}
+            </select>
           )}
-        </div>
 
-        {/* Informação contextual do filtro selecionado */}
-        <div className="flex items-center gap-3 text-xs font-mono">
-          <span className="text-slate-400">
-            Escopo: <b className="text-white">{selectedSubcrate ? `${selectedCrate} -> ${selectedSubcrate}` : (selectedCrate || 'Biblioteca Completa')}</b>
-          </span>
-          <span className="text-slate-400">
-            Total no Escopo: <b className="text-serato-cyan">{totalFound.toLocaleString()}</b>
-          </span>
-          <span className="text-slate-400">
-            Para Ajustar: <b className="text-serato-gold">{totalDirty.toLocaleString()}</b>
-          </span>
-        </div>
-      </div>
+          {/* Formato do Nome */}
+          <div className="flex items-center gap-1">
+            <Disc3 className="w-3.5 h-3.5 text-serato-cyan shrink-0" />
+            <select
+              value={namingMode}
+              onChange={(e) => {
+                const newMode = e.target.value as 'full' | 'crate' | 'dj';
+                setNamingMode(newMode);
+                loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, newMode);
+              }}
+              className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2 py-1 focus:outline-none cursor-pointer max-w-[200px]"
+            >
+              <option value="crate">📂 Artista - Título - Crate</option>
+              <option value="full">🌟 Artista - Título - Crate - Álbum</option>
+              <option value="dj">🎵 Artista - Título Clássico</option>
+            </select>
+          </div>
 
-      {/* Barra de Opções de Nomenclatura e Busca */}
-      <div className="flex flex-wrap items-center justify-between gap-3 bg-serato-card px-3 py-2 rounded-lg border border-serato-cardBorder shrink-0">
-        
-        {/* Seletor de Modelo de Nome */}
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-300 font-semibold flex items-center gap-1">
-            <Disc3 className="w-3.5 h-3.5 text-serato-cyan" />
-            <span>Formato do Nome:</span>
-          </span>
-
-          <select
-            value={namingMode}
-            onChange={(e) => {
-              const newMode = e.target.value as 'full' | 'crate' | 'dj';
-              setNamingMode(newMode);
-              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, newMode);
-            }}
-            className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer"
-          >
-            <option value="full">🌟 Artista - Título (Versão/Remix) - Crate - Álbum</option>
-            <option value="crate">📂 Artista - Título (Versão/Remix) - Crate</option>
-            <option value="dj">🎵 Artista - Título (Versão/Remix) Clássico</option>
-          </select>
-
-          <label className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border transition-all cursor-pointer ${
+          {/* Checkbox Renomear HD */}
+          <label className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded border transition-all cursor-pointer ${
             renameFilesOnDisk 
               ? 'bg-serato-cyan/15 border-serato-cyan/40 text-serato-cyan font-medium' 
               : 'bg-slate-800/40 border-slate-700 text-slate-400'
@@ -937,199 +901,146 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
               type="checkbox"
               checked={renameFilesOnDisk}
               onChange={(e) => setRenameFilesOnDisk(e.target.checked)}
-              className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0"
+              className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0 w-3 h-3"
             />
-            <span>Renomear arquivos no HD (remover propagandas da web)</span>
+            <span>Renomear no HD</span>
           </label>
         </div>
 
-        {/* Busca */}
-        <div className="relative w-64">
-          <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
-          <input
-            type="text"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
-            placeholder="Filtrar por nome, artista ou remix..."
-            className="w-full pl-8 pr-3 py-1 text-xs bg-serato-dark border border-serato-cardBorder rounded-md text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan"
-          />
+        {/* Busca e Limite de Exibição */}
+        <div className="flex items-center gap-2">
+          <div className="relative w-48 sm:w-56">
+            <Search className="w-3 h-3 text-serato-muted absolute left-2 top-2" />
+            <input
+              type="text"
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
+              placeholder="Filtrar por nome, artista..."
+              className="w-full pl-7 pr-2 py-0.5 text-xs bg-serato-dark border border-serato-cardBorder rounded text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan"
+            />
+          </div>
+
+          <select
+            value={displayLimit}
+            onChange={(e) => {
+              const newLimit = parseInt(e.target.value, 10);
+              setDisplayLimit(newLimit);
+              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, namingMode, newLimit);
+            }}
+            className="bg-serato-dark border border-serato-cardBorder text-slate-300 text-xs font-semibold rounded px-2 py-0.5 focus:outline-none cursor-pointer"
+          >
+            <option value={0}>♾️ Toda Biblioteca</option>
+            <option value={1000}>1.000 faixas</option>
+            <option value={500}>500 faixas</option>
+            <option value={200}>200 faixas</option>
+          </select>
         </div>
       </div>
 
-      {/* Alerta de renomeação no HD desativada */}
+      {/* Alerta Compacto de renomeação no HD desativada */}
       {!renameFilesOnDisk && totalDirty > 0 && (
-        <div className="w-full bg-amber-950/40 border border-amber-600/50 rounded-lg px-3 py-2 flex items-center justify-between text-xs text-amber-300 shrink-0">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-serato-gold shrink-0" />
-            <span>
-              <b>Atenção:</b> A opção <u>Renomear arquivos no HD</u> está desmarcada. Para retirar definitivamente essas {totalDirty} faixas da lista e padronizar os nomes físicos no disco, marque a caixa acima antes de aplicar.
+        <div className="w-full bg-amber-950/30 border border-amber-600/40 rounded px-2 py-0.5 flex items-center justify-between text-[11px] text-amber-300 shrink-0">
+          <div className="flex items-center gap-1.5 truncate">
+            <AlertTriangle className="w-3 h-3 text-serato-gold shrink-0" />
+            <span className="truncate">
+              <b>Dica:</b> Para retirar essas {totalDirty} faixas da lista e padronizar o nome no disco, ative a opção <u>Renomear no HD</u> acima.
             </span>
           </div>
           <button
             type="button"
             onClick={() => setRenameFilesOnDisk(true)}
-            className="text-[11px] underline font-bold hover:text-white cursor-pointer ml-3 whitespace-nowrap bg-amber-900/60 hover:bg-amber-800 px-2 py-1 rounded border border-amber-600/60 transition"
+            className="text-[10px] underline font-bold hover:text-white cursor-pointer ml-2 whitespace-nowrap bg-amber-900/60 hover:bg-amber-800 px-1.5 py-0.2 rounded border border-amber-600/60 transition"
           >
-            Ativar Renomeação no HD
+            Ativar Agora
           </button>
         </div>
       )}
 
-      {/* Barra de Status e Progresso em Tempo Real durante a Varredura */}
-      {isLoading && (
-        <div className="bg-slate-900/90 border border-serato-cyan/60 p-3.5 rounded-xl shadow-2xl flex flex-col gap-2 shrink-0 backdrop-blur animate-in fade-in duration-200">
-          <div className="flex items-center justify-between text-xs font-bold text-white">
-            <span className="flex items-center gap-2 text-serato-cyan">
-              <RefreshCw className="w-4 h-4 text-serato-cyan animate-spin" />
-              <span>
-                {scanProgress
-                  ? `Analisando ${scanProgress.crate ? `Crate "${scanProgress.crate}"` : 'Biblioteca Completa'}...`
-                  : 'Iniciando varredura rápida de tags ID3 e nomes...'}
-              </span>
-            </span>
-            <span className="font-mono text-serato-cyan font-bold text-sm">
-              {scanProgress ? `${scanProgress.percentual}%` : 'Carregando...'}
-              {scanProgress && scanProgress.total > 0 && (
-                <span className="text-xs text-slate-400 font-normal ml-2">
-                  ({scanProgress.processados.toLocaleString()} / {scanProgress.total.toLocaleString()} faixas)
-                </span>
+      {/* Barra de Progresso Slim em Tempo Real (In-Line para economizar 100% do espaço vertical) */}
+      {(isLoading || isBatchApplying || isApplying || isEnriching) && (
+        <div className="bg-slate-900 border border-serato-cyan/50 px-2.5 py-1 rounded-lg shadow-md flex flex-col gap-1 shrink-0 animate-in fade-in duration-150">
+          <div className="flex items-center justify-between text-[11px] font-medium text-white">
+            <div className="flex items-center gap-2 truncate max-w-[70%]">
+              {isLoading && (
+                <>
+                  <RefreshCw className="w-3 h-3 text-serato-cyan animate-spin shrink-0" />
+                  <span className="text-serato-cyan font-bold truncate">Varrendo disco & tags ID3...</span>
+                  <span className="text-slate-400 truncate text-[10px]">{scanProgress?.faixa}</span>
+                </>
               )}
-            </span>
+              {isBatchApplying && (
+                <>
+                  <Zap className="w-3 h-3 text-serato-orange animate-bounce shrink-0" />
+                  <span className="text-serato-orange font-bold truncate">Higienizando em lote:</span>
+                  <span className="text-slate-300 truncate text-[10px]">{batchProgress?.faixa_atual || 'Processando...'}</span>
+                </>
+              )}
+              {isApplying && (
+                <>
+                  <Sparkles className="w-3 h-3 text-emerald-400 animate-spin shrink-0" />
+                  <span className="text-emerald-400 font-bold truncate">Gravando tags selecionadas:</span>
+                  <span className="text-slate-300 truncate text-[10px]">{applyProgress?.faixa_atual || 'Gravando...'}</span>
+                </>
+              )}
+              {isEnriching && (
+                <>
+                  <Music className="w-3 h-3 text-sky-400 animate-bounce shrink-0" />
+                  <span className="text-sky-400 font-bold truncate">Auto-completando via MusicBrainz:</span>
+                  <span className="text-slate-300 truncate text-[10px]">{enrichProgress?.faixa_atual || 'Consultando catálogo...'}</span>
+                </>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
+              {isLoading && scanProgress && (
+                <span className="text-serato-cyan font-bold">{scanProgress.percentual}% ({scanProgress.processados.toLocaleString()}/{scanProgress.total.toLocaleString()})</span>
+              )}
+              {isBatchApplying && batchProgress && (
+                <span className="text-serato-gold font-bold">{batchProgress.percentual}% ({batchProgress.processados.toLocaleString()}/{batchProgress.total.toLocaleString()}) • ✅ {batchProgress.atualizados}</span>
+              )}
+              {isApplying && applyProgress && (
+                <span className="text-emerald-300 font-bold">{applyProgress.percentual}% ({applyProgress.processados.toLocaleString()}/{applyProgress.total.toLocaleString()}) • ✅ {applyProgress.atualizados}</span>
+              )}
+              {isEnriching && enrichProgress && (
+                <span className="text-sky-300 font-bold">{enrichProgress.percentual}% ({enrichProgress.processados.toLocaleString()}/{enrichProgress.total.toLocaleString()}) • ✨ {enrichProgress.enriquecidos}</span>
+              )}
+            </div>
           </div>
 
-          {/* Barra de Progresso com Gradiente Serato */}
-          <div className="w-full bg-slate-950 rounded-full h-3 border border-serato-cardBorder overflow-hidden shadow-inner">
+          {/* Micro Linha de Progresso (2px) */}
+          <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
             <div
-              className={`h-3 transition-all duration-150 rounded-full ${
-                scanProgress
-                  ? 'bg-gradient-to-r from-cyan-500 via-serato-cyan to-blue-500 shadow-lg shadow-cyan-500/30'
-                  : 'bg-gradient-to-r from-serato-cyan to-blue-600 animate-pulse w-full'
+              className={`h-full transition-all duration-150 rounded-full ${
+                isBatchApplying
+                  ? 'bg-gradient-to-r from-serato-cyan via-amber-400 to-serato-orange'
+                  : isApplying
+                    ? 'bg-gradient-to-r from-emerald-500 to-cyan-400'
+                    : isEnriching
+                      ? 'bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500'
+                      : 'bg-gradient-to-r from-serato-cyan to-blue-500'
               }`}
-              style={scanProgress ? { width: `${Math.min(100, Math.max(1, scanProgress.percentual))}%` } : undefined}
+              style={{
+                width: `${Math.min(100, Math.max(1, 
+                  isBatchApplying && batchProgress ? batchProgress.percentual :
+                  isApplying && applyProgress ? applyProgress.percentual :
+                  isEnriching && enrichProgress ? enrichProgress.percentual :
+                  scanProgress ? scanProgress.percentual : 100
+                ))}%`
+              }}
             />
-          </div>
-
-          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
-            <span className="truncate max-w-[75%]">
-              {scanProgress?.faixa ? (
-                <>🎵 Em análise: <b className="text-slate-200">{scanProgress.faixa}</b></>
-              ) : (
-                <>⚡ Leitura de alta velocidade (checagem de nomes, tags e Serato cues)...</>
-              )}
-            </span>
-            <span className="text-serato-cyan/90 font-semibold flex items-center gap-1">
-              <span className="inline-block w-2 h-2 rounded-full bg-serato-cyan animate-ping mr-1" />
-              Varrendo disco
-            </span>
           </div>
         </div>
       )}
 
-      {/* Modal / Overlay de Progresso em Tempo Real quando Executando em Lote */}
-      {isBatchApplying && batchProgress && (
-        <div className="bg-cyan-950/40 border border-serato-cyan/50 p-4 rounded-xl shadow-xl flex flex-col gap-2 shrink-0 animate-pulse">
-          <div className="flex items-center justify-between text-xs font-bold text-white">
-            <span className="flex items-center gap-2 text-serato-cyan">
-              <Zap className="w-4 h-4 text-serato-orange animate-bounce" />
-              <span>Higienizando em lote: {selectedCrate ? `Crate "${selectedCrate}"` : 'Biblioteca Completa'}...</span>
-            </span>
-            <span className="font-mono text-serato-gold">
-              {batchProgress.percentual}% ({batchProgress.processados.toLocaleString()} / {batchProgress.total.toLocaleString()} faixas)
-            </span>
-          </div>
-
-          {/* Barra de Progresso */}
-          <div className="w-full bg-slate-900 rounded-full h-3 border border-serato-cardBorder overflow-hidden">
-            <div
-              className="bg-gradient-to-r from-serato-cyan via-amber-400 to-serato-orange h-3 transition-all duration-200"
-              style={{ width: `${Math.min(100, Math.max(1, batchProgress.percentual))}%` }}
-            />
-          </div>
-
-          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
-            <span className="truncate max-w-[70%]">
-              🎵 Faixa atual: <b className="text-slate-200">{batchProgress.faixa_atual}</b>
-            </span>
-            <span className="text-serato-neonGreen font-semibold">
-              ✅ {batchProgress.atualizados.toLocaleString()} faixas ajustadas
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Barra de Status e Progresso em Tempo Real: Aplicando Faixas Selecionadas */}
-      {isApplying && applyProgress && (
-        <div className="bg-emerald-950/50 border border-emerald-500/60 p-4 rounded-xl shadow-2xl flex flex-col gap-2 shrink-0 animate-in fade-in duration-200">
-          <div className="flex items-center justify-between text-xs font-bold text-white">
-            <span className="flex items-center gap-2 text-emerald-400">
-              <Sparkles className="w-4 h-4 text-emerald-400 animate-spin" />
-              <span>Gravando tags ID3 oficiais nas faixas selecionadas...</span>
-            </span>
-            <span className="font-mono text-emerald-300 font-bold text-sm">
-              {applyProgress.percentual}% ({applyProgress.processados.toLocaleString()} / {applyProgress.total.toLocaleString()} faixas)
-            </span>
-          </div>
-
-          {/* Barra de Progresso com Gradiente Esmeralda */}
-          <div className="w-full bg-slate-950 rounded-full h-3 border border-emerald-900/60 overflow-hidden shadow-inner">
-            <div
-              className="bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 h-3 transition-all duration-150 rounded-full shadow-lg shadow-emerald-500/30"
-              style={{ width: `${Math.min(100, Math.max(1, applyProgress.percentual))}%` }}
-            />
-          </div>
-
-          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
-            <span className="truncate max-w-[70%]">
-              🎵 Faixa atual: <b className="text-slate-200">{applyProgress.faixa_atual || 'Gravando tags...'}</b>
-            </span>
-            <span className="text-serato-neonGreen font-semibold shrink-0">
-              ✅ {applyProgress.atualizados.toLocaleString()} gravada(s)
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Barra de Status e Progresso em Tempo Real: Auto-Completando Artistas & Títulos */}
-      {isEnriching && enrichProgress && (
-        <div className="bg-sky-950/50 border border-sky-500/60 p-4 rounded-xl shadow-2xl flex flex-col gap-2 shrink-0 animate-in fade-in duration-200">
-          <div className="flex items-center justify-between text-xs font-bold text-white">
-            <span className="flex items-center gap-2 text-sky-400">
-              <Music className="w-4 h-4 text-sky-400 animate-bounce" />
-              <span>Auto-Completando Artistas & Títulos via Nuvem/Cache e MusicBrainz...</span>
-            </span>
-            <span className="font-mono text-sky-300 font-bold text-sm">
-              {enrichProgress.percentual}% ({enrichProgress.processados.toLocaleString()} / {enrichProgress.total.toLocaleString()} faixas)
-            </span>
-          </div>
-
-          {/* Barra de Progresso com Gradiente Índigo/Sky */}
-          <div className="w-full bg-slate-950 rounded-full h-3 border border-sky-900/60 overflow-hidden shadow-inner">
-            <div
-              className="bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500 h-3 transition-all duration-150 rounded-full shadow-lg shadow-sky-500/30"
-              style={{ width: `${Math.min(100, Math.max(1, enrichProgress.percentual))}%` }}
-            />
-          </div>
-
-          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
-            <span className="truncate max-w-[70%]">
-              🔍 Consultando: <b className="text-slate-200">{enrichProgress.faixa_atual || 'Pesquisando na base...'}</b>
-            </span>
-            <span className="text-sky-300 font-semibold shrink-0">
-              ✨ {enrichProgress.enriquecidos.toLocaleString()} identificada(s)
-            </span>
-          </div>
-        </div>
-      )}
-
-      {/* Barra de Filtros Rápidos, Seleção e Exibição Contínua */}
-      <div className="bg-serato-header/50 border border-serato-cardBorder p-2 rounded-lg flex flex-wrap items-center justify-between gap-3 shrink-0">
+      {/* Barra de Filtros Rápidos & Seleção */}
+      <div className="bg-serato-header/40 border border-serato-cardBorder px-2 py-1 rounded-lg flex flex-wrap items-center justify-between gap-2 shrink-0 text-xs">
         {/* Pílulas de Status */}
-        <div className="flex items-center gap-1.5 bg-serato-dark/80 p-1 rounded-lg border border-serato-cardBorder text-xs">
+        <div className="flex items-center gap-1 bg-serato-dark/80 p-0.5 rounded border border-serato-cardBorder text-[11px]">
           <button
             type="button"
             onClick={() => setStatusFilter('all')}
-            className={`px-2.5 py-1 rounded font-semibold transition cursor-pointer ${
+            className={`px-2 py-0.5 rounded font-semibold transition cursor-pointer ${
               statusFilter === 'all'
                 ? 'bg-serato-card text-white shadow-sm border border-serato-cardBorder'
                 : 'text-slate-400 hover:text-slate-200'
@@ -1140,80 +1051,67 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           <button
             type="button"
             onClick={() => setStatusFilter('dirty')}
-            className={`px-2.5 py-1 rounded font-semibold transition cursor-pointer flex items-center gap-1.5 ${
+            className={`px-2 py-0.5 rounded font-semibold transition cursor-pointer flex items-center gap-1 ${
               statusFilter === 'dirty'
                 ? 'bg-amber-950/40 text-amber-300 shadow-sm border border-amber-600/50'
                 : 'text-slate-400 hover:text-amber-400'
             }`}
           >
-            <span className="w-2 h-2 rounded-full bg-serato-gold inline-block"></span>
+            <span className="w-1.5 h-1.5 rounded-full bg-serato-gold inline-block"></span>
             Para Ajustar ({items.filter(it => it.precisa_limpeza).length})
           </button>
           <button
             type="button"
             onClick={() => setStatusFilter('clean')}
-            className={`px-2.5 py-1 rounded font-semibold transition cursor-pointer flex items-center gap-1.5 ${
+            className={`px-2 py-0.5 rounded font-semibold transition cursor-pointer flex items-center gap-1 ${
               statusFilter === 'clean'
                 ? 'bg-emerald-950/40 text-emerald-300 shadow-sm border border-emerald-600/50'
                 : 'text-slate-400 hover:text-emerald-400'
             }`}
           >
-            <span className="w-2 h-2 rounded-full bg-serato-neonGreen inline-block"></span>
+            <span className="w-1.5 h-1.5 rounded-full bg-serato-neonGreen inline-block"></span>
             Limpas ({items.filter(it => !it.precisa_limpeza).length})
           </button>
         </div>
 
         {/* Botões de Seleção Rápida */}
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-1.5 text-xs">
           <button
             type="button"
             onClick={handleSelectAllDisplayed}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-800 text-slate-300 border border-serato-cardBorder cursor-pointer transition font-medium"
-            title="Seleciona todas as faixas exibidas na lista para aplicação imediata"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-slate-300 border border-serato-cardBorder cursor-pointer transition text-[11px]"
+            title="Seleciona todas as faixas exibidas"
           >
-            <CheckSquare className="w-3.5 h-3.5 text-serato-cyan" />
-            <span>Selecionar Tudo ({filteredAndSortedItems.length})</span>
+            <CheckSquare className="w-3 h-3 text-serato-cyan" />
+            <span>Tudo ({filteredAndSortedItems.length})</span>
           </button>
 
           <button
             type="button"
             onClick={handleSelectOnlyPending}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-serato-dark hover:bg-slate-800 text-amber-300 border border-amber-600/40 cursor-pointer transition font-medium"
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-amber-300 border border-amber-600/40 cursor-pointer transition text-[11px]"
             title="Seleciona apenas as faixas que precisam de ajuste"
           >
-            <Sparkles className="w-3.5 h-3.5 text-serato-gold" />
-            <span>Selecionar Pendentes ({filteredAndSortedItems.filter(it => it.precisa_limpeza).length})</span>
+            <Sparkles className="w-3 h-3 text-serato-gold" />
+            <span>Pendentes ({filteredAndSortedItems.filter(it => it.precisa_limpeza).length})</span>
           </button>
 
           {selectedIds.size > 0 && (
             <button
               type="button"
               onClick={handleDeselectAll}
-              className="flex items-center gap-1 px-2 py-1 rounded text-slate-400 hover:text-slate-200 cursor-pointer transition"
+              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-200 cursor-pointer transition text-[11px]"
             >
-              <Square className="w-3.5 h-3.5" />
+              <Square className="w-3 h-3" />
               <span>Desmarcar ({selectedIds.size})</span>
             </button>
           )}
-        </div>
 
-        {/* Seletor de Limite de Exibição (Sem Abas) */}
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-slate-400 font-medium">Exibição:</span>
-          <select
-            value={displayLimit}
-            onChange={(e) => {
-              const newLimit = parseInt(e.target.value, 10);
-              setDisplayLimit(newLimit);
-              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, namingMode, newLimit);
-            }}
-            className="bg-serato-dark border border-serato-cardBorder text-slate-200 font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer"
-          >
-            <option value={0}>♾️ Toda a Biblioteca (sem abas)</option>
-            <option value={1000}>1.000 faixas</option>
-            <option value={500}>500 faixas</option>
-            <option value={200}>200 faixas</option>
-          </select>
+          <div className="h-3 w-[1px] bg-serato-cardBorder mx-1" />
+
+          <span className="text-[11px] font-mono text-serato-cyan">
+            {selectedIds.size} selecionada(s)
+          </span>
         </div>
       </div>
 

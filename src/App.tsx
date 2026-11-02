@@ -13,7 +13,7 @@ import { BackupManager } from './components/BackupManager';
 import { AudioHealth } from './components/AudioHealth';
 import { AutoCueGenerator } from './components/AutoCueGenerator';
 import { LogEntry, SyncSummary } from './types';
-import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target } from 'lucide-react';
+import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2 } from 'lucide-react';
 
 // Tauri API dynamic loader
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -307,7 +307,7 @@ export const App: React.FC = () => {
       <Header isRunning={isRunning} />
 
       {/* Main Container without Double Scrolling */}
-      <main className="flex-1 min-h-0 flex flex-col p-3 md:p-5 space-y-3 overflow-hidden">
+      <main className="flex-1 min-h-0 flex flex-col p-2 md:p-3 space-y-2 overflow-hidden">
         {/* Step 1: Path Selection (Compact & Fixed) */}
         <div className="shrink-0">
           <PathSelector
@@ -320,31 +320,50 @@ export const App: React.FC = () => {
           />
         </div>
 
-        {/* Step 2: Controls & Metrics (Compact & Fixed) */}
-        <div className="shrink-0">
-          <SyncControls
-            isRunning={isRunning}
-            onStartSync={handleStartSync}
-            canStart={Boolean(mp3Path && seratoPath)}
-            exportCsv={exportCsv}
-            setExportCsv={setExportCsv}
-            summary={summary}
-          />
-        </div>
+        {/* Step 2: Controls & Metrics (Visible on Sync Tabs: Terminal, Duplicates, Crates Tree) */}
+        {['logs', 'duplicates', 'tree'].includes(activeTab) && (
+          <div className="shrink-0 animate-in fade-in duration-150">
+            <SyncControls
+              isRunning={isRunning}
+              onStartSync={handleStartSync}
+              canStart={Boolean(mp3Path && seratoPath)}
+              exportCsv={exportCsv}
+              setExportCsv={setExportCsv}
+              summary={summary}
+            />
+          </div>
+        )}
+
+        {/* Notificador Slim quando Sincronização estiver rodando em segundo plano e usuário estiver em outra aba */}
+        {isRunning && !['logs', 'duplicates', 'tree'].includes(activeTab) && (
+          <div className="bg-serato-cyan/15 border border-serato-cyan/50 px-3 py-1.5 rounded-lg flex items-center justify-between text-xs shrink-0 animate-pulse">
+            <span className="flex items-center gap-2 text-serato-cyan font-bold">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-serato-cyan" />
+              <span>Sincronização Serato 4 ativa em segundo plano...</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => setActiveTab('logs')}
+              className="text-[11px] bg-serato-cyan text-black font-bold px-2.5 py-0.5 rounded hover:bg-cyan-300 transition cursor-pointer"
+            >
+              Ver no Terminal
+            </button>
+          </div>
+        )}
 
         {/* Navigation Tabs Bar (Compact & Fixed) */}
-        <div className="flex items-center space-x-1 border-b border-serato-cardBorder pt-1 shrink-0">
+        <div className="flex items-center space-x-1 border-b border-serato-cardBorder pt-0.5 shrink-0 overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveTab('logs')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'logs'
                 ? 'bg-serato-dark text-serato-cyan border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
             }`}
           >
             <Terminal className="w-3.5 h-3.5" />
-            <span>Terminal em Tempo Real</span>
+            <span>Terminal & Sync</span>
             {logs.length > 0 && (
               <span className="text-[10px] bg-serato-card text-serato-muted px-1.5 py-0.2 rounded-full border border-serato-cardBorder font-mono">
                 {logs.length}
@@ -355,7 +374,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('duplicates')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'duplicates'
                 ? 'bg-serato-dark text-serato-orange border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -373,20 +392,20 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('tree')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'tree'
                 ? 'bg-serato-dark text-serato-gold border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
             }`}
           >
             <FolderTree className="w-3.5 h-3.5" />
-            <span>Estrutura de Crates (%%)</span>
+            <span>Estrutura de Crates</span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab('tagDoctor')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'tagDoctor'
                 ? 'bg-serato-dark text-cyan-400 border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -399,7 +418,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('soundSeal')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'soundSeal'
                 ? 'bg-serato-dark text-serato-cyan border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -412,7 +431,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('matcher')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'matcher'
                 ? 'bg-serato-dark text-[#1DB954] border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -425,7 +444,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('health')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'health'
                 ? 'bg-serato-dark text-rose-400 border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -438,7 +457,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('autoCue')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'autoCue'
                 ? 'bg-serato-dark text-serato-gold border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -451,7 +470,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('backups')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'backups'
                 ? 'bg-serato-dark text-serato-neonGreen border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -464,7 +483,7 @@ export const App: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('guide')}
-            className={`flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
               activeTab === 'guide'
                 ? 'bg-serato-dark text-slate-200 border-serato-cardBorder border-b-transparent shadow-md'
                 : 'bg-transparent text-serato-muted hover:text-white border-transparent'
@@ -475,17 +494,17 @@ export const App: React.FC = () => {
           </button>
         </div>
 
-        {/* Tab Contents: Dynamic Responsive Container Filling Remaining Space */}
-        <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-          {activeTab === 'logs' && (
+        {/* Tab Contents: Persistent Tab Containers Mounted in Background to Avoid Interruptions */}
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col relative">
+          <div className={activeTab === 'logs' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <TerminalLogs
               logs={logs}
               onClear={() => setLogs([])}
               isRunning={isRunning}
             />
-          )}
+          </div>
 
-          {activeTab === 'duplicates' && (
+          <div className={activeTab === 'duplicates' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <DuplicatesAudit
               duplicates={summary?.duplicados || []}
               csvPath={summary?.csv_duplicados || null}
@@ -494,23 +513,23 @@ export const App: React.FC = () => {
               onOpenFileInFinder={handleOpenFileInFinder}
               onMoveToTrash={handleMoveToTrash}
             />
-          )}
+          </div>
 
-          {activeTab === 'tree' && (
+          <div className={activeTab === 'tree' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <CrateTreePreview
               summary={summary}
               onOpenFileInFinder={handleOpenFileInFinder}
             />
-          )}
+          </div>
 
-          {activeTab === 'tagDoctor' && (
+          <div className={activeTab === 'tagDoctor' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <TagDoctor
               mp3Path={mp3Path}
               onAddLog={addLog}
             />
-          )}
+          </div>
 
-          {activeTab === 'soundSeal' && (
+          <div className={activeTab === 'soundSeal' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <SoundSeal
               mp3Path={mp3Path}
               seratoPath={seratoPath}
@@ -518,46 +537,44 @@ export const App: React.FC = () => {
               onOpenFileInFinder={handleOpenFileInFinder}
               onMoveToTrash={handleMoveToTrash}
             />
-          )}
+          </div>
 
-          {activeTab === 'matcher' && (
+          <div className={activeTab === 'matcher' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <TrackMatcher
               mp3Path={mp3Path}
               seratoPath={seratoPath}
               onAddLog={addLog}
               onOpenFileInFinder={handleOpenFileInFinder}
             />
-          )}
+          </div>
 
-          {activeTab === 'health' && (
+          <div className={activeTab === 'health' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <AudioHealth
               mp3Path={mp3Path}
               onAddLog={addLog}
               onOpenFileInFinder={handleOpenFileInFinder}
               onMoveToTrash={handleMoveToTrash}
             />
-          )}
+          </div>
 
-          {activeTab === 'autoCue' && (
+          <div className={activeTab === 'autoCue' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <AutoCueGenerator
               mp3Path={mp3Path}
               onAddLog={addLog}
               onOpenFileInFinder={handleOpenFileInFinder}
             />
-          )}
+          </div>
 
-          {activeTab === 'backups' && (
+          <div className={activeTab === 'backups' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
             <BackupManager
               onAddLog={addLog}
               onOpenLogsFolder={handleOpenLogsFolder}
             />
-          )}
+          </div>
 
-          {activeTab === 'guide' && (
-            <div className="overflow-y-auto flex-1">
-              <ArchitectureGuide />
-            </div>
-          )}
+          <div className={activeTab === 'guide' ? 'flex-1 min-h-0 flex flex-col h-full overflow-y-auto' : 'hidden'}>
+            <ArchitectureGuide />
+          </div>
         </div>
       </main>
     </div>
