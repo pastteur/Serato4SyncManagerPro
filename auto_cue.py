@@ -42,26 +42,29 @@ CUE_COLORS = {
 }
 
 
-def build_serato_cue_entry(index: int, pos_ms: int, color_bytes: bytes, label: str) -> bytearray:
+def build_serato_cue_entry(index: int, pos_ms: int, color_bytes: bytes, label: str = "") -> bytearray:
     """
     Monta um bloco binário CUE oficial do Serato Markers2.
-    Layout binário oficial (Holzhaus/serato-tags spec):
-      00: uint8_t index (0..7)
-      01: uint8_t flag (0x00)
-      02-05: uint32_t position in milliseconds (LITTLE-ENDIAN)
-      06: uint8_t separator (0x00)
+    Layout binário oficial Serato DJ Pro:
+      00: 0x00 (byte nulo)
+      01: uint8_t index (0..7)
+      02-05: uint32_t position in milliseconds (BIG-ENDIAN)
+      06: 0x00 (byte separador)
       07-09: 3 bytes RGB color (ex: b'\xcc\x00\x00')
       0a-0b: 2 bytes padding (b'\x00\x00')
-      0c..: UTF-8 label (null-terminated)
+      0c..: UTF-8 label (null-terminated), ou 0x00 se vazio
     """
     data = bytearray()
-    data.append(index)                                              # Offset 00: índice do cue (0..7)
-    data.append(0)                                                  # Offset 01: flag / byte nulo
-    data.extend(int(pos_ms).to_bytes(4, byteorder='little'))        # Offset 02-05: posição ms (LITTLE-ENDIAN)
-    data.append(0)                                                  # Offset 06: separador
-    data.extend(color_bytes[:3])                                    # Offset 07-09: cor RGB (3 bytes)
-    data.extend(b'\x00\x00')                                        # Offset 0a-0b: padding
-    data.extend(label.encode('utf-8') + b'\x00')                    # Offset 0c..: label null-terminated
+    data.append(0)                                              # Offset 00: byte nulo 0x00
+    data.append(index & 0x07)                                   # Offset 01: índice do cue (0..7)
+    data.extend(int(pos_ms).to_bytes(4, byteorder='big'))       # Offset 02-05: posição ms (BIG-ENDIAN oficial)
+    data.append(0)                                              # Offset 06: separador
+    data.extend(color_bytes[:3])                                # Offset 07-09: cor RGB (3 bytes)
+    if label:
+        data.extend(b'\x00\x00')                                # Offset 0a-0b: padding
+        data.extend(label.encode('utf-8') + b'\x00')            # Offset 0c..: label null-terminated
+    else:
+        data.extend(b'\x00\x00\x00')                            # 3 bytes nulos se sem label
 
     entry = bytearray(b'CUE\x00')
     entry.extend(len(data).to_bytes(4, byteorder='big'))

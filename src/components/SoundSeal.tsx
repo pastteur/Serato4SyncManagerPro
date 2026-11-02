@@ -79,8 +79,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       const { invoke } = await import('@tauri-apps/api/core');
       const res = await invoke<string>('get_sound_seal_status');
       if (res && res.trim()) {
-        const parsed = JSON.parse(res);
-        setStatus(parsed);
+        try {
+          const parsed = JSON.parse(res);
+          setStatus(parsed);
+        } catch (err) {
+          console.error('JSON inválido em loadStatus:', res);
+        }
       }
     } catch (e) {
       console.error('Falha ao carregar status do Sound Seal:', e);
@@ -93,19 +97,23 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       const { invoke } = await import('@tauri-apps/api/core');
       const res = await invoke<string>('get_sound_seal_duplicates');
       if (res && res.trim()) {
-        const parsed = JSON.parse(res);
-        if (parsed.sucesso) {
-          const groups = parsed.duplicados_som || [];
-          setDuplicatesBySound(groups);
+        try {
+          const parsed = JSON.parse(res);
+          if (parsed && parsed.sucesso) {
+            const groups = parsed.duplicados_som || [];
+            setDuplicatesBySound(groups);
 
-          // Pré-seleciona todas as cópias redundantes automaticamente (deixando a referência segura)
-          const initialSelected = new Set<string>();
-          groups.forEach((g: any) => {
-            (g.faixas || []).slice(1).forEach((f: any) => {
-              initialSelected.add(f.caminho);
+            // Pré-seleciona todas as cópias redundantes automaticamente (deixando a referência segura)
+            const initialSelected = new Set<string>();
+            groups.forEach((g: any) => {
+              (g.faixas || []).slice(1).forEach((f: any) => {
+                initialSelected.add(f.caminho);
+              });
             });
-          });
-          setSelectedCopyPaths(initialSelected);
+            setSelectedCopyPaths(initialSelected);
+          }
+        } catch (err) {
+          console.error('JSON inválido em loadDuplicatesBySound:', res);
         }
       }
     } catch (e) {
@@ -212,7 +220,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           batch: 500
         });
         if (!res || !res.trim()) throw new Error('O motor retornou resposta vazia.');
-        const parsed = JSON.parse(res);
+        let parsed: any;
+        try {
+          parsed = JSON.parse(res);
+        } catch (jsonErr) {
+          throw new Error(`Resposta JSON inválida do motor: ${res.slice(0, 150)}`);
+        }
         setStatus(parsed);
         loadDuplicatesBySound();
         onAddLog(`✅ Sound Seal: Varredura concluída. ${parsed.total_selados} faixas seladas com sucesso.`);
@@ -241,7 +254,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           seratoPath
         });
         if (!res || !res.trim()) throw new Error('O motor retornou resposta vazia.');
-        const parsed = JSON.parse(res);
+        let parsed: any;
+        try {
+          parsed = JSON.parse(res);
+        } catch (jsonErr) {
+          throw new Error(`Resposta JSON inválida do motor: ${res.slice(0, 150)}`);
+        }
         if (parsed.sucesso) {
           const items = parsed.analisadas || [];
           setRelocateResults(items);

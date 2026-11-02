@@ -86,7 +86,18 @@ INVALID_ARTISTS = {
     "rock nacional", "rock nacional 80s", "rock nacional anos 80", "mpb", "funk",
     "sertanejo", "pop rock", "black", "axe", "axé", "pagode", "samba", "samba rock", "samba rock seu jorge",
     "desconhecido", "unknown", "sem artista", "artista desconhecido", "various", "various artists",
-    "va", "v.a.", "320kbps", "128kbps", "256kbps", "192kbps", "sbornik", "download", "musica", "música"
+    "va", "v.a.", "320kbps", "128kbps", "256kbps", "192kbps", "sbornik", "download", "musica", "música",
+    "mc", "dj", "oi", "vários", "varios", "diversos", "flashback", "nacionais e remixes", "nacionais", "remixes",
+    "e-music", "eletronica", "eletrônica", "reggae", "rap", "hip hop", "trap", "top brasil", "especificos sonorização",
+    "especificos sonorizacao", "cópia", "copia", "copy", "track", "faixa", "audio"
+}
+
+GENRE_AND_CRATE_NAMES = {
+    "pop rock", "funk", "black", "sertanejo", "flashback", "nacionais e remixes",
+    "nacionais", "remixes", "axe", "axé", "pagode", "video oficial", "vídeo oficial",
+    "clipe oficial", "audio oficial", "oficial", "oi", "e-music", "eletronica",
+    "eletrônica", "top brasil", "especificos sonorização", "especificos sonorizacao",
+    "reggae", "rap", "hip hop", "trap", "samba", "sambaduro", "sambarock", "rock nacional", "mpb"
 }
 
 PALCOMP3_UPLOADERS = {
@@ -131,9 +142,9 @@ def normalize_title_for_lookup(t: str) -> str:
 
 
 def get_cached_artist(title: str) -> str:
-    """Busca artista em cache local instantâneo (SQLite)."""
+    """Busca artista em cache local instantâneo (SQLite) com validação de segurança."""
     norm = normalize_title_for_lookup(title)
-    if not norm:
+    if not norm or norm in GENRE_AND_CRATE_NAMES or len(norm) <= 2:
         return ""
     try:
         conn = sqlite3.connect(str(TAG_CACHE_DB))
@@ -142,7 +153,9 @@ def get_cached_artist(title: str) -> str:
         row = cur.fetchone()
         conn.close()
         if row and row[0]:
-            return row[0]
+            cand = row[0].strip()
+            if cand.lower() not in INVALID_ARTISTS and len(cand) > 2:
+                return cand
     except Exception:
         pass
     return ""
@@ -153,10 +166,15 @@ def seed_tag_cache(title: str, artist: str):
     norm = normalize_title_for_lookup(title)
     if not norm or not artist or norm in _SEEDED_TITLES:
         return
+    # Rejeita títulos que sejam nomes de crate, gênero ou termos genéricos
+    if norm in GENRE_AND_CRATE_NAMES or len(norm) <= 2:
+        return
     art_clean = artist.strip()
     art_lower = art_clean.lower()
-    # Rejeita números puros (ex: "01", "06"), bitrates, gêneros e "Desconhecido"
+    # Rejeita números puros (ex: "01", "06"), bitrates, gêneros, "MC", "DJ", "Oi" e "Desconhecido"
     if re.match(r'^\d+$', art_lower) or art_lower in INVALID_ARTISTS or art_lower in PALCOMP3_UPLOADERS:
+        return
+    if len(art_clean) <= 2:
         return
     if re.search(r'\b(?:kbps|www|http|\.com|\.net|\.org)\b', art_lower):
         return
@@ -166,7 +184,7 @@ def seed_tag_cache(title: str, artist: str):
     _SEEDED_TITLES.add(norm)
     try:
         conn = sqlite3.connect(str(TAG_CACHE_DB))
-        conn.execute("INSERT OR IGNORE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, 100);",
+        conn.execute("INSERT OR REPLACE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, 100);",
                      (norm, art_clean, title.strip()))
         conn.commit()
         conn.close()
@@ -183,12 +201,16 @@ def lookup_musicbrainz_artist(title: str, crate: str = "") -> str:
 def lookup_musicbrainz_track(title: str, artist: str = "", crate: str = ""):
     """Consulta MusicBrainz na nuvem com fallback no cache local, retornando (artista, título)."""
     norm_t = normalize_title_for_lookup(title)
+    if norm_t in GENRE_AND_CRATE_NAMES:
+        norm_t = ""
+        title = ""
+
     if not norm_t and not artist:
         return "", ""
 
     if norm_t:
         cached_art = get_cached_artist(title)
-        if cached_art:
+        if cached_art and cached_art.lower() not in INVALID_ARTISTS and len(cached_art) > 2:
             return cached_art, title
 
     # Consulta endpoint público do MusicBrainz
@@ -213,13 +235,17 @@ def lookup_musicbrainz_track(title: str, artist: str = "", crate: str = ""):
                 tit = best.get('title', '')
                 score = int(best.get('score', 0))
                 if (art or tit) and score >= 70:
-                    if norm_t and art:
+                    art_str = art.strip()
+                    tit_str = tit.strip() or title
+                    if art_str.lower() in INVALID_ARTISTS or len(art_str) <= 2:
+                        return "", tit_str
+                    if norm_t and art_str and norm_t not in GENRE_AND_CRATE_NAMES:
                         conn = sqlite3.connect(str(TAG_CACHE_DB))
                         conn.execute("INSERT OR REPLACE INTO metadata_cache (title_norm, artist, title, score) VALUES (?, ?, ?, ?);",
-                                     (norm_t, art.strip(), tit.strip() or title, score))
+                                     (norm_t, art_str, tit_str, score))
                         conn.commit()
                         conn.close()
-                    return art.strip(), tit.strip()
+                    return art_str, tit_str
     except Exception:
         pass
     return "", ""
@@ -240,7 +266,7 @@ def enrich_missing_artists(items: list, stream_progress: bool = True):
         tit = (item.get("titulo_sugerido") or item.get("titulo_atual") or "").strip()
         crate = item.get("crate_raiz") or ""
 
-        # Descarta valores inválidos como "Desconhecido", "06", gêneros ou uploaders
+        # Descarta valores inválidos como "Desconhecido", "06", "MC", "DJ", "Oi", gêneros ou uploaders
         if art.lower() in INVALID_ARTISTS or art.lower() in PALCOMP3_UPLOADERS or re.match(r'^\d+$', art):
             art = ""
 
@@ -255,11 +281,25 @@ def enrich_missing_artists(items: list, stream_progress: bool = True):
             if not found_art and not found_tit and item.get("arquivo_atual"):
                 stem = Path(item["arquivo_atual"]).stem
                 parts = [p.strip() for p in stem.split(' - ') if p.strip()]
+                # Remove o nome da Crate do final de parts para NUNCA passar a Crate como título!
+                crate_norm = crate.lower().replace('_', ' ').strip()
+                while len(parts) >= 2:
+                    last_norm = parts[-1].lower().replace('_', ' ').strip()
+                    if last_norm == crate_norm or last_norm in GENRE_AND_CRATE_NAMES:
+                        parts.pop()
+                    else:
+                        break
+
                 if len(parts) >= 2:
-                    found_art, found_tit = lookup_musicbrainz_track(parts[1], parts[0], crate)
+                    # parts[0] é Artista, parts[1] é Título
+                    found_art, found_tit = lookup_musicbrainz_track(title=parts[1], artist=parts[0], crate=crate)
+                    if not found_art and not found_tit:
+                        found_art, found_tit = lookup_musicbrainz_track(title=parts[1], artist="", crate=crate)
+                elif len(parts) == 1:
+                    found_art, found_tit = lookup_musicbrainz_track(title=parts[0], artist="", crate=crate)
 
             changed = False
-            if found_art and found_art.lower() not in INVALID_ARTISTS and found_art != art:
+            if found_art and found_art.lower() not in INVALID_ARTISTS and len(found_art) > 2 and found_art != art:
                 item["artista_sugerido"] = found_art
                 art = found_art
                 changed = True
@@ -407,6 +447,8 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     text = re.sub(r'[\u2013\u2014]', '-', text)
     text = re.sub(r'(?:\s+-\s*|\s*-\s+|\s*--+\s*)', ' - ', text)
     text = re.sub(r'\s*-\s*-\s*', ' - ', text)
+    # Converte hífen após prefixos de artistas (MC-, DJ-, Dr-, Mr-) para espaço
+    text = re.sub(r'\b(mc|dj|dr|mr|mrs)\-([A-Za-z0-9])', r'\1 \2', text, flags=re.IGNORECASE)
     text = re.sub(r'\s+', ' ', text).strip()
 
     # 3. Extrai e remove cauda/marcadores de BPM e Key (ex: " . 80 . Fm", " . 130 . Dm", " . 128")
@@ -489,16 +531,35 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         if m_hyphen:
             p_art_cand = m_hyphen.group(1).strip()
             p_tit_cand = m_hyphen.group(2).strip()
-            if p_art_cand.lower() not in INVALID_ARTISTS and len(p_art_cand) >= 2:
+            if p_art_cand.lower() in ('mc', 'dj', 'dr', 'lil', 'sr', 'mr', 'mrs'):
+                unique_parts = [f"{p_art_cand} {p_tit_cand}"]
+            elif p_art_cand.lower() not in INVALID_ARTISTS and len(p_art_cand) >= 2:
                 unique_parts = [p_art_cand, p_tit_cand]
 
+    # Correção de prefixo MC ou DJ separado erroneamente pelo traço (ex: "Mc - Kevinho" -> "MC Kevinho")
+    if len(unique_parts) >= 2 and unique_parts[0].lower() in ('mc', 'dj', 'mr', 'mister', 'dr'):
+        pfx = "MC" if unique_parts[0].lower() == 'mc' else "DJ" if unique_parts[0].lower() == 'dj' else unique_parts[0].title()
+        unique_parts[0] = f"{pfx} {unique_parts[1]}"
+        unique_parts.pop(1)
+
     # Correção de bandas compostas separadas erroneamente pelo traço
-    if len(unique_parts) >= 2 and unique_parts[0].lower() == 'g' and unique_parts[1].lower().startswith('eazy'):
+    if len(unique_parts) >= 2 and unique_parts[0].lower() == 'a' and unique_parts[1].lower() in ('ha', 'h-a'):
+        unique_parts[0] = 'A-ha'
+        unique_parts.pop(1)
+    elif len(unique_parts) >= 2 and unique_parts[0].lower() == 'g' and unique_parts[1].lower().startswith('eazy'):
         unique_parts[0] = 'G-Eazy'
         unique_parts[1] = re.sub(r'^eazy\s*[-–:]*\s*', '', unique_parts[1], flags=re.IGNORECASE).strip()
     elif len(unique_parts) >= 2 and unique_parts[0].lower() == 'blink' and ('182' in unique_parts[1].lower()):
         unique_parts[0] = 'Blink-182'
         unique_parts[1] = re.sub(r'^182\s*[-–:]*\s*', '', unique_parts[1], flags=re.IGNORECASE).strip()
+    elif len(unique_parts) >= 2 and unique_parts[0].lower() == 't' and unique_parts[1].lower().startswith('pain'):
+        unique_parts[0] = 'T-Pain'
+        unique_parts[1] = re.sub(r'^pain\s*[-–:]*\s*', '', unique_parts[1], flags=re.IGNORECASE).strip()
+        if not unique_parts[1]: unique_parts.pop(1)
+    elif len(unique_parts) >= 2 and unique_parts[0].lower() == 'ne' and unique_parts[1].lower().startswith('yo'):
+        unique_parts[0] = 'Ne-Yo'
+        unique_parts[1] = re.sub(r'^yo\s*[-–:]*\s*', '', unique_parts[1], flags=re.IGNORECASE).strip()
+        if not unique_parts[1]: unique_parts.pop(1)
 
     # 10. Sanitiza tags existentes passadas via Mutagen
     clean_ex_art = html.unescape(unicodedata.normalize('NFC', existing_artist)).replace('_', ' ').strip() if existing_artist else ""
@@ -512,7 +573,7 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
 
     if clean_ex_art:
         clean_ex_art = TRAILING_PUNCT.sub('', clean_ex_art).strip(' -–:').strip()
-        if re.match(r'^\d+$', clean_ex_art) or clean_ex_art.lower() in INVALID_ARTISTS or clean_ex_art.lower() in PALCOMP3_UPLOADERS:
+        if re.match(r'^\d+$', clean_ex_art) or clean_ex_art.lower() in INVALID_ARTISTS or clean_ex_art.lower() in PALCOMP3_UPLOADERS or clean_ex_art.lower() in ('mc', 'dj'):
             clean_ex_art = ""
 
     if clean_ex_tit:
@@ -525,6 +586,8 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     if clean_ex_alb:
         clean_ex_alb = TRAILING_PUNCT.sub('', clean_ex_alb).strip(' -–:').strip()
         if clean_ex_alb.lower() == crate_raiz.lower():
+            clean_ex_alb = ""
+        elif re.search(r'\b(?:clipe|vídeo|video|áudio|audio|webclipe|lyric|oficial|official|hd|4k|1080p|720p|cópia|copia|copy|download|mp3|faixa|track)\b', clean_ex_alb.lower()):
             clean_ex_alb = ""
 
     if clean_ex_tit and (clean_ex_tit.lower() == filename_no_ext.lower() or clean_ex_tit.lower() == text.lower()):
@@ -544,6 +607,15 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
         if clean_ex_art and clean_ex_art.lower() != unique_parts[0].lower():
             p_art = clean_ex_art
             p_tit = unique_parts[0]
+        elif clean_ex_tit and clean_ex_tit.lower() != unique_parts[0].lower():
+            # O nome do arquivo é o artista, e a tag ID3 contém o título real da música
+            p_art = unique_parts[0]
+            p_tit = clean_ex_tit
+        elif clean_ex_alb and clean_ex_alb.lower() != unique_parts[0].lower():
+            # O nome do arquivo é o artista, e a tag de álbum contém o título da música (ex: A-ha)
+            p_art = unique_parts[0]
+            p_tit = clean_ex_alb
+            clean_ex_alb = ""
         else:
             p_art = ""
             p_tit = unique_parts[0]
@@ -564,14 +636,14 @@ def clean_track_name(filename_no_ext: str, rel_folder: str = "", existing_artist
     # Se album for termo de vídeo, qualidade ou clipe, descarta para nunca sujar o nome completo
     if album:
         alb_lower = album.lower().strip()
-        if re.search(r'\b(?:clipe|vídeo|video|áudio|audio|webclipe|lyric|oficial|official|hd|4k|1080p|720p)\b', alb_lower):
+        if re.search(r'\b(?:clipe|vídeo|video|áudio|audio|webclipe|lyric|oficial|official|hd|4k|1080p|720p|cópia|copia|copy|download|mp3|faixa|track)\b', alb_lower):
             album = ""
         elif re.search(r'\b(?:remix|mix|edit|bootleg|dub|extended|radio|version|versão|vip|rework)\b', alb_lower):
             if alb_lower not in title.lower():
                 title = f"{title} ({album})"
             album = ""
 
-    if artist and (artist.lower() in INVALID_ARTISTS or re.match(r'^\d+$', artist)):
+    if artist and (artist.lower() in INVALID_ARTISTS or artist.lower() in ('mc', 'dj') or re.match(r'^\d+$', artist)):
         artist = ""
 
     # Se a tag de título tem versão rica que o nome do arquivo perdeu, recupera
@@ -1052,6 +1124,8 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                     audio.tags['TPE1'] = TPE1(encoding=3, text=novo_artista)
                 if novo_album:
                     audio.tags['TALB'] = TALB(encoding=3, text=novo_album)
+                elif 'TALB' in audio.tags and not novo_album:
+                    del audio.tags['TALB']
                 if crate_raiz:
                     audio.tags['TCON'] = TCON(encoding=3, text=crate_raiz)
 
@@ -1064,6 +1138,8 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                     audio['artist'] = [novo_artista]
                 if novo_album:
                     audio['album'] = [novo_album]
+                elif 'album' in audio and not novo_album:
+                    del audio['album']
                 if crate_raiz:
                     audio['genre'] = [crate_raiz]
                 audio.save()
@@ -1279,6 +1355,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                         audio.tags['TPE1'] = TPE1(encoding=3, text=clean_res['artist'])
                     if clean_res['album']:
                         audio.tags['TALB'] = TALB(encoding=3, text=clean_res['album'])
+                    elif 'TALB' in audio.tags and not clean_res['album']:
+                        del audio.tags['TALB']
                     if clean_res['crate_raiz']:
                         audio.tags['TCON'] = TCON(encoding=3, text=clean_res['crate_raiz'])
                     # CRÍTICO: ID3v2.3 obrigatório para Serato DJ Pro (v2.4 não é lido)
@@ -1287,6 +1365,7 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                     if clean_res['title']: audio['title'] = [clean_res['title']]
                     if clean_res['artist']: audio['artist'] = [clean_res['artist']]
                     if clean_res['album']: audio['album'] = [clean_res['album']]
+                    elif 'album' in audio and not clean_res['album']: del audio['album']
                     if clean_res['crate_raiz']: audio['genre'] = [clean_res['crate_raiz']]
                     audio.save()
 
@@ -1334,8 +1413,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
         except Exception as e:
             errors.append(f"{filename}: {e}")
 
-        # Streaming de progresso a cada 5 arquivos ou no final
-        if idx % 5 == 0 or idx == total:
+        # Streaming de progresso a cada 2 arquivos ou no final para fluidez absoluta
+        if idx % 2 == 0 or idx == total or total <= 30:
             pct = round((idx / total) * 100, 1)
             print(json.dumps({
                 "tipo": "progresso",

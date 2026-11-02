@@ -566,7 +566,16 @@ mod commands {
                     if let Ok(line) = line_res {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                             let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
+                            if tipo == "inicio" {
+                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+                                let _ = window_clone.emit("tag-doctor-batch-progress", serde_json::json!({
+                                    "processados": 0,
+                                    "total": total,
+                                    "percentual": 0,
+                                    "atualizados": 0,
+                                    "faixa_atual": "Iniciando gravação..."
+                                }));
+                            } else if tipo == "progresso" {
                                 let _ = window_clone.emit("tag-doctor-batch-progress", parsed);
                             } else if tipo == "fim" {
                                 let _ = window_clone.emit("tag-doctor-batch-finished", parsed);
@@ -640,7 +649,16 @@ mod commands {
                     if let Ok(line) = line_res {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                             let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
+                            if tipo == "inicio" {
+                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+                                let _ = window_clone.emit("tag-doctor-apply-progress", serde_json::json!({
+                                    "processados": 0,
+                                    "total": total,
+                                    "percentual": 0,
+                                    "atualizados": 0,
+                                    "faixa_atual": "Iniciando gravação..."
+                                }));
+                            } else if tipo == "progresso" {
                                 let _ = window_clone.emit("tag-doctor-apply-progress", parsed);
                             } else if tipo == "fim" {
                                 let _ = window_clone.emit("tag-doctor-apply-finished", parsed);
@@ -711,7 +729,16 @@ mod commands {
                     if let Ok(line) = line_res {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                             let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
+                            if tipo == "inicio" {
+                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+                                let _ = window_clone.emit("tag-doctor-enrich-progress", serde_json::json!({
+                                    "processados": 0,
+                                    "total": total,
+                                    "percentual": 0,
+                                    "enriquecidos": 0,
+                                    "faixa_atual": "Iniciando identificação..."
+                                }));
+                            } else if tipo == "progresso" {
                                 let _ = window_clone.emit("tag-doctor-enrich-progress", parsed);
                             } else if tipo == "fim" {
                                 let _ = window_clone.emit("tag-doctor-enrich-finished", parsed);
