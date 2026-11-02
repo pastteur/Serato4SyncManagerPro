@@ -626,11 +626,12 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         ? `Crate "${selectedCrate}" ${includeSubcrates ? '(e todas as suas subcrates)' : '(apenas arquivos da raiz)'}`
         : 'TODA A BIBLIOTECA (todas as crates e subcrates)';
 
-    const countLabel = `${totalFound.toLocaleString()} faixas encontradas (${totalDirty.toLocaleString()} precisam de ajuste)`;
+    const targetDirtyCount = items.length > 0 ? items.filter(it => it.precisa_limpeza).length : totalDirty;
+    const countLabel = `${totalFound.toLocaleString()} faixas encontradas (${targetDirtyCount.toLocaleString()} precisam de ajuste)`;
 
     const msg = renameFilesOnDisk
-      ? `⚡ Deseja aplicar a higienização de tags ID3 e RENOMEAR FISICAMENTE no disco em:\n\n📂 ${targetLabel}\n🎯 Faixas a processar: ${totalDirty.toLocaleString()} faixas que precisam de ajuste\n\n(Propagandas de sites e URLs serão eliminadas e os Beatgrids/Cues continuarão 100% íntegros)`
-      : `⚡ Deseja regravar as tags ID3 oficiais (preservando Serato Markers) em:\n\n📂 ${targetLabel}\n🎯 Faixas a processar: ${totalDirty.toLocaleString()} faixas que precisam de ajuste\n\n(Atenção: Os nomes físicos dos arquivos no HD não serão alterados)`;
+      ? `⚡ Deseja aplicar a higienização de tags ID3 e RENOMEAR FISICAMENTE no disco em:\n\n📂 ${targetLabel}\n🎯 Faixas a processar: ${targetDirtyCount.toLocaleString()} faixas que precisam de ajuste\n\n(Propagandas de sites e URLs serão eliminadas e os Beatgrids/Cues continuarão 100% íntegros)`
+      : `⚡ Deseja regravar as tags ID3 oficiais (preservando Serato Markers) em:\n\n📂 ${targetLabel}\n🎯 Faixas a processar: ${targetDirtyCount.toLocaleString()} faixas que precisam de ajuste\n\n(Atenção: Os nomes físicos dos arquivos no HD não serão alterados)`;
 
     setModalConfig({
       isOpen: true,
@@ -643,7 +644,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         setIsBatchApplying(true);
         setBatchProgress({
           processados: 0,
-          total: totalDirty,
+          total: targetDirtyCount,
           percentual: 0,
           atualizados: 0,
           faixa_atual: 'Iniciando varredura e gravação em lote...'
@@ -712,26 +713,30 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
     }
   };
 
+  // Contagem dinâmica e consistente de faixas que precisam de ajuste
+  const dirtyCount = useMemo(() => items.filter(it => it.precisa_limpeza).length, [items]);
+  const effectiveDirty = items.length > 0 ? dirtyCount : totalDirty;
+
   // Rótulo do botão em lote
-  const batchButtonLabel = totalDirty === 0
+  const batchButtonLabel = effectiveDirty === 0
     ? 'Tudo 100% Higienizado'
     : selectedSubcrate
-      ? `⚡ Aplicar na Subcrate (${totalDirty.toLocaleString()})`
+      ? `⚡ Aplicar na Subcrate (${effectiveDirty.toLocaleString()})`
       : selectedCrate
-        ? `⚡ Aplicar na Crate ${selectedCrate} (${totalDirty.toLocaleString()})`
-        : `⚡ Aplicar na Biblioteca (${totalDirty.toLocaleString()})`;
+        ? `⚡ Aplicar na Crate (${effectiveDirty.toLocaleString()})`
+        : `⚡ Aplicar na Biblioteca (${effectiveDirty.toLocaleString()})`;
 
   return (
-    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-2.5 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-2 relative">
+    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-2 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-1.5 relative">
       
-      {/* Barra de Título & Ações Principais (Compacta) */}
-      <div className="flex flex-wrap items-center justify-between pb-1.5 border-b border-serato-cardBorder shrink-0 gap-2">
+      {/* Barra Superior Unificada: Título, Contadores e Ações Principais (Compacta 34px) */}
+      <div className="flex flex-wrap items-center justify-between pb-1 border-b border-serato-cardBorder shrink-0 gap-1.5">
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1.5">
             <Tag className="w-4 h-4 text-serato-cyan" />
             <h3 className="text-xs font-bold text-white tracking-tight">Tag Doctor</h3>
           </div>
-          <span className="text-[10px] bg-serato-neonGreen/15 text-serato-neonGreen px-1.5 py-0.5 rounded-full border border-serato-neonGreen/30 font-mono hidden sm:inline-block">
+          <span className="text-[10px] bg-serato-neonGreen/15 text-serato-neonGreen px-1.5 py-0.2 rounded font-mono hidden sm:inline-block border border-serato-neonGreen/30">
             100% Cues & Key
           </span>
           <div className="h-3 w-[1px] bg-serato-cardBorder hidden sm:block" />
@@ -740,18 +745,18 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
               Escopo: <b className="text-serato-cyan">{totalFound.toLocaleString()}</b>
             </span>
             <span className="text-slate-400">
-              Ajustes: <b className={totalDirty > 0 ? "text-amber-400 font-bold" : "text-slate-400"}>{totalDirty.toLocaleString()}</b>
+              Ajustes: <b className={effectiveDirty > 0 ? "text-amber-400 font-bold" : "text-emerald-400 font-bold"}>{effectiveDirty.toLocaleString()}</b>
             </span>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 flex-wrap">
+        <div className="flex items-center gap-1 flex-wrap">
           {/* Botão de Analisar */}
           <button
             type="button"
             onClick={() => loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
             disabled={isLoading || isApplying || isBatchApplying}
-            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-serato-card hover:bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 transition disabled:opacity-40 cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-serato-card hover:bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 transition disabled:opacity-40 cursor-pointer"
             title="Escanear e auditar tags ID3"
           >
             <RefreshCw className={`w-3 h-3 ${isLoading ? 'animate-spin' : ''}`} />
@@ -763,31 +768,11 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             type="button"
             onClick={handleExportCsv}
             disabled={isLoading || items.length === 0}
-            className="flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold bg-emerald-950/70 hover:bg-emerald-900/90 text-emerald-300 border border-emerald-700/60 transition disabled:opacity-40 cursor-pointer"
+            className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-950/70 hover:bg-emerald-900/90 text-emerald-300 border border-emerald-700/60 transition disabled:opacity-40 cursor-pointer"
             title="Exportar faixas para planilha CSV com UTF-8"
           >
             <FileSpreadsheet className="w-3 h-3 text-emerald-400" />
             <span>Exportar CSV</span>
-          </button>
-
-          {/* Botão Aplicar Selecionadas */}
-          <button
-            type="button"
-            onClick={handleApplyCleanPage}
-            disabled={isLoading || isApplying || isBatchApplying || isEnriching || selectedIds.size === 0}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold border transition cursor-pointer ${
-              isApplying
-                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500 shadow-md animate-pulse'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-600 disabled:opacity-40'
-            }`}
-            title="Grava tags oficiais e renomeia apenas faixas selecionadas"
-          >
-            <Sparkles className={`w-3 h-3 ${isApplying ? 'animate-spin text-emerald-400' : 'text-serato-cyan'}`} />
-            <span>
-              {isApplying
-                ? `Gravando... ${applyProgress ? `${applyProgress.percentual}%` : ''}`
-                : `Aplicar Selecionadas (${selectedIds.size})`}
-            </span>
           </button>
 
           {/* Botão Auto-Completar */}
@@ -795,7 +780,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             type="button"
             onClick={handleEnrichArtists}
             disabled={isLoading || isApplying || isBatchApplying || isEnriching || items.length === 0}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-semibold border transition cursor-pointer ${
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold border transition cursor-pointer ${
               isEnriching
                 ? 'bg-sky-950/90 text-sky-300 border-sky-500 animate-pulse'
                 : 'bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border-cyan-700/60 disabled:opacity-40'
@@ -810,13 +795,33 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             </span>
           </button>
 
+          {/* Botão Aplicar Selecionadas */}
+          <button
+            type="button"
+            onClick={handleApplyCleanPage}
+            disabled={isLoading || isApplying || isBatchApplying || isEnriching || selectedIds.size === 0}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold border transition cursor-pointer ${
+              isApplying
+                ? 'bg-emerald-950/90 text-emerald-300 border-emerald-500 shadow-md animate-pulse'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-600 disabled:opacity-40'
+            }`}
+            title="Grava tags oficiais e renomeia apenas faixas selecionadas"
+          >
+            <Sparkles className={`w-3 h-3 ${isApplying ? 'animate-spin text-emerald-400' : 'text-serato-cyan'}`} />
+            <span>
+              {isApplying
+                ? `Gravando... ${applyProgress ? `${applyProgress.percentual}%` : ''}`
+                : `Aplicar Selecionadas (${selectedIds.size})`}
+            </span>
+          </button>
+
           {/* Botão Aplicar em Lote */}
           <button
             type="button"
             onClick={handleBatchApplyCrate}
-            disabled={isLoading || isApplying || isBatchApplying || totalFound === 0}
-            className="flex items-center gap-1 px-3 py-1 rounded text-xs font-bold bg-gradient-to-r from-serato-orange via-amber-500 to-serato-gold hover:opacity-90 text-black shadow-md transition disabled:opacity-40 cursor-pointer"
-            title="Processa e higieniza todas as faixas do escopo de uma só vez"
+            disabled={isLoading || isApplying || isBatchApplying || effectiveDirty === 0}
+            className="flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold bg-gradient-to-r from-serato-orange via-amber-500 to-serato-gold hover:opacity-90 text-black shadow-md transition disabled:opacity-40 cursor-pointer"
+            title="Processa e higieniza todas as faixas que precisam de ajuste de uma só vez"
           >
             <Zap className={`w-3 h-3 ${isBatchApplying ? 'animate-bounce' : ''}`} />
             <span>{isBatchApplying ? 'Processando Lote...' : batchButtonLabel}</span>
@@ -826,7 +831,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           <button
             type="button"
             onClick={handleBackupDb}
-            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-serato-card hover:bg-slate-700 text-slate-300 border border-serato-cardBorder transition cursor-pointer"
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-serato-card hover:bg-slate-700 text-slate-300 border border-serato-cardBorder transition cursor-pointer"
             title="Gera cópia de segurança do master.sqlite do Serato"
           >
             <ShieldCheck className="w-3 h-3 text-serato-neonGreen" />
@@ -835,9 +840,9 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         </div>
       </div>
 
-      {/* Barra de Filtros, Nomenclatura e Busca (Compacta) */}
-      <div className="bg-serato-header/70 border border-serato-cardBorder p-1.5 rounded-lg flex flex-wrap items-center justify-between gap-2 shrink-0 text-xs">
-        <div className="flex items-center gap-2 flex-wrap">
+      {/* Barra Integrada Compacta de Filtros, Nomenclatura, Busca e Seleção (Linha Única) */}
+      <div className="bg-serato-header/50 border border-serato-cardBorder p-1 rounded-lg flex flex-wrap items-center justify-between gap-1.5 shrink-0 text-xs">
+        <div className="flex items-center gap-1.5 flex-wrap">
           {/* Seletor Crate */}
           <div className="flex items-center gap-1">
             <FolderTree className="w-3.5 h-3.5 text-serato-orange shrink-0" />
@@ -845,7 +850,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
               value={selectedCrate}
               onChange={(e) => handleCrateChange(e.target.value)}
               disabled={isLoading || isBatchApplying}
-              className="bg-serato-dark border border-serato-cardBorder text-slate-200 text-xs font-semibold rounded px-2 py-1 focus:outline-none focus:border-serato-orange cursor-pointer max-w-[210px]"
+              className="bg-serato-dark border border-serato-cardBorder text-slate-200 text-xs font-semibold rounded px-1.5 py-0.5 focus:outline-none focus:border-serato-orange cursor-pointer max-w-[180px]"
             >
               <option value="">📁 Todas as Crates ({totalLibraryCount > 0 ? `${totalLibraryCount.toLocaleString()} faixas` : 'Biblioteca'})</option>
               {cratesList.map(c => (
@@ -862,7 +867,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
               value={selectedSubcrate}
               onChange={(e) => handleSubcrateChange(e.target.value)}
               disabled={isLoading || isBatchApplying}
-              className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2 py-1 focus:outline-none focus:border-serato-cyan cursor-pointer max-w-[180px]"
+              className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-1.5 py-0.5 focus:outline-none focus:border-serato-cyan cursor-pointer max-w-[150px]"
             >
               <option value="">↳ Todas Subcrates ({activeCrateData.total.toLocaleString()})</option>
               {activeCrateData.subcrates.map(sub => (
@@ -883,7 +888,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
                 setNamingMode(newMode);
                 loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, newMode);
               }}
-              className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2 py-1 focus:outline-none cursor-pointer max-w-[200px]"
+              className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-1.5 py-0.5 focus:outline-none cursor-pointer max-w-[180px]"
             >
               <option value="crate">📂 Artista - Título - Crate</option>
               <option value="full">🌟 Artista - Título - Crate - Álbum</option>
@@ -892,7 +897,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           </div>
 
           {/* Checkbox Renomear HD */}
-          <label className={`flex items-center gap-1 text-[11px] px-2 py-0.5 rounded border transition-all cursor-pointer ${
+          <label className={`flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border transition-all cursor-pointer ${
             renameFilesOnDisk 
               ? 'bg-serato-cyan/15 border-serato-cyan/40 text-serato-cyan font-medium' 
               : 'bg-slate-800/40 border-slate-700 text-slate-400'
@@ -905,181 +910,65 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             />
             <span>Renomear no HD</span>
           </label>
-        </div>
 
-        {/* Busca e Limite de Exibição */}
-        <div className="flex items-center gap-2">
-          <div className="relative w-48 sm:w-56">
-            <Search className="w-3 h-3 text-serato-muted absolute left-2 top-2" />
+          {/* Busca Rápida */}
+          <div className="relative w-40 sm:w-48">
+            <Search className="w-3 h-3 text-serato-muted absolute left-2 top-1.5" />
             <input
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates)}
-              placeholder="Filtrar por nome, artista..."
-              className="w-full pl-7 pr-2 py-0.5 text-xs bg-serato-dark border border-serato-cardBorder rounded text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan"
+              placeholder="Filtrar por nome..."
+              className="w-full pl-6 pr-2 py-0.5 text-xs bg-serato-dark border border-serato-cardBorder rounded text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan"
             />
           </div>
-
-          <select
-            value={displayLimit}
-            onChange={(e) => {
-              const newLimit = parseInt(e.target.value, 10);
-              setDisplayLimit(newLimit);
-              loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates, namingMode, newLimit);
-            }}
-            className="bg-serato-dark border border-serato-cardBorder text-slate-300 text-xs font-semibold rounded px-2 py-0.5 focus:outline-none cursor-pointer"
-          >
-            <option value={0}>♾️ Toda Biblioteca</option>
-            <option value={1000}>1.000 faixas</option>
-            <option value={500}>500 faixas</option>
-            <option value={200}>200 faixas</option>
-          </select>
         </div>
-      </div>
 
-      {/* Alerta Compacto de renomeação no HD desativada */}
-      {!renameFilesOnDisk && totalDirty > 0 && (
-        <div className="w-full bg-amber-950/30 border border-amber-600/40 rounded px-2 py-0.5 flex items-center justify-between text-[11px] text-amber-300 shrink-0">
-          <div className="flex items-center gap-1.5 truncate">
-            <AlertTriangle className="w-3 h-3 text-serato-gold shrink-0" />
-            <span className="truncate">
-              <b>Dica:</b> Para retirar essas {totalDirty} faixas da lista e padronizar o nome no disco, ative a opção <u>Renomear no HD</u> acima.
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={() => setRenameFilesOnDisk(true)}
-            className="text-[10px] underline font-bold hover:text-white cursor-pointer ml-2 whitespace-nowrap bg-amber-900/60 hover:bg-amber-800 px-1.5 py-0.2 rounded border border-amber-600/60 transition"
-          >
-            Ativar Agora
-          </button>
-        </div>
-      )}
-
-      {/* Barra de Progresso Slim em Tempo Real (In-Line para economizar 100% do espaço vertical) */}
-      {(isLoading || isBatchApplying || isApplying || isEnriching) && (
-        <div className="bg-slate-900 border border-serato-cyan/50 px-2.5 py-1 rounded-lg shadow-md flex flex-col gap-1 shrink-0 animate-in fade-in duration-150">
-          <div className="flex items-center justify-between text-[11px] font-medium text-white">
-            <div className="flex items-center gap-2 truncate max-w-[70%]">
-              {isLoading && (
-                <>
-                  <RefreshCw className="w-3 h-3 text-serato-cyan animate-spin shrink-0" />
-                  <span className="text-serato-cyan font-bold truncate">Varrendo disco & tags ID3...</span>
-                  <span className="text-slate-400 truncate text-[10px]">{scanProgress?.faixa}</span>
-                </>
-              )}
-              {isBatchApplying && (
-                <>
-                  <Zap className="w-3 h-3 text-serato-orange animate-bounce shrink-0" />
-                  <span className="text-serato-orange font-bold truncate">Higienizando em lote:</span>
-                  <span className="text-slate-300 truncate text-[10px]">{batchProgress?.faixa_atual || 'Processando...'}</span>
-                </>
-              )}
-              {isApplying && (
-                <>
-                  <Sparkles className="w-3 h-3 text-emerald-400 animate-spin shrink-0" />
-                  <span className="text-emerald-400 font-bold truncate">Gravando tags selecionadas:</span>
-                  <span className="text-slate-300 truncate text-[10px]">{applyProgress?.faixa_atual || 'Gravando...'}</span>
-                </>
-              )}
-              {isEnriching && (
-                <>
-                  <Music className="w-3 h-3 text-sky-400 animate-bounce shrink-0" />
-                  <span className="text-sky-400 font-bold truncate">Auto-completando via MusicBrainz:</span>
-                  <span className="text-slate-300 truncate text-[10px]">{enrichProgress?.faixa_atual || 'Consultando catálogo...'}</span>
-                </>
-              )}
-            </div>
-
-            <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
-              {isLoading && scanProgress && (
-                <span className="text-serato-cyan font-bold">{scanProgress.percentual}% ({scanProgress.processados.toLocaleString()}/{scanProgress.total.toLocaleString()})</span>
-              )}
-              {isBatchApplying && batchProgress && (
-                <span className="text-serato-gold font-bold">{batchProgress.percentual}% ({batchProgress.processados.toLocaleString()}/{batchProgress.total.toLocaleString()}) • ✅ {batchProgress.atualizados}</span>
-              )}
-              {isApplying && applyProgress && (
-                <span className="text-emerald-300 font-bold">{applyProgress.percentual}% ({applyProgress.processados.toLocaleString()}/{applyProgress.total.toLocaleString()}) • ✅ {applyProgress.atualizados}</span>
-              )}
-              {isEnriching && enrichProgress && (
-                <span className="text-sky-300 font-bold">{enrichProgress.percentual}% ({enrichProgress.processados.toLocaleString()}/{enrichProgress.total.toLocaleString()}) • ✨ {enrichProgress.enriquecidos}</span>
-              )}
-            </div>
-          </div>
-
-          {/* Micro Linha de Progresso (2px) */}
-          <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
-            <div
-              className={`h-full transition-all duration-150 rounded-full ${
-                isBatchApplying
-                  ? 'bg-gradient-to-r from-serato-cyan via-amber-400 to-serato-orange'
-                  : isApplying
-                    ? 'bg-gradient-to-r from-emerald-500 to-cyan-400'
-                    : isEnriching
-                      ? 'bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500'
-                      : 'bg-gradient-to-r from-serato-cyan to-blue-500'
+        {/* Pílulas de Status e Seleção Rápida */}
+        <div className="flex items-center gap-1 text-xs flex-wrap">
+          <div className="flex items-center bg-serato-dark/80 p-0.5 rounded border border-serato-cardBorder text-[11px]">
+            <button
+              type="button"
+              onClick={() => setStatusFilter('all')}
+              className={`px-1.5 py-0.2 rounded font-semibold transition cursor-pointer ${
+                statusFilter === 'all'
+                  ? 'bg-serato-card text-white shadow-sm border border-serato-cardBorder'
+                  : 'text-slate-400 hover:text-slate-200'
               }`}
-              style={{
-                width: `${Math.min(100, Math.max(1, 
-                  isBatchApplying && batchProgress ? batchProgress.percentual :
-                  isApplying && applyProgress ? applyProgress.percentual :
-                  isEnriching && enrichProgress ? enrichProgress.percentual :
-                  scanProgress ? scanProgress.percentual : 100
-                ))}%`
-              }}
-            />
+            >
+              Todas ({items.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('dirty')}
+              className={`px-1.5 py-0.2 rounded font-semibold transition cursor-pointer flex items-center gap-1 ${
+                statusFilter === 'dirty'
+                  ? 'bg-amber-950/40 text-amber-300 shadow-sm border border-amber-600/50'
+                  : 'text-slate-400 hover:text-amber-400'
+              }`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-serato-gold inline-block"></span>
+              Para Ajustar ({dirtyCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setStatusFilter('clean')}
+              className={`px-1.5 py-0.2 rounded font-semibold transition cursor-pointer flex items-center gap-1 ${
+                statusFilter === 'clean'
+                  ? 'bg-emerald-950/40 text-emerald-300 shadow-sm border border-emerald-600/50'
+                  : 'text-slate-400 hover:text-emerald-400'
+              }`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-serato-neonGreen inline-block"></span>
+              Limpas ({items.length - dirtyCount})
+            </button>
           </div>
-        </div>
-      )}
 
-      {/* Barra de Filtros Rápidos & Seleção */}
-      <div className="bg-serato-header/40 border border-serato-cardBorder px-2 py-1 rounded-lg flex flex-wrap items-center justify-between gap-2 shrink-0 text-xs">
-        {/* Pílulas de Status */}
-        <div className="flex items-center gap-1 bg-serato-dark/80 p-0.5 rounded border border-serato-cardBorder text-[11px]">
-          <button
-            type="button"
-            onClick={() => setStatusFilter('all')}
-            className={`px-2 py-0.5 rounded font-semibold transition cursor-pointer ${
-              statusFilter === 'all'
-                ? 'bg-serato-card text-white shadow-sm border border-serato-cardBorder'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            Todas ({items.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setStatusFilter('dirty')}
-            className={`px-2 py-0.5 rounded font-semibold transition cursor-pointer flex items-center gap-1 ${
-              statusFilter === 'dirty'
-                ? 'bg-amber-950/40 text-amber-300 shadow-sm border border-amber-600/50'
-                : 'text-slate-400 hover:text-amber-400'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-serato-gold inline-block"></span>
-            Para Ajustar ({items.filter(it => it.precisa_limpeza).length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setStatusFilter('clean')}
-            className={`px-2 py-0.5 rounded font-semibold transition cursor-pointer flex items-center gap-1 ${
-              statusFilter === 'clean'
-                ? 'bg-emerald-950/40 text-emerald-300 shadow-sm border border-emerald-600/50'
-                : 'text-slate-400 hover:text-emerald-400'
-            }`}
-          >
-            <span className="w-1.5 h-1.5 rounded-full bg-serato-neonGreen inline-block"></span>
-            Limpas ({items.filter(it => !it.precisa_limpeza).length})
-          </button>
-        </div>
-
-        {/* Botões de Seleção Rápida */}
-        <div className="flex items-center gap-1.5 text-xs">
           <button
             type="button"
             onClick={handleSelectAllDisplayed}
-            className="flex items-center gap-1 px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-slate-300 border border-serato-cardBorder cursor-pointer transition text-[11px]"
+            className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-slate-300 border border-serato-cardBorder cursor-pointer transition text-[10px]"
             title="Seleciona todas as faixas exibidas"
           >
             <CheckSquare className="w-3 h-3 text-serato-cyan" />
@@ -1089,7 +978,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
           <button
             type="button"
             onClick={handleSelectOnlyPending}
-            className="flex items-center gap-1 px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-amber-300 border border-amber-600/40 cursor-pointer transition text-[11px]"
+            className="flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-amber-300 border border-amber-600/40 cursor-pointer transition text-[10px]"
             title="Seleciona apenas as faixas que precisam de ajuste"
           >
             <Sparkles className="w-3 h-3 text-serato-gold" />
@@ -1100,20 +989,91 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
             <button
               type="button"
               onClick={handleDeselectAll}
-              className="flex items-center gap-1 px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-200 cursor-pointer transition text-[11px]"
+              className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-200 cursor-pointer transition text-[10px]"
             >
               <Square className="w-3 h-3" />
               <span>Desmarcar ({selectedIds.size})</span>
             </button>
           )}
 
-          <div className="h-3 w-[1px] bg-serato-cardBorder mx-1" />
-
-          <span className="text-[11px] font-mono text-serato-cyan">
+          <span className="text-[10px] font-mono text-serato-cyan ml-1">
             {selectedIds.size} selecionada(s)
           </span>
         </div>
       </div>
+
+      {/* Barra de Progresso Slim em Linha Única (22px de altura) */}
+      {(isLoading || isBatchApplying || isApplying || isEnriching) && (
+        <div className="bg-slate-900 border border-serato-cyan/50 px-2 py-0.5 rounded shadow flex items-center justify-between gap-2 shrink-0 animate-in fade-in duration-100 text-[11px]">
+          <div className="flex items-center gap-1.5 truncate max-w-[65%]">
+            {isLoading && (
+              <>
+                <RefreshCw className="w-3 h-3 text-serato-cyan animate-spin shrink-0" />
+                <span className="text-serato-cyan font-bold truncate">Varrendo disco:</span>
+                <span className="text-slate-400 truncate text-[10px]">{scanProgress?.faixa}</span>
+              </>
+            )}
+            {isBatchApplying && (
+              <>
+                <Zap className="w-3 h-3 text-serato-orange animate-bounce shrink-0" />
+                <span className="text-serato-orange font-bold truncate">Higienizando em lote:</span>
+                <span className="text-slate-300 truncate text-[10px]">{batchProgress?.faixa_atual || 'Processando...'}</span>
+              </>
+            )}
+            {isApplying && (
+              <>
+                <Sparkles className="w-3 h-3 text-emerald-400 animate-spin shrink-0" />
+                <span className="text-emerald-400 font-bold truncate">Gravando tags:</span>
+                <span className="text-slate-300 truncate text-[10px]">{applyProgress?.faixa_atual || 'Gravando...'}</span>
+              </>
+            )}
+            {isEnriching && (
+              <>
+                <Music className="w-3 h-3 text-sky-400 animate-bounce shrink-0" />
+                <span className="text-sky-400 font-bold truncate">Auto-completando:</span>
+                <span className="text-slate-300 truncate text-[10px]">{enrichProgress?.faixa_atual || 'Consultando catálogo...'}</span>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 font-mono text-[10px]">
+            {isLoading && scanProgress && (
+              <span className="text-serato-cyan font-bold">{scanProgress.percentual}% ({scanProgress.processados.toLocaleString()}/{scanProgress.total.toLocaleString()})</span>
+            )}
+            {isBatchApplying && batchProgress && (
+              <span className="text-serato-gold font-bold">{batchProgress.percentual}% ({batchProgress.processados.toLocaleString()}/{batchProgress.total.toLocaleString()}) • ✅ {batchProgress.atualizados}</span>
+            )}
+            {isApplying && applyProgress && (
+              <span className="text-emerald-300 font-bold">{applyProgress.percentual}% ({applyProgress.processados.toLocaleString()}/{applyProgress.total.toLocaleString()}) • ✅ {applyProgress.atualizados}</span>
+            )}
+            {isEnriching && enrichProgress && (
+              <span className="text-sky-300 font-bold">{enrichProgress.percentual}% ({enrichProgress.processados.toLocaleString()}/{enrichProgress.total.toLocaleString()}) • ✨ {enrichProgress.enriquecidos}</span>
+            )}
+
+            <div className="w-20 bg-slate-950 rounded-full h-1.5 overflow-hidden ml-1">
+              <div
+                className={`h-full transition-all duration-150 rounded-full ${
+                  isBatchApplying
+                    ? 'bg-gradient-to-r from-serato-cyan via-amber-400 to-serato-orange'
+                    : isApplying
+                      ? 'bg-gradient-to-r from-emerald-500 to-cyan-400'
+                      : isEnriching
+                        ? 'bg-gradient-to-r from-sky-500 via-indigo-500 to-purple-500'
+                        : 'bg-gradient-to-r from-serato-cyan to-blue-500'
+                }`}
+                style={{
+                  width: `${Math.min(100, Math.max(1, 
+                    isBatchApplying && batchProgress ? batchProgress.percentual :
+                    isApplying && applyProgress ? applyProgress.percentual :
+                    isEnriching && enrichProgress ? enrichProgress.percentual :
+                    scanProgress ? scanProgress.percentual : 100
+                  ))}%`
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tabela De / Para (Antes vs Depois) */}
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
@@ -1369,9 +1329,9 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog }) => {
         <div className="bg-serato-header px-4 py-2.5 border-t border-serato-cardBorder flex items-center justify-between text-xs text-serato-muted shrink-0 font-mono">
           <div className="flex items-center gap-2">
             <span>Exibindo <b className="text-white">{visibleItems.length.toLocaleString()}</b> de <b className="text-white">{filteredAndSortedItems.length.toLocaleString()}</b> faixas na lista contínua</span>
-            {totalDirty > 0 && (
+            {effectiveDirty > 0 && (
               <span className="text-amber-400 bg-amber-950/40 px-2 py-0.5 rounded border border-amber-800/40 font-semibold text-[11px]">
-                ⚠️ {totalDirty.toLocaleString()} precisam de ajuste no escopo total
+                ⚠️ {effectiveDirty.toLocaleString()} precisam de ajuste no escopo total
               </span>
             )}
           </div>

@@ -232,8 +232,57 @@ def get_sound_seal_status():
     }
 
 
+def norm_key(s: str) -> str:
+    """Normaliza texto para NFC minúsculo para comparações exatas no macOS."""
+    if not s:
+        return ""
+    import unicodedata
+    return unicodedata.normalize('NFC', s.strip().lstrip('/')).lower()
+
+
+def resolve_serato_dir(serato_dir_str: str) -> Path:
+    """
+    Localiza confiavelmente o diretório do Serato (ex: /Volumes/Pastteyr/_Serato_),
+    mesmo que o usuário tenha passado /Volumes/Pastteyr/Serato ou /Volumes/Pastteyr.
+    """
+    if not serato_dir_str or not serato_dir_str.strip():
+        p = Path.home() / "Music" / "_Serato_"
+        return p if p.exists() else Path.home() / "Music" / "Serato"
+
+    raw_path = Path(os.path.expanduser(serato_dir_str.strip())).resolve()
+
+    # 1. Se o caminho exato existe e contém Subcrates ou database V2:
+    if raw_path.exists():
+        if (raw_path / "Subcrates").exists() or (raw_path / "database V2").exists():
+            return raw_path
+        if (raw_path / "_Serato_").exists():
+            return raw_path / "_Serato_"
+        if (raw_path / "Serato").exists():
+            return raw_path / "Serato"
+
+    # 2. Se foi passado /Volumes/Pastteyr/Serato mas a pasta real é /Volumes/Pastteyr/_Serato_:
+    parent = raw_path.parent
+    if (parent / "_Serato_").exists():
+        return parent / "_Serato_"
+    if (parent / "Serato").exists():
+        return parent / "Serato"
+
+    # 3. Se foi passada a raiz do volume (/Volumes/Pastteyr)
+    if (raw_path / "_Serato_").exists():
+        return raw_path / "_Serato_"
+    if (raw_path / "Serato").exists():
+        return raw_path / "Serato"
+
+    # 4. Fallback no usuário atual
+    home_serato = Path.home() / "Music" / "_Serato_"
+    if home_serato.exists():
+        return home_serato
+
+    return raw_path
+
+
 def get_sound_seal_duplicates(limit: int = 5000):
-    """Lista cópias que possuem exatamente o mesmo selo sonoro (áudio idêntico)."""
+    """Lista cópias que possuem exatamente o mesmo selo sonoro (áudio idêntico), podando arquivos deletados."""
     conn = get_db()
     cursor = conn.cursor()
 
@@ -249,6 +298,7 @@ def get_sound_seal_duplicates(limit: int = 5000):
 
     groups = cursor.fetchall()
     results = []
+    dead_paths = []
 
     for seal, cnt in groups:
         cursor.execute("""
@@ -261,6 +311,11 @@ def get_sound_seal_duplicates(limit: int = 5000):
 
         items = []
         for r in rows:
+            p = Path(r[0])
+            if not p.exists():
+                dead_paths.append(r[0])
+                continue
+
             items.append({
                 "caminho": r[0],
                 "nome": r[1],
@@ -271,11 +326,19 @@ def get_sound_seal_duplicates(limit: int = 5000):
                 "crate": r[6]
             })
 
-        results.append({
-            "seal": seal,
-            "total_copias": cnt,
-            "faixas": items
-        })
+        # Só retorna o grupo se restarem 2 ou mais cópias físicas existentes no disco
+        if len(items) > 1:
+            results.append({
+                "seal": seal,
+                "total_copias": len(items),
+                "faixas": items
+            })
+
+    # Prune automático de arquivos que não existem mais
+    if dead_paths:
+        for dp in dead_paths:
+            cursor.execute("DELETE FROM sound_seals WHERE filepath = ?", (dp,))
+        conn.commit()
 
     conn.close()
     return {"sucesso": True, "duplicados_som": results}
@@ -290,6 +353,8 @@ def resolve_serato_path(rel_path: str, mp3_base: Path):
     if not rel_path:
         return None
 
+    clean_rel = rel_path.strip().lstrip('/')
+
     # 1. Caminho absoluto
     p_abs = Path(rel_path)
     if p_abs.is_absolute() and p_abs.exists():
@@ -299,22 +364,22 @@ def resolve_serato_path(rel_path: str, mp3_base: Path):
     parts = mp3_base.resolve().parts
     if len(parts) >= 3 and parts[1] == 'Volumes':
         vol_root = Path(parts[0]) / parts[1] / parts[2]
-        cand = vol_root / rel_path
+        cand = vol_root / clean_rel
         if cand.exists():
             return cand
 
     # 3. Caminho a partir da raiz do sistema (ex: Users/pastteur/Music/...)
-    cand_sys = Path('/') / rel_path
+    cand_sys = Path('/') / clean_rel
     if cand_sys.exists():
         return cand_sys
 
     # 4. Alinhamento com a pasta MP3 base ou seus ancestrais
     curr = mp3_base
     while curr != curr.parent:
-        cand = curr / rel_path
+        cand = curr / clean_rel
         if cand.exists():
             return cand
-        cand_p = curr.parent / rel_path
+        cand_p = curr.parent / clean_rel
         if cand_p.exists():
             return cand_p
         curr = curr.parent
@@ -323,7 +388,7 @@ def resolve_serato_path(rel_path: str, mp3_base: Path):
     if Path("/Volumes").exists():
         for vol in Path("/Volumes").iterdir():
             if vol.is_dir() and not vol.name.startswith('.'):
-                cand_vol = vol / rel_path
+                cand_vol = vol / clean_rel
                 if cand_vol.exists():
                     return cand_vol
 
@@ -332,11 +397,20 @@ def resolve_serato_path(rel_path: str, mp3_base: Path):
 
 def get_serato_target_path(rel_path: str, mp3_base: Path) -> Path:
     """Calcula o caminho de destino ideal no disco onde o Serato espera o arquivo."""
-    parts = mp3_base.resolve().parts
+    clean_rel = rel_path.strip().lstrip('/')
+    mp3_base_res = mp3_base.resolve()
+
+    if rel_path.startswith('/Volumes/') or rel_path.startswith('/Users/'):
+        return Path(rel_path)
+    if clean_rel.startswith('Volumes/') or clean_rel.startswith('Users/'):
+        return Path('/') / clean_rel
+
+    parts = mp3_base_res.parts
     if len(parts) >= 3 and parts[1] == 'Volumes':
         vol_root = Path(parts[0]) / parts[1] / parts[2]
-        return vol_root / rel_path
-    return Path('/') / rel_path
+        return vol_root / clean_rel
+
+    return mp3_base_res / clean_rel
 
 
 def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
@@ -347,12 +421,22 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
     conn = get_db()
     cursor = conn.cursor()
 
-    # Mapeia todas as crates do Serato
-    subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "Subcrates"
-    if not subcrates_dir.exists():
-        subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "Subcrates"
+    # Mapeia todas as crates do Serato usando resolução inteligente
+    serato_dir = resolve_serato_dir(serato_dir_str)
+    subcrates_dirs = []
+    if (serato_dir / "Subcrates").exists():
+        subcrates_dirs.append(serato_dir / "Subcrates")
 
     mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
+    parts = mp3_base.parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        ext_sc = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "Subcrates"
+        if ext_sc.exists() and ext_sc not in subcrates_dirs:
+            subcrates_dirs.append(ext_sc)
+    home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
+    if home_sc.exists() and home_sc not in subcrates_dirs:
+        subcrates_dirs.append(home_sc)
+
     missing_tracks = []
     checked_paths = set()
 
@@ -368,8 +452,8 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
     if user_trash.exists():
         trashes_folders.append(user_trash)
 
-    if subcrates_dir.exists():
-        for crate_file in subcrates_dir.glob("*.crate"):
+    for sc_dir in subcrates_dirs:
+        for crate_file in sc_dir.glob("*.crate"):
             try:
                 content = crate_file.read_bytes()
                 idx = 0
@@ -400,13 +484,13 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
 
     # 2. Busca também na database V2 do Serato (banco central de faixas)
     db_candidates = [
-        Path(os.path.expanduser(serato_dir_str)) / "database V2",
-        Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "database V2",
+        serato_dir / "database V2",
         Path.home() / "Music" / "_Serato_" / "database V2"
     ]
-    parts = mp3_base.resolve().parts
     if len(parts) >= 3 and parts[1] == 'Volumes':
-        db_candidates.append(Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2")
+        ext_db = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2"
+        if ext_db.exists() and ext_db not in db_candidates:
+            db_candidates.append(ext_db)
 
     for db_file in db_candidates:
         if db_file.exists():
@@ -440,7 +524,7 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
 
     # Agora para cada faixa faltante, busca candidatos com score
     results = []
-    for missing in missing_tracks[:100]: # Top 100 para resposta rápida
+    for missing in missing_tracks[:1000]: # Analisa até 1000 faixas perdidas
         fname = missing["nome"]
         candidates = []
 
@@ -463,7 +547,7 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
 
             # Calcula score de similaridade
             score = 77
-            if m_name == fname:
+            if m_name == fname or norm_key(m_name) == norm_key(fname):
                 score = 100
             elif m_bpm and m_key:
                 score = 87
@@ -586,7 +670,9 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
                 p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
                 rel_p = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
                 if target_paths is not None:
-                    if rel_p in target_paths or Path(rel_p).name in target_paths:
+                    norm_p = norm_key(rel_p)
+                    norm_fname = norm_key(Path(rel_p).name)
+                    if norm_p in target_paths or norm_fname in target_paths:
                         should_remove = True
                 elif mp3_base is not None:
                     if not resolve_serato_path(rel_p, mp3_base):
@@ -602,7 +688,11 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             bak = db_file.parent / f"database_V2_{ts}.bak"
             if not bak.exists():
-                db_file.rename(bak)
+                try:
+                    import shutil
+                    shutil.copy2(str(db_file), str(bak))
+                except Exception:
+                    pass
             db_file.write_bytes(header + b''.join(kept_blocks))
         return removed
     except Exception as e:
@@ -617,30 +707,43 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
     Preserva 100% dos cabeçalhos vrsn/ovct e blocos válidos.
     Cria backup automático (.crate.bak / database_V2.bak) antes de alterar qualquer arquivo.
     """
-    subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "Subcrates"
-    if not subcrates_dir.exists():
-        subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "Subcrates"
-
+    serato_dir = resolve_serato_dir(serato_dir_str)
     mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
+
+    subcrates_dirs = []
+    if (serato_dir / "Subcrates").exists():
+        subcrates_dirs.append(serato_dir / "Subcrates")
+
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        ext_sc = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "Subcrates"
+        if ext_sc.exists() and ext_sc not in subcrates_dirs:
+            subcrates_dirs.append(ext_sc)
+
+    home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
+    if home_sc.exists() and home_sc not in subcrates_dirs:
+        subcrates_dirs.append(home_sc)
 
     target_set = None
     if target_path and target_path.strip():
-        target_set = {target_path.strip(), Path(target_path.strip()).name}
+        t = target_path.strip()
+        target_set = {norm_key(t), norm_key(Path(t).name)}
     elif target_paths_json and target_paths_json.strip():
         try:
             arr = json.loads(target_paths_json)
             target_set = set()
             for it in arr:
-                target_set.add(it)
-                target_set.add(Path(it).name)
+                if it and isinstance(it, str):
+                    target_set.add(norm_key(it))
+                    target_set.add(norm_key(Path(it).name))
         except Exception:
             target_set = None
 
     total_removed = 0
     crates_affected = []
 
-    if subcrates_dir.exists():
-        for crate_file in sorted(subcrates_dir.glob("*.crate")):
+    for sc_dir in subcrates_dirs:
+        for crate_file in sorted(sc_dir.glob("*.crate")):
             try:
                 content = crate_file.read_bytes()
                 pos = 0
@@ -677,7 +780,9 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                 for rel_path, block in otrk_blocks:
                     should_remove = False
                     if target_set is not None:
-                        if rel_path in target_set or Path(rel_path).name in target_set:
+                        norm_p = norm_key(rel_path)
+                        norm_fname = norm_key(Path(rel_path).name)
+                        if norm_p in target_set or norm_fname in target_set:
                             should_remove = True
                     else:
                         resolved = resolve_serato_path(rel_path, mp3_base)
@@ -694,7 +799,11 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                     new_content = header_bytes + b''.join(kept_blocks)
                     backup_path = crate_file.with_suffix('.crate.bak')
                     if not backup_path.exists():
-                        crate_file.rename(backup_path)
+                        try:
+                            import shutil
+                            shutil.copy2(str(crate_file), str(backup_path))
+                        except Exception:
+                            pass
                     crate_file.write_bytes(new_content)
 
                     total_removed += removed_in_this
@@ -713,19 +822,31 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
 
     # Limpa também na database V2 do Serato (banco central de faixas)
     db_candidates = [
-        Path(os.path.expanduser(serato_dir_str)) / "database V2",
-        Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "database V2",
+        serato_dir / "database V2",
         Path.home() / "Music" / "_Serato_" / "database V2"
     ]
-    parts = mp3_base.resolve().parts
     if len(parts) >= 3 and parts[1] == 'Volumes':
-        db_candidates.append(Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2")
+        ext_db = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2"
+        if ext_db.exists() and ext_db not in db_candidates:
+            db_candidates.append(ext_db)
 
     total_db_removed = 0
     for db_cand in db_candidates:
         if db_cand.exists():
             cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None)
             total_db_removed += cnt
+
+    # Também remove do banco SQLite de Sound Seals para manter o cache sincronizado
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        if target_set:
+            for item in target_set:
+                cursor.execute("DELETE FROM sound_seals WHERE filepath LIKE ? OR filename = ?", (f"%{item}%", item))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
     return {
         "sucesso": True,

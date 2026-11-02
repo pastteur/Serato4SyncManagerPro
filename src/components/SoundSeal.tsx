@@ -35,6 +35,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
 
   // Seleção e Relocalização em Massa
   const [selectedRelinkItems, setSelectedRelinkItems] = useState<Map<string, { rel_path: string; source_path: string; nome: string }>>(new Map());
+  const [selectedLostTracks, setSelectedLostTracks] = useState<Set<string>>(new Set());
   const [isRelinkingBatch, setIsRelinkingBatch] = useState<boolean>(false);
   const [relinkProgress, setRelinkProgress] = useState<{
     processados: number;
@@ -388,14 +389,180 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           if (ok) trashedCount++;
         }
 
+        // Purgar referências das crates e database V2 do Serato para não virarem faixas perdidas
+        if (isTauri && toTrash.length > 0) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: null,
+              targetPaths: JSON.stringify(toTrash)
+            });
+          } catch (e) {
+            console.error('Falha ao purgar referências de crates:', e);
+          }
+        }
+
+        // Atualização instantânea da interface em memória
+        const trashedSet = new Set(toTrash);
+        setDuplicatesBySound(prev => prev.map(g => ({
+          ...g,
+          faixas: (g.faixas || []).filter((f: any) => !trashedSet.has(f.caminho)),
+          total_copias: (g.faixas || []).filter((f: any) => !trashedSet.has(f.caminho)).length
+        })).filter(g => (g.total_copias || 0) >= 2));
+
         setIsTrashingBatch(false);
         setTrashProgress(null);
-        onAddLog(`✅ Concluído: ${trashedCount} cópias redundantes movidas para a Lixeira.`);
+        onAddLog(`✅ Concluído: ${trashedCount} cópias redundantes movidas para a Lixeira e removidas do Serato.`);
         setSelectedCopyPaths(new Set());
         loadDuplicatesBySound();
         loadStatus();
       }
     });
+  };
+
+  // Exclusão de todas as faixas atualmente visíveis na tabela do Relocate
+  const handleRemoveTableLostTracks = () => {
+    if (!seratoPath || !mp3Path) {
+      onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de remover faixas perdidas.');
+      return;
+    }
+    const count = filteredRelocateResults.length;
+    if (count === 0) {
+      onAddLog('ℹ️ Nenhuma faixa na tabela para excluir.');
+      return;
+    }
+
+    setModalConfig({
+      isOpen: true,
+      title: '🗑️ Excluir Toda a Tabela do Relocate',
+      message: `Deseja remover do Serato todas as ${count} faixas perdidas exibidas na tabela atual?\n\n⚠️ Esta ação eliminará essas referências de todas as crates e da biblioteca central (database V2).\n\nBackups de segurança (.bak) serão criados automaticamente.`,
+      confirmText: `Excluir Toda a Tabela (${count})`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRemovingLost(true);
+        onAddLog(`🗑️ Excluindo ${count} faixas da tabela do Serato...`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const pathsList = filteredRelocateResults.map((it: any) => it.faixa_perdida);
+            const resJson = await invoke<string>('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: null,
+              targetPaths: JSON.stringify(pathsList)
+            });
+            const data = JSON.parse(resJson);
+            if (data.sucesso) {
+              onAddLog(`✅ Concluído! ${data.total_removidas} referência(s) da tabela excluída(s) do Serato.`);
+              const removedSet = new Set(pathsList);
+              setRelocateResults(prev => prev.filter(r => !removedSet.has(r.faixa_perdida)));
+              setSelectedLostTracks(prev => {
+                const next = new Set(prev);
+                pathsList.forEach(p => next.delete(p));
+                return next;
+              });
+              setSelectedRelinkItems(prev => {
+                const next = new Map(prev);
+                pathsList.forEach(p => next.delete(p));
+                return next;
+              });
+            } else {
+              onAddLog(`❌ Erro: ${data.erro || 'Desconhecido'}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha: ${e}`);
+        } finally {
+          setIsRemovingLost(false);
+        }
+      }
+    });
+  };
+
+  // Exclusão das faixas marcadas com checkbox no Relocate
+  const handleRemoveSelectedLostTracks = () => {
+    if (!seratoPath || !mp3Path) {
+      onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de remover faixas perdidas.');
+      return;
+    }
+    const count = selectedLostTracks.size;
+    if (count === 0) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Faixa Selecionada',
+        message: 'Por favor, selecione ao menos uma faixa na tabela para excluir.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
+      return;
+    }
+
+    setModalConfig({
+      isOpen: true,
+      title: '🗑️ Excluir Faixas Selecionadas do Serato',
+      message: `Deseja remover as ${count} faixas selecionadas de todas as crates e do banco central (database V2) do Serato?\n\nBackups de segurança (.bak) serão criados automaticamente.`,
+      confirmText: `Excluir ${count} Faixa(s)`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRemovingLost(true);
+        onAddLog(`🗑️ Excluindo ${count} faixas selecionadas do Serato...`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const pathsList = Array.from(selectedLostTracks);
+            const resJson = await invoke<string>('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: null,
+              targetPaths: JSON.stringify(pathsList)
+            });
+            const data = JSON.parse(resJson);
+            if (data.sucesso) {
+              onAddLog(`✅ Concluído! ${data.total_removidas} referência(s) excluída(s) do Serato.`);
+              const removedSet = new Set(pathsList);
+              setRelocateResults(prev => prev.filter(r => !removedSet.has(r.faixa_perdida)));
+              setSelectedLostTracks(new Set());
+              setSelectedRelinkItems(prev => {
+                const next = new Map(prev);
+                pathsList.forEach(p => next.delete(p));
+                return next;
+              });
+            } else {
+              onAddLog(`❌ Erro: ${data.erro || 'Desconhecido'}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha: ${e}`);
+        } finally {
+          setIsRemovingLost(false);
+        }
+      }
+    });
+  };
+
+  // Seleção rápida da tabela do Relocate
+  const handleSelectAllRelocate = () => {
+    setSelectedLostTracks(new Set(filteredRelocateResults.map(it => it.faixa_perdida)));
+    const relinkMap = new Map(selectedRelinkItems);
+    filteredRelocateResults.forEach(it => {
+      const best = it.candidatos && it.candidatos.length > 0 ? it.candidatos[0] : null;
+      if (it.in_trash && it.trash_path) {
+        relinkMap.set(it.faixa_perdida, { rel_path: it.faixa_perdida, source_path: it.trash_path, nome: it.nome });
+      } else if (best) {
+        relinkMap.set(it.faixa_perdida, { rel_path: it.faixa_perdida, source_path: best.caminho, nome: it.nome });
+      }
+    });
+    setSelectedRelinkItems(relinkMap);
+  };
+
+  const handleDeselectAllRelocate = () => {
+    setSelectedLostTracks(new Set());
+    setSelectedRelinkItems(new Map());
   };
 
   // Exclusão individual de uma referência perdida
@@ -1022,24 +1189,25 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           )}
 
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
-            {/* Barra de Filtros e Busca da Sub-Aba Relocate */}
-            <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
-              <div className="relative flex-1 min-w-[220px]">
+            {/* Barra de Filtros, Seleção e Ações da Sub-Aba Relocate */}
+            <div className="bg-serato-dark/70 p-2 border-b border-serato-cardBorder flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="relative flex-1 min-w-[200px]">
                 <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
                 <input
                   type="text"
                   value={relocateSearch}
                   onChange={(e) => setRelocateSearch(e.target.value)}
-                  placeholder="Filtrar por nome da faixa perdida ou pasta Serato..."
-                  className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
+                  placeholder="Filtrar faixas perdidas ou crates..."
+                  className="w-full pl-8 pr-3 py-1 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
                 />
               </div>
 
-              <div className="flex items-center gap-1.5">
+              {/* Filtros de Status */}
+              <div className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => setRelocateFilter('all')}
-                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer border ${
                     relocateFilter === 'all'
                       ? 'bg-serato-card text-white border-serato-orange/50 shadow-sm'
                       : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
@@ -1050,25 +1218,76 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                 <button
                   type="button"
                   onClick={() => setRelocateFilter('withCandidate')}
-                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer border ${
                     relocateFilter === 'withCandidate'
                       ? 'bg-emerald-950/60 text-emerald-300 border-emerald-600/60 shadow-sm'
                       : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                   }`}
                 >
-                  Com Candidato
+                  Com Candidato ({relocateResults.filter(it => it.candidatos && it.candidatos.length > 0).length})
                 </button>
                 <button
                   type="button"
                   onClick={() => setRelocateFilter('noCandidate')}
-                  className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
+                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer border ${
                     relocateFilter === 'noCandidate'
                       ? 'bg-rose-950/60 text-rose-300 border-rose-600/60 shadow-sm'
                       : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                   }`}
                 >
-                  Sem Candidato
+                  Sem Candidato ({relocateResults.filter(it => !it.candidatos || it.candidatos.length === 0).length})
                 </button>
+              </div>
+
+              {/* Botões de Seleção e Exclusão em Massa da Tabela */}
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleSelectAllRelocate}
+                  disabled={filteredRelocateResults.length === 0}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-800 text-slate-300 border border-serato-cardBorder cursor-pointer transition text-[11px] disabled:opacity-40"
+                  title="Seleciona todas as faixas exibidas na tabela"
+                >
+                  <CheckSquare className="w-3 h-3 text-serato-cyan" />
+                  <span>Selecionar Tudo ({filteredRelocateResults.length})</span>
+                </button>
+
+                {selectedLostTracks.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleDeselectAllRelocate}
+                    className="flex items-center gap-1 px-1.5 py-0.5 rounded text-slate-400 hover:text-slate-200 cursor-pointer transition text-[11px]"
+                  >
+                    <Square className="w-3 h-3" />
+                    <span>Desmarcar ({selectedLostTracks.size})</span>
+                  </button>
+                )}
+
+                {selectedLostTracks.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveSelectedLostTracks}
+                    disabled={isRemovingLost}
+                    className="flex items-center gap-1 px-2.5 py-0.5 rounded bg-rose-950/80 hover:bg-rose-900 text-rose-200 border border-rose-700/60 shadow-sm cursor-pointer transition text-[11px] font-bold"
+                    title="Exclui as referências marcadas de todas as crates e do banco V2"
+                  >
+                    <Trash2 className="w-3 h-3 text-rose-400" />
+                    <span>Excluir Selecionadas ({selectedLostTracks.size})</span>
+                  </button>
+                )}
+
+                {filteredRelocateResults.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleRemoveTableLostTracks}
+                    disabled={isRemovingLost}
+                    className="flex items-center gap-1 px-2.5 py-0.5 rounded bg-rose-900/90 hover:bg-rose-800 text-white border border-rose-600 shadow-md cursor-pointer transition text-[11px] font-bold"
+                    title="Exclui todas as faixas desta visualização de todas as crates e da database V2 do Serato"
+                  >
+                    <XCircle className="w-3 h-3 text-rose-300" />
+                    <span>🗑️ Excluir Toda a Tabela ({filteredRelocateResults.length})</span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -1082,7 +1301,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
               ) : (
                 filteredRelocateResults.map((item: any, idx: number) => {
                   const bestCandidate = item.candidatos && item.candidatos.length > 0 ? item.candidatos[0] : null;
-                  const isChecked = selectedRelinkItems.has(item.faixa_perdida);
+                  const isChecked = selectedLostTracks.has(item.faixa_perdida) || selectedRelinkItems.has(item.faixa_perdida);
 
                   return (
                     <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-3 space-y-2 text-xs">
@@ -1092,6 +1311,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                             type="checkbox"
                             checked={isChecked}
                             onChange={() => {
+                              setSelectedLostTracks(prev => {
+                                const next = new Set(prev);
+                                if (next.has(item.faixa_perdida)) next.delete(item.faixa_perdida);
+                                else next.add(item.faixa_perdida);
+                                return next;
+                              });
                               setSelectedRelinkItems(prev => {
                                 const next = new Map(prev);
                                 if (next.has(item.faixa_perdida)) {
@@ -1112,7 +1337,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                                 return next;
                               });
                             }}
-                            className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0 shrink-0"
+                            className="rounded border-slate-700 bg-serato-dark text-serato-cyan focus:ring-0 shrink-0 cursor-pointer"
                           />
 
                           <span className="text-[10px] bg-rose-950/60 text-rose-400 px-2 py-0.5 rounded border border-rose-800/40 font-bold uppercase shrink-0">
