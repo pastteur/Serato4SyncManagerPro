@@ -78,10 +78,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const res = await invoke<string>('get_sound_seal_status');
-      const parsed = JSON.parse(res);
-      setStatus(parsed);
+      if (res && res.trim()) {
+        const parsed = JSON.parse(res);
+        setStatus(parsed);
+      }
     } catch (e) {
-      console.error(e);
+      console.error('Falha ao carregar status do Sound Seal:', e);
     }
   };
 
@@ -90,22 +92,24 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const res = await invoke<string>('get_sound_seal_duplicates');
-      const parsed = JSON.parse(res);
-      if (parsed.sucesso) {
-        const groups = parsed.duplicados_som || [];
-        setDuplicatesBySound(groups);
+      if (res && res.trim()) {
+        const parsed = JSON.parse(res);
+        if (parsed.sucesso) {
+          const groups = parsed.duplicados_som || [];
+          setDuplicatesBySound(groups);
 
-        // Pré-seleciona todas as cópias redundantes automaticamente (deixando a referência segura)
-        const initialSelected = new Set<string>();
-        groups.forEach((g: any) => {
-          (g.faixas || []).slice(1).forEach((f: any) => {
-            initialSelected.add(f.caminho);
+          // Pré-seleciona todas as cópias redundantes automaticamente (deixando a referência segura)
+          const initialSelected = new Set<string>();
+          groups.forEach((g: any) => {
+            (g.faixas || []).slice(1).forEach((f: any) => {
+              initialSelected.add(f.caminho);
+            });
           });
-        });
-        setSelectedCopyPaths(initialSelected);
+          setSelectedCopyPaths(initialSelected);
+        }
       }
     } catch (e) {
-      console.error(e);
+      console.error('Falha ao carregar duplicatas por som:', e);
     }
   };
 
@@ -207,6 +211,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           mp3Path,
           batch: 500
         });
+        if (!res || !res.trim()) throw new Error('O motor retornou resposta vazia.');
         const parsed = JSON.parse(res);
         setStatus(parsed);
         loadDuplicatesBySound();
@@ -235,6 +240,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           mp3Path,
           seratoPath
         });
+        if (!res || !res.trim()) throw new Error('O motor retornou resposta vazia.');
         const parsed = JSON.parse(res);
         if (parsed.sucesso) {
           const items = parsed.analisadas || [];
@@ -374,7 +380,109 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     });
   };
 
-  // Remover faixas perdidas de todas as crates do Serato
+  // Exclusão individual de uma referência perdida
+  const handleRemoveSingleLostTrack = (relPath: string, nome: string) => {
+    if (!seratoPath || !mp3Path) {
+      onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de remover faixas perdidas.');
+      return;
+    }
+
+    setModalConfig({
+      isOpen: true,
+      title: '🗑️ Excluir Evidência do Serato',
+      message: `Deseja remover a referência perdida desta faixa do Serato?\n\nFaixa: ${nome}\nCaminho: ${relPath}\n\n⚠️ Esta linha será excluída de todas as crates e da biblioteca central (database V2). Backups de segurança (.bak) serão criados automaticamente.`,
+      confirmText: 'Excluir do Serato',
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        onAddLog(`🗑️ Removendo referência de "${nome}" do Serato...`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const resJson = await invoke<string>('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: relPath,
+              targetPaths: null
+            });
+            const data = JSON.parse(resJson);
+            if (data.sucesso) {
+              onAddLog(`✅ Evidência removida com sucesso! ${data.total_removidas} referência(s) excluída(s) do Serato.`);
+              setRelocateResults(prev => prev.filter(r => r.faixa_perdida !== relPath));
+              setSelectedRelinkItems(prev => {
+                const next = new Map(prev);
+                next.delete(relPath);
+                return next;
+              });
+            } else {
+              onAddLog(`❌ Erro ao remover evidência: ${data.erro || 'Desconhecido'}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha ao excluir faixa: ${e}`);
+        }
+      }
+    });
+  };
+
+  // Exclusão em lote de todas as faixas sem correspondência no HD
+  const handleRemoveNoCandidateLostTracks = () => {
+    if (!seratoPath || !mp3Path) {
+      onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de remover faixas perdidas.');
+      return;
+    }
+
+    const noCandidates = relocateResults.filter(it => !it.candidatos || it.candidatos.length === 0);
+    if (noCandidates.length === 0) {
+      onAddLog('ℹ️ Nenhuma faixa sem correspondência encontrada para remover.');
+      return;
+    }
+
+    const count = noCandidates.length;
+    setModalConfig({
+      isOpen: true,
+      title: '🗑️ Excluir Faixas Sem Correspondência',
+      message: `Deseja remover as ${count} faixas perdidas sem nenhum arquivo correspondente no HD?\n\n⚠️ Esta ação eliminará essas referências das crates e da biblioteca central (database V2), limpando os "fantasmas" que não tocam no Serato.\n\nBackups (.bak) serão criados automaticamente.`,
+      confirmText: `Excluir ${count} Faixas Fantasmas`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRemovingLost(true);
+        onAddLog(`🗑️ Excluindo ${count} faixas sem correspondência do Serato...`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const pathsList = noCandidates.map(it => it.faixa_perdida);
+            const resJson = await invoke<string>('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: null,
+              targetPaths: JSON.stringify(pathsList)
+            });
+            const data = JSON.parse(resJson);
+            if (data.sucesso) {
+              onAddLog(`✅ Concluído! ${data.total_removidas} referências fantasmas removidas do Serato.`);
+              const removedSet = new Set(pathsList);
+              setRelocateResults(prev => prev.filter(r => !removedSet.has(r.faixa_perdida)));
+              setSelectedRelinkItems(prev => {
+                const next = new Map(prev);
+                pathsList.forEach(p => next.delete(p));
+                return next;
+              });
+            } else {
+              onAddLog(`❌ Erro: ${data.erro || 'Desconhecido'}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha: ${e}`);
+        } finally {
+          setIsRemovingLost(false);
+        }
+      }
+    });
+  };
+
+  // Remover todas as faixas perdidas de todas as crates e do banco do Serato
   const handleRemoveLostTracks = () => {
     if (!seratoPath || !mp3Path) {
       onAddLog('⚠️ Selecione as pastas MP3 e Serato antes de remover faixas perdidas.');
@@ -383,23 +491,28 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     const totalLost = relocateResults.length;
     setModalConfig({
       isOpen: true,
-      title: '🗑️ Remover Faixas Perdidas das Crates',
-      message: `Deseja remover as ${totalLost} faixas perdidas das crates do Serato?\n\n⚠️ Esta ação reescreve os arquivos .crate eliminando referências a arquivos inexistentes.\n\nBackups .bak serão criados automaticamente. Reinicie o Serato DJ após a operação.`,
+      title: '🗑️ Remover Todas as Faixas Perdidas do Serato',
+      message: `Deseja remover todas as ${totalLost} faixas perdidas das crates e da biblioteca central (database V2) do Serato?\n\n⚠️ Esta ação reescreve os arquivos eliminando referências a arquivos inexistentes.\n\nBackups .bak serão criados automaticamente. Reinicie o Serato DJ após a operação.`,
       confirmText: `Remover ${totalLost} Referências Perdidas`,
       variant: 'danger',
       onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));
         setIsRemovingLost(true);
         setRemoveLostResult(null);
-        onAddLog(`🗑️ Removendo ${totalLost} faixas perdidas de todas as crates do Serato...`);
+        onAddLog(`🗑️ Removendo ${totalLost} faixas perdidas de todas as crates e da biblioteca do Serato...`);
         try {
           if (isTauri) {
             const { invoke } = await import('@tauri-apps/api/core');
-            const resJson = await invoke<string>('remove_lost_tracks', { mp3Path, seratoPath });
+            const resJson = await invoke<string>('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: null,
+              targetPaths: null
+            });
             const data = JSON.parse(resJson);
             setRemoveLostResult(data);
             if (data.sucesso) {
-              onAddLog(`✅ Concluído! ${data.total_removidas} entradas removidas de ${data.crates_afetadas?.length || 0} crates. Reinicie o Serato DJ para ver as mudanças.`);
+              onAddLog(`✅ Concluído! ${data.total_removidas} entradas removidas (${data.crates_removidas || 0} em crates, ${data.database_v2_removidas || 0} na database V2). Reinicie o Serato DJ para ver as mudanças.`);
               handleScanRelocate();
             } else {
               onAddLog(`❌ Erro: ${data.erro || 'Desconhecido'}`);
@@ -579,16 +692,31 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
               </button>
 
               {relocateResults.length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleRemoveLostTracks}
-                  disabled={isScanningRelocate || isRelinkingBatch || isRemovingLost}
-                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-900/70 hover:bg-rose-800 text-rose-200 border border-rose-700/50 shadow-lg shadow-rose-950/40 transition disabled:opacity-30 cursor-pointer"
-                  title="Remove entradas inexistentes de todas as crates do Serato (backup .bak automático)"
-                >
-                  <XCircle className={`w-3.5 h-3.5 ${isRemovingLost ? 'animate-spin' : ''}`} />
-                  <span>{isRemovingLost ? 'Removendo das Crates...' : `🗑️ Remover Perdidas das Crates (${relocateResults.length})`}</span>
-                </button>
+                <>
+                  {relocateResults.some(it => !it.candidatos || it.candidatos.length === 0) && (
+                    <button
+                      type="button"
+                      onClick={handleRemoveNoCandidateLostTracks}
+                      disabled={isScanningRelocate || isRelinkingBatch || isRemovingLost}
+                      className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-amber-950/80 hover:bg-amber-900 text-amber-200 border border-amber-700/60 shadow-lg shadow-amber-950/40 transition disabled:opacity-30 cursor-pointer"
+                      title="Exclui apenas as faixas perdidas que não possuem nenhum arquivo correspondente no HD"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-amber-400" />
+                      <span>{`🗑️ Excluir Sem Correspondência (${relocateResults.filter(it => !it.candidatos || it.candidatos.length === 0).length})`}</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    onClick={handleRemoveLostTracks}
+                    disabled={isScanningRelocate || isRelinkingBatch || isRemovingLost}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-900/70 hover:bg-rose-800 text-rose-200 border border-rose-700/50 shadow-lg shadow-rose-950/40 transition disabled:opacity-30 cursor-pointer"
+                    title="Remove entradas inexistentes de todas as crates e da biblioteca central do Serato (backup automático)"
+                  >
+                    <XCircle className={`w-3.5 h-3.5 ${isRemovingLost ? 'animate-spin' : ''}`} />
+                    <span>{isRemovingLost ? 'Excluindo do Serato...' : `🗑️ Excluir Todas Perdidas (${relocateResults.length})`}</span>
+                  </button>
+                </>
               )}
             </>
           )}
@@ -976,20 +1104,32 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                           <span className="text-[10px] text-slate-500 shrink-0">Crate: {item.crate}</span>
                         </div>
 
-                        {item.in_trash && (
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-bold font-mono">
-                              ⚠️ ENCONTRADO NA LIXEIRA (.Trashes)
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRelinkSingle(item.faixa_perdida, item.trash_path, item.nome)}
-                              className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold text-[10px] cursor-pointer"
-                            >
-                              Restaurar do Lixo ♻️
-                            </button>
-                          </div>
-                        )}
+                        <div className="flex items-center gap-2">
+                          {item.in_trash && (
+                            <div className="flex items-center gap-2">
+                              <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-bold font-mono">
+                                ⚠️ ENCONTRADO NA LIXEIRA (.Trashes)
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleRelinkSingle(item.faixa_perdida, item.trash_path, item.nome)}
+                                className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold text-[10px] cursor-pointer"
+                              >
+                                Restaurar do Lixo ♻️
+                              </button>
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveSingleLostTrack(item.faixa_perdida, item.nome)}
+                            className="px-2.5 py-1 rounded bg-rose-950/70 hover:bg-rose-900 text-rose-300 border border-rose-800/50 text-[10px] font-bold cursor-pointer flex items-center gap-1 transition shadow-sm"
+                            title="Remove a linha e referência desta faixa do Serato (Crates e database V2)"
+                          >
+                            <Trash2 className="w-3 h-3 text-rose-400" />
+                            <span>Excluir do Serato</span>
+                          </button>
+                        </div>
                       </div>
 
                       {/* Candidatos sugeridos */}
@@ -1019,7 +1159,18 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                             </div>
                           ))
                         ) : (
-                          <div className="text-[11px] text-slate-500 italic">Nenhum arquivo correspondente localizado no HD.</div>
+                          <div className="flex items-center justify-between p-1.5">
+                            <span className="text-[11px] text-slate-400 italic">Nenhum arquivo correspondente localizado no HD.</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSingleLostTrack(item.faixa_perdida, item.nome)}
+                              className="px-2.5 py-1 rounded bg-rose-900/60 hover:bg-rose-800 text-rose-200 border border-rose-700/60 font-bold text-[10px] cursor-pointer flex items-center gap-1.5 transition shadow"
+                              title="Exclui definitivamente a linha desta faixa que não existe mais no banco do Serato"
+                            >
+                              <Trash2 className="w-3 h-3 text-rose-300" />
+                              <span>Excluir Linha do Banco de Dados</span>
+                            </button>
+                          </div>
                         )}
                       </div>
                     </div>

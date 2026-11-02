@@ -791,8 +791,14 @@ mod commands {
         }
 
         let output = cmd.output().map_err(|e| format!("Falha ao iniciar Sound Seal: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty() && !l.starts_with("__")).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro no Sound Seal: {}", msg));
+        }
+        Ok(result)
     }
 
     #[tauri::command]
@@ -803,8 +809,14 @@ mod commands {
         cmd.arg("--status");
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar status do Sound Seal: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro ao consultar status do Sound Seal: {}", msg));
+        }
+        Ok(result)
     }
 
     #[tauri::command]
@@ -815,8 +827,14 @@ mod commands {
         cmd.arg("--duplicates");
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar duplicatas do Sound Seal: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro ao consultar duplicatas do Sound Seal: {}", msg));
+        }
+        Ok(result)
     }
 
     #[tauri::command]
@@ -835,8 +853,14 @@ mod commands {
         cmd.arg(&serato_path);
 
         let output = cmd.output().map_err(|e| format!("Falha no scanner de faixas perdidas: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro no Relocate: {}", msg));
+        }
+        Ok(result)
     }
 
     #[tauri::command]
@@ -923,6 +947,8 @@ mod commands {
         app: AppHandle,
         mp3_path: String,
         serato_path: String,
+        target_path: Option<String>,
+        target_paths: Option<String>,
     ) -> Result<String, String> {
         let script = find_python_script(Some(&app), "sound_seal.py");
         let mut cmd = Command::new("/usr/bin/python3");
@@ -932,6 +958,18 @@ mod commands {
         cmd.arg(&mp3_path);
         cmd.arg("--serato");
         cmd.arg(&serato_path);
+        if let Some(tp) = target_path {
+            if !tp.trim().is_empty() {
+                cmd.arg("--target-path");
+                cmd.arg(tp);
+            }
+        }
+        if let Some(tps) = target_paths {
+            if !tps.trim().is_empty() {
+                cmd.arg("--target-paths");
+                cmd.arg(tps);
+            }
+        }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
@@ -940,7 +978,12 @@ mod commands {
             .map_err(|e| format!("Erro ao executar sound_seal.py --remove-lost: {e}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: String = stdout.lines().last().unwrap_or("{}").to_string();
+        let result: String = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { result.as_str() } else { stderr.as_ref() };
+            return Err(format!("Falha ao remover faixas: {}", msg));
+        }
         Ok(result)
     }
 

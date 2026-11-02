@@ -398,6 +398,46 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
             except Exception:
                 continue
 
+    # 2. Busca também na database V2 do Serato (banco central de faixas)
+    db_candidates = [
+        Path(os.path.expanduser(serato_dir_str)) / "database V2",
+        Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "database V2",
+        Path.home() / "Music" / "_Serato_" / "database V2"
+    ]
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        db_candidates.append(Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2")
+
+    for db_file in db_candidates:
+        if db_file.exists():
+            try:
+                db_data = db_file.read_bytes()
+                pos = 72
+                while pos < len(db_data):
+                    tag = db_data[pos:pos+4]
+                    if len(tag) < 4:
+                        break
+                    length = int.from_bytes(db_data[pos+4:pos+8], byteorder='big')
+                    if tag == b'otrk':
+                        block = db_data[pos:pos+8+length]
+                        p_idx = block.find(b'pfil')
+                        if p_idx != -1 and p_idx + 8 <= len(block):
+                            p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
+                            rel_p = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
+                            if rel_p and rel_p not in checked_paths:
+                                checked_paths.add(rel_p)
+                                resolved = resolve_serato_path(rel_p, mp3_base)
+                                if not resolved:
+                                    missing_tracks.append({
+                                        "caminho_serato": rel_p,
+                                        "nome": Path(rel_p).name,
+                                        "crate_origem": "Biblioteca Serato (database V2)"
+                                    })
+                    pos += 8 + length
+            except Exception:
+                pass
+            break
+
     # Agora para cada faixa faltante, busca candidatos com score
     results = []
     for missing in missing_tracks[:100]: # Top 100 para resposta rápida
@@ -482,10 +522,6 @@ def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
         }
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}
-            "mensagem": f"Faixa religada com sucesso ao Serato em: {target_path}"
-        }
-    except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
 
 
 def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
@@ -524,89 +560,178 @@ def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
     }, ensure_ascii=False), flush=True)
 
 
-def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str):
+def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: Path = None) -> int:
+    """Remove entradas de faixas de database V2 preservando vrsn e blocos válidos."""
+    if not db_file.exists():
+        return 0
+    try:
+        data = db_file.read_bytes()
+        if len(data) < 72:
+            return 0
+        header = data[:72]
+        pos = 72
+        kept_blocks = []
+        removed = 0
+        while pos < len(data):
+            tag = data[pos:pos+4]
+            if len(tag) < 4:
+                break
+            length = int.from_bytes(data[pos+4:pos+8], byteorder='big')
+            block_end = pos + 8 + length
+            block = data[pos:block_end]
+
+            p_idx = block.find(b'pfil')
+            should_remove = False
+            if p_idx != -1 and p_idx + 8 <= len(block):
+                p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
+                rel_p = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
+                if target_paths is not None:
+                    if rel_p in target_paths or Path(rel_p).name in target_paths:
+                        should_remove = True
+                elif mp3_base is not None:
+                    if not resolve_serato_path(rel_p, mp3_base):
+                        should_remove = True
+
+            if should_remove:
+                removed += 1
+            else:
+                kept_blocks.append(block)
+            pos = block_end
+
+        if removed > 0:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            bak = db_file.parent / f"database_V2_{ts}.bak"
+            if not bak.exists():
+                db_file.rename(bak)
+            db_file.write_bytes(header + b''.join(kept_blocks))
+        return removed
+    except Exception as e:
+        print(f"Erro ao limpar database V2: {e}", file=sys.stderr)
+        return 0
+
+
+def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target_path: str = "", target_paths_json: str = ""):
     """
-    Remove entradas de faixas perdidas (inexistentes no disco) de todas as crates do Serato.
-    Preserva 100% dos cabeçalhos vrsn e ovct e reescreve os blocos otrk válidos.
-    Cria backup automático .crate.bak antes de alterar qualquer arquivo.
+    Remove entradas de faixas perdidas (inexistentes no disco ou selecionadas)
+    de todas as crates do Serato e também da biblioteca central (database V2).
+    Preserva 100% dos cabeçalhos vrsn/ovct e blocos válidos.
+    Cria backup automático (.crate.bak / database_V2.bak) antes de alterar qualquer arquivo.
     """
     subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "Subcrates"
     if not subcrates_dir.exists():
         subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "Subcrates"
 
-    if not subcrates_dir.exists():
-        return {"sucesso": False, "erro": f"Pasta de Subcrates não encontrada em: {serato_dir_str}"}
-
     mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
+
+    target_set = None
+    if target_path and target_path.strip():
+        target_set = {target_path.strip(), Path(target_path.strip()).name}
+    elif target_paths_json and target_paths_json.strip():
+        try:
+            arr = json.loads(target_paths_json)
+            target_set = set()
+            for it in arr:
+                target_set.add(it)
+                target_set.add(Path(it).name)
+        except Exception:
+            target_set = None
+
     total_removed = 0
     crates_affected = []
 
-    for crate_file in sorted(subcrates_dir.glob("*.crate")):
-        try:
-            content = crate_file.read_bytes()
-            pos = 0
-            header_end = 0
-            otrk_blocks = []
+    if subcrates_dir.exists():
+        for crate_file in sorted(subcrates_dir.glob("*.crate")):
+            try:
+                content = crate_file.read_bytes()
+                pos = 0
+                header_end = 0
+                otrk_blocks = []
 
-            # 1. Varre o arquivo .crate separando o cabeçalho (vrsn/ovct) dos blocos de faixas (otrk)
-            while pos < len(content):
-                tag = content[pos:pos+4]
-                if len(tag) < 4:
-                    break
-                length = int.from_bytes(content[pos+4:pos+8], byteorder='big')
-                if tag == b'otrk':
-                    block_end = pos + 8 + length
-                    block = content[pos:block_end]
-                    p_idx = block.find(b'ptrk')
-                    if p_idx != -1 and p_idx + 8 <= len(block):
-                        p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
-                        path_str = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
-                        otrk_blocks.append((path_str, block))
-                    pos = block_end
-                else:
-                    pos += 8 + length
-                    header_end = pos
+                # 1. Varre o arquivo .crate separando o cabeçalho dos blocos de faixas (otrk)
+                while pos < len(content):
+                    tag = content[pos:pos+4]
+                    if len(tag) < 4:
+                        break
+                    length = int.from_bytes(content[pos+4:pos+8], byteorder='big')
+                    if tag == b'otrk':
+                        block_end = pos + 8 + length
+                        block = content[pos:block_end]
+                        p_idx = block.find(b'ptrk')
+                        if p_idx != -1 and p_idx + 8 <= len(block):
+                            p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
+                            path_str = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
+                            otrk_blocks.append((path_str, block))
+                        pos = block_end
+                    else:
+                        pos += 8 + length
+                        header_end = pos
 
-            if not otrk_blocks:
+                if not otrk_blocks:
+                    continue
+
+                header_bytes = content[:header_end]
+                kept_blocks = []
+                removed_in_this = 0
+
+                # 2. Verifica se a faixa deve ser removida
+                for rel_path, block in otrk_blocks:
+                    should_remove = False
+                    if target_set is not None:
+                        if rel_path in target_set or Path(rel_path).name in target_set:
+                            should_remove = True
+                    else:
+                        resolved = resolve_serato_path(rel_path, mp3_base)
+                        if not (resolved and resolved.exists()):
+                            should_remove = True
+
+                    if should_remove:
+                        removed_in_this += 1
+                    else:
+                        kept_blocks.append(block)
+
+                # 3. Se houver faixas removidas, cria backup e reescreve a crate
+                if removed_in_this > 0:
+                    new_content = header_bytes + b''.join(kept_blocks)
+                    backup_path = crate_file.with_suffix('.crate.bak')
+                    if not backup_path.exists():
+                        crate_file.rename(backup_path)
+                    crate_file.write_bytes(new_content)
+
+                    total_removed += removed_in_this
+                    crates_affected.append({
+                        "crate": crate_file.stem.replace('%%', ' -> '),
+                        "removidas": removed_in_this,
+                        "restantes": len(kept_blocks)
+                    })
+
+            except Exception as e:
+                crates_affected.append({
+                    "crate": crate_file.name,
+                    "erro": str(e)
+                })
                 continue
 
-            header_bytes = content[:header_end]
-            kept_blocks = []
-            removed_in_this = 0
+    # Limpa também na database V2 do Serato (banco central de faixas)
+    db_candidates = [
+        Path(os.path.expanduser(serato_dir_str)) / "database V2",
+        Path(os.path.expanduser(serato_dir_str)) / "_Serato_" / "database V2",
+        Path.home() / "Music" / "_Serato_" / "database V2"
+    ]
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        db_candidates.append(Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2")
 
-            # 2. Verifica existência real no disco de cada faixa
-            for rel_path, block in otrk_blocks:
-                resolved = resolve_serato_path(rel_path, mp3_base)
-                if resolved and resolved.exists():
-                    kept_blocks.append(block)
-                else:
-                    removed_in_this += 1
-
-            # 3. Se houver faixas perdidas removidas, cria backup e reescreve a crate
-            if removed_in_this > 0:
-                new_content = header_bytes + b''.join(kept_blocks)
-                backup_path = crate_file.with_suffix('.crate.bak')
-                if not backup_path.exists():
-                    crate_file.rename(backup_path)
-                crate_file.write_bytes(new_content)
-
-                total_removed += removed_in_this
-                crates_affected.append({
-                    "crate": crate_file.stem.replace('%%', ' -> '),
-                    "removidas": removed_in_this,
-                    "restantes": len(kept_blocks)
-                })
-
-        except Exception as e:
-            crates_affected.append({
-                "crate": crate_file.name,
-                "erro": str(e)
-            })
-            continue
+    total_db_removed = 0
+    for db_cand in db_candidates:
+        if db_cand.exists():
+            cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None)
+            total_db_removed += cnt
 
     return {
         "sucesso": True,
-        "total_removidas": total_removed,
+        "total_removidas": total_removed + total_db_removed,
+        "crates_removidas": total_removed,
+        "database_v2_removidas": total_db_removed,
         "crates_afetadas": crates_affected
     }
 
@@ -625,6 +750,8 @@ def main():
     parser.add_argument("--source-path", type=str, default="", help="Caminho do arquivo localizado no HD")
     parser.add_argument("--batch-relink", type=str, default="", help="JSON de lista de faixas a religar")
     parser.add_argument("--remove-lost", action="store_true", help="Remove faixas perdidas de todas as crates do Serato")
+    parser.add_argument("--target-path", type=str, default="", help="Caminho relativo específico a remover")
+    parser.add_argument("--target-paths", type=str, default="", help="JSON de lista de caminhos a remover")
 
     args = parser.parse_args()
 
@@ -671,7 +798,12 @@ def main():
 
     if args.remove_lost:
         serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
-        res = remove_lost_tracks_from_crates(serato_dir, mp3_dir)
+        res = remove_lost_tracks_from_crates(
+            serato_dir,
+            mp3_dir,
+            target_path=args.target_path,
+            target_paths_json=args.target_paths
+        )
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
 
