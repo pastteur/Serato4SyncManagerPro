@@ -398,7 +398,8 @@ def repair_track_online(filepath_str: str):
 
     try:
         proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=90)
-        if proc.returncode != 0:
+        # yt-dlp retorna código 101 quando atinge --max-downloads 1 (comportamento de sucesso)
+        if proc.returncode not in (0, 101):
             err = proc.stderr.decode('utf-8', errors='ignore')
             return {"sucesso": False, "erro": f"yt-dlp falhou: {err[:200]}"}
 
