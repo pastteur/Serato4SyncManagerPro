@@ -26,8 +26,17 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     truncada: number;
     curta: number;
     baixa_qualidade: number;
+    sample_rate: number;
     corrompida: number;
-  }>({ truncada: 0, curta: 0, baixa_qualidade: 0, corrompida: 0 });
+  }>({ truncada: 0, curta: 0, baixa_qualidade: 0, sample_rate: 0, corrompida: 0 });
+
+  // Progresso do Coletor de Dados (Scanner)
+  const [scanProgress, setScanProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    faixa?: string;
+  } | null>(null);
 
   // Crates
   const [cratesList, setCratesList] = useState<CrateInfo[]>([]);
@@ -39,6 +48,16 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isRepairingOnline, setIsRepairingOnline] = useState<boolean>(false);
   const [repairProgress, setRepairProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    atualizados: number;
+    faixa_atual: string;
+  } | null>(null);
+
+  // Normalização Local de Frequência 44.1k via FFmpeg
+  const [isResamplingLocal, setIsResamplingLocal] = useState<boolean>(false);
+  const [resampleProgress, setResampleProgress] = useState<{
     processados: number;
     total: number;
     percentual: number;
@@ -112,6 +131,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     }
 
     setIsLoading(true);
+    setScanProgress(null);
     const scopeLabel = selectedSubcrate
       ? `Subcrate: ${selectedCrate} -> ${selectedSubcrate}`
       : selectedCrate
@@ -152,6 +172,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       onAddLog(`❌ Falha ao invocar scan_audio_health: ${e}`);
     } finally {
       setIsLoading(false);
+      setScanProgress(null);
     }
   };
 
@@ -159,14 +180,21 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     loadCrates();
   }, [mp3Path]);
 
-  // Listener de streaming para reparação online
+  // Listener de streaming para scanner, reparação online e resample local
   useEffect(() => {
+    let unlistenScan: (() => void) | undefined;
     let unlistenProgress: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
+    let unlistenResampleProg: (() => void) | undefined;
+    let unlistenResampleFin: (() => void) | undefined;
 
     const setupListeners = async () => {
       if (isTauri) {
         const { listen } = await import('@tauri-apps/api/event');
+        unlistenScan = await listen<any>('audio-health-scan-progress', (event) => {
+          setScanProgress(event.payload);
+        });
+
         unlistenProgress = await listen<any>('audio-health-batch-progress', (event) => {
           const payload = event.payload;
           setRepairProgress({
@@ -189,15 +217,41 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
             onAddLog(`❌ Erro na correção online: ${payload.erro || 'Desconhecido'}`);
           }
         });
+
+        unlistenResampleProg = await listen<any>('audio-health-resample-progress', (event) => {
+          const payload = event.payload;
+          setResampleProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            atualizados: payload.atualizados || 0,
+            faixa_atual: payload.faixa_atual || '',
+          });
+        });
+
+        unlistenResampleFin = await listen<any>('audio-health-resample-finished', (event) => {
+          const payload = event.payload;
+          setIsResamplingLocal(false);
+          setResampleProgress(null);
+          if (payload.sucesso) {
+            onAddLog(`🎉 Normalização concluída! ${payload.atualizados} faixas convertidas com sucesso para 44.100 Hz (320kbps CBR).`);
+            loadHealthScan(selectedCategory, maxDuration);
+          } else {
+            onAddLog(`❌ Erro na normalização: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
       }
     };
 
     setupListeners();
     return () => {
+      if (unlistenScan) unlistenScan();
       if (unlistenProgress) unlistenProgress();
       if (unlistenFinished) unlistenFinished();
+      if (unlistenResampleProg) unlistenResampleProg();
+      if (unlistenResampleFin) unlistenResampleFin();
     };
-  }, []);
+  }, [selectedCategory, maxDuration]);
 
   // Mover faixa individual para lixeira
   const handleTrashSingle = (item: any) => {
@@ -324,6 +378,68 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     });
   };
 
+  // Normalização de Frequência Local em Lote via FFmpeg
+  const handleBatchResample = () => {
+    const selectedItems = items.filter(i => selectedIds.has(i.id));
+    if (selectedItems.length === 0) return;
+
+    setModalConfig({
+      isOpen: true,
+      title: 'Normalizar Frequência para 44.100 Hz',
+      message: `Deseja normalizar ${selectedItems.length} faixas para a frequência padrão DJ (44.100 Hz a 320 kbps CBR)?\n\n⚡ A operação usa o FFmpeg localmente em alta velocidade sem precisar baixar nada da internet.\n🔒 Suas tags ID3 e marcadores Serato serão 100% preservados.`,
+      confirmText: `Normalizar ${selectedItems.length} Faixas`,
+      variant: 'info',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsResamplingLocal(true);
+        setResampleProgress({
+          processados: 0,
+          total: selectedItems.length,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando FFmpeg...'
+        });
+        onAddLog(`⚡ Audio Health: Normalizando frequência de ${selectedItems.length} faixas para 44.100 Hz...`);
+
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const filepaths = selectedItems.map(i => i.caminho);
+            await invoke('batch_resample_local', {
+              filepathsJson: JSON.stringify(filepaths)
+            });
+          }
+        } catch (e) {
+          setIsResamplingLocal(false);
+          setResampleProgress(null);
+          onAddLog(`❌ Falha na normalização local: ${e}`);
+        }
+      }
+    });
+  };
+
+  // Normalizar frequência individual
+  const handleResampleSingle = async (item: any) => {
+    onAddLog(`⚡ Audio Health: Normalizando ${item.arquivo} para 44.100 Hz...`);
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('resample_track_local', {
+          filepath: item.caminho
+        });
+        const data = JSON.parse(resJson);
+        if (data.sucesso) {
+          onAddLog(`✅ ${data.mensagem}`);
+          setItems(prev => prev.filter(i => i.id !== item.id));
+        } else {
+          onAddLog(`❌ Erro no resample: ${data.erro}`);
+        }
+      }
+    } catch (e) {
+      onAddLog(`❌ Falha no resample: ${e}`);
+    }
+  };
+
   // Alterna seleção
   const toggleSelect = (id: string) => {
     setSelectedIds(prev => {
@@ -377,19 +493,31 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <button
             type="button"
             onClick={handleRepairBatchOnline}
-            disabled={isLoading || isRepairingOnline || selectedIds.size === 0}
+            disabled={isLoading || isRepairingOnline || isResamplingLocal || selectedIds.size === 0}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-cyan to-blue-500 hover:opacity-90 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-30 cursor-pointer"
-            title="Busca e baixa versões completas em 320kbps substituindo as faixas selecionadas"
+            title="Busca e baixa versões completas em 320kbps (44.1kHz) substituindo as faixas selecionadas"
           >
             <DownloadCloud className={`w-3.5 h-3.5 ${isRepairingOnline ? 'animate-bounce' : ''}`} />
             <span>{isRepairingOnline ? 'Baixando em 320k...' : `🌐 Corrigir Online 320k (${selectedIds.size})`}</span>
+          </button>
+
+          {/* Botão de Normalização 44.1k FFmpeg */}
+          <button
+            type="button"
+            onClick={handleBatchResample}
+            disabled={isLoading || isRepairingOnline || isResamplingLocal || selectedIds.size === 0}
+            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-600/50 shadow-lg shadow-purple-950/40 transition disabled:opacity-30 cursor-pointer"
+            title="Converte e normaliza arquivos para 44.100 Hz (320kbps CBR) localmente via FFmpeg"
+          >
+            <Zap className={`w-3.5 h-3.5 ${isResamplingLocal ? 'animate-bounce text-purple-300' : 'text-purple-400'}`} />
+            <span>{isResamplingLocal ? 'Normalizando...' : `⚡ Normalizar 44.1k (${selectedIds.size})`}</span>
           </button>
 
           {/* Botão de Auditoria */}
           <button
             type="button"
             onClick={() => loadHealthScan(selectedCategory, maxDuration)}
-            disabled={isLoading || isRepairingOnline}
+            disabled={isLoading || isRepairingOnline || isResamplingLocal}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-950/40 transition disabled:opacity-40 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
@@ -535,6 +663,24 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         <button
           type="button"
           onClick={() => {
+            setSelectedCategory('sample_rate');
+            loadHealthScan('sample_rate', maxDuration);
+          }}
+          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+            selectedCategory === 'sample_rate'
+              ? 'bg-purple-950 text-purple-200 border-purple-500 shadow'
+              : 'bg-serato-card text-purple-400/80 border-serato-cardBorder hover:text-purple-200'
+          }`}
+        >
+          <span>📻 Frequência Não-DJ (≠ 44.1k)</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-purple-950 font-mono text-purple-300">
+            {categoryCounts.sample_rate || 0}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
             setSelectedCategory('corrompida');
             loadHealthScan('corrompida', maxDuration);
           }}
@@ -551,33 +697,74 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         </button>
       </div>
 
-      {/* Banner de Progresso de Correção Online */}
-      {isRepairingOnline && repairProgress && (
-        <div className="bg-cyan-950/40 border border-serato-cyan/50 p-3 rounded-xl shadow-xl flex flex-col gap-1.5 shrink-0 animate-pulse">
-          <div className="flex items-center justify-between text-xs font-bold text-white">
-            <span className="flex items-center gap-2 text-serato-cyan">
-              <DownloadCloud className="w-4 h-4 text-serato-cyan animate-bounce" />
-              <span>Baixando versões 320kbps e substituindo arquivos comprometidos...</span>
-            </span>
-            <span className="font-mono text-serato-gold">
-              {repairProgress.percentual}% ({repairProgress.processados} / {repairProgress.total})
-            </span>
+      {/* Barra de Progresso Real-time Slim (Estilo Tag Doctor / Sound Seal) */}
+      {(isLoading || isRepairingOnline || isResamplingLocal) && (
+        <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border border-slate-700/60 rounded-lg text-xs shrink-0 shadow-lg animate-in fade-in duration-200">
+          <div className="flex items-center gap-2 overflow-hidden flex-1 mr-3 min-w-0">
+            {isLoading && (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 text-rose-400 animate-spin shrink-0" />
+                <span className="text-rose-400 font-bold truncate">Auditando Integridade dos Arquivos:</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {scanProgress?.faixa || 'Iniciando auditoria física...'}
+                </span>
+              </>
+            )}
+            {isRepairingOnline && (
+              <>
+                <DownloadCloud className="w-3.5 h-3.5 text-serato-cyan animate-bounce shrink-0" />
+                <span className="text-serato-cyan font-bold truncate">Baixando Versões 320k (44.1kHz):</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {repairProgress?.faixa_atual || 'Processando substituições...'}
+                </span>
+              </>
+            )}
+            {isResamplingLocal && (
+              <>
+                <Zap className="w-3.5 h-3.5 text-purple-400 animate-bounce shrink-0" />
+                <span className="text-purple-400 font-bold truncate">Normalizando para 44.100 Hz (FFmpeg):</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {resampleProgress?.faixa_atual || 'Processando resample local...'}
+                </span>
+              </>
+            )}
           </div>
 
-          <div className="w-full bg-slate-900 rounded-full h-2.5 border border-serato-cardBorder overflow-hidden">
-            <div
-              className="bg-gradient-to-r from-serato-cyan to-blue-500 h-2.5 transition-all duration-200"
-              style={{ width: `${Math.min(100, Math.max(1, repairProgress.percentual))}%` }}
-            />
-          </div>
+          <div className="flex items-center gap-2.5 shrink-0 font-mono text-[11px]">
+            {isLoading && scanProgress && (
+              <span className="text-rose-400 font-bold">
+                {scanProgress.percentual}% ({scanProgress.processados.toLocaleString()}/{scanProgress.total.toLocaleString()})
+              </span>
+            )}
+            {isRepairingOnline && repairProgress && (
+              <span className="text-serato-cyan font-bold">
+                {repairProgress.percentual}% ({repairProgress.processados}/{repairProgress.total}) • ✅ {repairProgress.atualizados}
+              </span>
+            )}
+            {isResamplingLocal && resampleProgress && (
+              <span className="text-purple-300 font-bold">
+                {resampleProgress.percentual}% ({resampleProgress.processados}/{resampleProgress.total}) • ✅ {resampleProgress.atualizados}
+              </span>
+            )}
 
-          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
-            <span className="truncate max-w-[70%]">
-              Faixa: <b className="text-slate-200">{repairProgress.faixa_atual}</b>
-            </span>
-            <span className="text-serato-neonGreen font-semibold">
-              ✅ {repairProgress.atualizados} substituídas em 320kbps
-            </span>
+            <div className="w-24 bg-slate-950 rounded-full h-1.5 overflow-hidden ml-1 border border-white/5">
+              <div
+                className={`h-full transition-all duration-150 ${
+                  isLoading
+                    ? 'bg-gradient-to-r from-rose-500 to-amber-500'
+                    : isRepairingOnline
+                      ? 'bg-gradient-to-r from-serato-cyan to-blue-500'
+                      : 'bg-gradient-to-r from-purple-500 to-indigo-500'
+                }`}
+                style={{
+                  width: `${Math.min(100, Math.max(1,
+                    isLoading && scanProgress ? scanProgress.percentual :
+                    isRepairingOnline && repairProgress ? repairProgress.percentual :
+                    isResamplingLocal && resampleProgress ? resampleProgress.percentual : 100
+                  ))}%`
+                }}
+              />
+            </div>
           </div>
         </div>
       )}
@@ -668,6 +855,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       ? 'bg-amber-950/20 border-amber-900/50 hover:bg-amber-950/30'
                       : item.categoria === 'corrompida'
                       ? 'bg-red-950/20 border-red-900/50 hover:bg-red-950/30'
+                      : item.categoria === 'sample_rate'
+                      ? 'bg-purple-950/20 border-purple-900/50 hover:bg-purple-950/30'
                       : 'bg-indigo-950/20 border-indigo-900/50 hover:bg-indigo-950/30'
                   } ${isSelected ? 'ring-1 ring-serato-cyan' : ''}`}
                 >
@@ -688,6 +877,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                           ? 'bg-amber-950 text-amber-300 border border-amber-800'
                           : item.categoria === 'corrompida'
                           ? 'bg-red-950 text-red-300 border border-red-800'
+                          : item.categoria === 'sample_rate'
+                          ? 'bg-purple-950 text-purple-300 border border-purple-800'
                           : 'bg-indigo-950 text-indigo-300 border border-indigo-800'
                       }`}
                     >
@@ -697,6 +888,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                         ? '✂️ MUITO CURTA'
                         : item.categoria === 'corrompida'
                         ? '❌ CORROMPIDA'
+                        : item.categoria === 'sample_rate'
+                        ? '📻 NÃO-44.1k'
                         : '📉 BAIXA QUALIDADE'}
                     </span>
 
@@ -715,14 +908,33 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                     {item.bitrate_kbps > 0 && (
                       <span className="text-serato-cyan">{item.bitrate_kbps} kbps</span>
                     )}
+                    {item.sample_rate > 0 && item.sample_rate !== 44100 && (
+                      <span className="text-purple-300 text-[10px] bg-purple-950/80 px-1 py-0.2 rounded border border-purple-700/50">
+                        {item.sample_rate} Hz
+                      </span>
+                    )}
+
+                    {/* Botão Normalizar Frequência Local */}
+                    {item.categoria === 'sample_rate' && (
+                      <button
+                        type="button"
+                        onClick={() => handleResampleSingle(item)}
+                        disabled={isResamplingLocal}
+                        className="flex items-center gap-1 px-2 py-1 rounded bg-purple-950/60 hover:bg-purple-900 text-purple-300 border border-purple-700/50 text-[11px] font-semibold transition cursor-pointer"
+                        title="Normaliza frequência para 44.100 Hz (320kbps CBR) localmente via FFmpeg"
+                      >
+                        <Zap className="w-3 h-3 text-purple-400" />
+                        <span>44.1k</span>
+                      </button>
+                    )}
 
                     {/* Botão Baixar Online */}
                     <button
                       type="button"
                       onClick={() => handleRepairSingleOnline(item)}
-                      disabled={isRepairingOnline}
+                      disabled={isRepairingOnline || isResamplingLocal}
                       className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-950/50 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/40 text-[11px] font-semibold transition cursor-pointer"
-                      title="Baixa automaticamente versão 320kbps íntegra e substitui esta faixa"
+                      title="Baixa automaticamente versão 320kbps íntegra (44.1kHz) e substitui esta faixa"
                     >
                       <DownloadCloud className="w-3.5 h-3.5" />
                       <span>Baixar 320k</span>

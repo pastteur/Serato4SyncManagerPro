@@ -165,10 +165,24 @@ def inspect_track_health(filepath: Path, max_duration_suspicious: float = 60.0):
             "severidade": "baixa",
             "detalhes": f"Taxa de bits de apenas {round(bitrate / 1000)} kbps. Recomendado substituir por 320 kbps para som potente.",
             "duracao": round(duration, 1),
-            "bitrate": round(bitrate / 1000)
+            "bitrate": round(bitrate / 1000),
+            "sample_rate": sample_rate
         }
 
-    # 4. Saudável
+    # 4. Frequência fora do padrão DJ (≠ 44.100 Hz, ex: 48.000 Hz de vídeo/YouTube ou 22.050 Hz)
+    if sample_rate > 0 and sample_rate != 44100:
+        return {
+            "status": "atencao",
+            "categoria": "sample_rate",
+            "tipo_problema": "sample_rate_inadequado",
+            "severidade": "media" if sample_rate == 48000 else "alta",
+            "detalhes": f"Frequência fora do padrão DJ: {sample_rate} Hz (padrão é 44.100 Hz). Pode tocar acelerado ou com pitch alterado.",
+            "duracao": round(duration, 1),
+            "bitrate": round(bitrate / 1000) if bitrate else 0,
+            "sample_rate": sample_rate
+        }
+
+    # 5. Saudável
     return {
         "status": "saudavel",
         "categoria": "saudavel",
@@ -176,7 +190,8 @@ def inspect_track_health(filepath: Path, max_duration_suspicious: float = 60.0):
         "severidade": "ok",
         "detalhes": f"Áudio 100% íntegro ({round(duration)}s · {round(bitrate/1000) if bitrate else 'VBR'} kbps · {sample_rate} Hz)",
         "duracao": round(duration, 1),
-        "bitrate": round(bitrate / 1000) if bitrate else 0
+        "bitrate": round(bitrate / 1000) if bitrate else 0,
+        "sample_rate": sample_rate
     }
 
 
@@ -188,14 +203,18 @@ def scan_audio_health(
     max_duration_suspicious: float = 60.0,
     filter_categoria: str = "todas",
     limit: int = 250,
-    offset: int = 0
+    offset: int = 0,
+    stream_progress: bool = True
 ):
     """
     Audita os arquivos de áudio por crate ou em toda a biblioteca, agrupando por destaques de evidências.
     """
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     if not base_path.exists():
-        return {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
+        res = {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
+        if stream_progress:
+            print(json.dumps({"tipo": "resultado", "dados": res}, ensure_ascii=False), flush=True)
+        return res
 
     target_dir = base_path
     if crate_raiz:
@@ -204,13 +223,28 @@ def scan_audio_health(
             target_dir = target_dir / subcrate
 
     if not target_dir.exists():
-        return {
+        res = {
             "sucesso": True,
             "total_analisadas": 0,
             "total_problemas": 0,
-            "categorias_contagem": {"truncada": 0, "curta": 0, "baixa_qualidade": 0, "corrompida": 0},
+            "categorias_contagem": {"truncada": 0, "curta": 0, "baixa_qualidade": 0, "sample_rate": 0, "corrompida": 0},
             "items": []
         }
+        if stream_progress:
+            print(json.dumps({"tipo": "resultado", "dados": res}, ensure_ascii=False), flush=True)
+        return res
+
+    # Pré-contagem rápida de arquivos para cálculo de porcentagem precisa
+    total_audio_files = 0
+    for root, dirs, files in os.walk(str(target_dir)):
+        if '/.' in root or '\\.' in root:
+            continue
+        if crate_raiz and not include_subcrates and not subcrate:
+            if root != str(target_dir):
+                dirs.clear()
+                continue
+            dirs.clear()
+        total_audio_files += sum(1 for f in files if not f.startswith('.') and Path(f).suffix.lower() in AUDIO_EXTENSIONS)
 
     total_scanned = 0
     items = []
@@ -218,8 +252,18 @@ def scan_audio_health(
         "truncada": 0,
         "curta": 0,
         "baixa_qualidade": 0,
+        "sample_rate": 0,
         "corrompida": 0
     }
+
+    if stream_progress:
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": 0,
+            "total": total_audio_files,
+            "percentual": 0.0,
+            "faixa": "Iniciando auditoria de integridade..."
+        }, ensure_ascii=False), flush=True)
 
     for root, dirs, files in os.walk(str(target_dir)):
         if '/.' in root or '\\.' in root:
@@ -263,23 +307,38 @@ def scan_audio_health(
                                 "severidade": diag["severidade"],
                                 "detalhes": diag["detalhes"],
                                 "duracao_seg": diag["duracao"],
-                                "bitrate_kbps": diag["bitrate"]
+                                "bitrate_kbps": diag["bitrate"],
+                                "sample_rate": diag.get("sample_rate", 0)
                             })
+
+                if stream_progress and (total_scanned % 35 == 0 or total_scanned == total_audio_files):
+                    pct = round((total_scanned / max(1, total_audio_files)) * 100, 1)
+                    print(json.dumps({
+                        "tipo": "progresso",
+                        "processados": total_scanned,
+                        "total": total_audio_files,
+                        "percentual": pct,
+                        "faixa": f
+                    }, ensure_ascii=False), flush=True)
 
     total_problems = sum(category_counts.values())
 
-    return {
+    res = {
         "sucesso": True,
         "total_analisadas": total_scanned,
         "total_problemas": total_problems,
         "categorias_contagem": category_counts,
         "items": items
     }
+    if stream_progress:
+        print(json.dumps({"tipo": "resultado", "dados": res}, ensure_ascii=False), flush=True)
+    return res
 
 
 def repair_track_online(filepath_str: str):
     """
-    Substitui a faixa danificada baixando uma versão 320kbps de alta fidelidade via yt-dlp.
+    Substitui a faixa danificada baixando uma versão 320kbps de alta fidelidade (44.100 Hz CBR) via yt-dlp.
+    Protege contra áudio acelerado (sped up/nightcore/shorts) e resampla para o padrão DJ.
     """
     yt_dlp = get_yt_dlp_bin()
     if not yt_dlp:
@@ -293,13 +352,20 @@ def repair_track_online(filepath_str: str):
         return {"sucesso": False, "erro": "Arquivo original não encontrado no disco."}
 
     stem = file_p.stem
-    # Remove lixo de BPM e formata busca limpa
-    clean_query = stem.replace('_', ' ')
+    # Limpa sufixos de Crate comum (ex: "Strike - Aquela Historia - Pop Rock" -> "Strike - Aquela Historia")
+    clean_query = stem
+    if ' - ' in clean_query:
+        parts = [p.strip() for p in clean_query.split(' - ') if p.strip()]
+        if len(parts) >= 3:
+            parts.pop() # Remove a crate do final
+            clean_query = ' - '.join(parts)
+
+    clean_query = clean_query.replace('_', ' ')
     import re
     clean_query = re.sub(r'[\(\[].*?[\)\]]', '', clean_query) # remove parenteses
     clean_query = re.sub(r'\s*\.\s*\d+.*$', '', clean_query).strip()
 
-    search_term = f"ytsearch1:{clean_query} audio"
+    search_term = f"ytsearch3:{clean_query} audio oficial"
 
     temp_id = f"repair_{int(datetime.now().timestamp() * 1000)}"
     temp_dir = Path("/tmp") / temp_id
@@ -309,12 +375,19 @@ def repair_track_online(filepath_str: str):
     env = os.environ.copy()
     env["PATH"] = f"{FFMPEG_DIR}:{env.get('PATH', '')}"
 
+    # CRÍTICO PARA DJS:
+    # 1. Força ffmpeg a resamplar para 44.100 Hz e 320 kbps CBR
+    # 2. Ignora Shorts e vídeos com menos de 60s ou mais de 600s
+    # 3. Baixa apenas o melhor resultado oficial
     cmd = [
         yt_dlp,
         search_term,
         "-x",
         "--audio-format", "mp3",
         "--audio-quality", "0",
+        "--postprocessor-args", "ffmpeg:-ar 44100 -b:a 320k -id3v2_version 3",
+        "--match-filter", "!is_live & !is_short & duration > 60 & duration < 600",
+        "--max-downloads", "1",
         "-o", out_template,
         "--no-playlist",
         "--default-search", "ytsearch",
@@ -351,13 +424,102 @@ def repair_track_online(filepath_str: str):
             "sucesso": True,
             "arquivo": file_p.name,
             "quarentena": str(quarantine_file),
-            "mensagem": f"Faixa substituída com sucesso por versão 320kbps íntegra."
+            "mensagem": f"Faixa substituída com sucesso por versão oficial 320kbps (44.100 Hz)."
         }
 
     except subprocess.TimeoutExpired:
         return {"sucesso": False, "erro": "Tempo limite de download excedido (90s)."}
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}
+
+
+def resample_track_local(filepath_str: str) -> dict:
+    """
+    Normaliza a frequência do arquivo local para 44.100 Hz e 320 kbps CBR via FFmpeg,
+    preservando 100% das tags ID3v2.3 e Serato Markers.
+    """
+    file_p = Path(os.path.expanduser(filepath_str)).resolve()
+    if not file_p.exists():
+        return {"sucesso": False, "erro": "Arquivo não encontrado."}
+
+    ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+    if not os.path.exists(ffmpeg_bin):
+        return {"sucesso": False, "erro": "FFmpeg não instalado no sistema."}
+
+    temp_id = f"resample_{int(datetime.now().timestamp() * 1000)}"
+    temp_dir = Path("/tmp") / temp_id
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_out = temp_dir / file_p.name
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i", str(file_p),
+        "-ar", "44100",
+        "-b:a", "320k",
+        "-map_metadata", "0",
+        "-id3v2_version", "3",
+        str(temp_out)
+    ]
+
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+        if proc.returncode != 0:
+            err = proc.stderr.decode('utf-8', errors='ignore')
+            return {"sucesso": False, "erro": f"FFmpeg falhou: {err[:200]}"}
+
+        # Backup de segurança na quarentena
+        QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+        quarantine_file = QUARANTINE_DIR / f"pre_resample_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_p.name}"
+        shutil.copy2(str(file_p), str(quarantine_file))
+
+        # Substitui com o novo arquivo normalizado
+        shutil.move(str(temp_out), str(file_p))
+        shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+        return {
+            "sucesso": True,
+            "arquivo": file_p.name,
+            "mensagem": f"Frequência normalizada com sucesso para 44.100 Hz (320 kbps CBR)."
+        }
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
+
+
+def batch_resample_tracks_local(filepaths: list):
+    """Executa normalização de frequência (44.1 kHz) em lote localmente via FFmpeg."""
+    total = len(filepaths)
+    print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
+    updated_count = 0
+    errors = []
+
+    for idx, fp in enumerate(filepaths, 1):
+        filename = Path(fp).name
+        res = resample_track_local(fp)
+        if res.get("sucesso"):
+            updated_count += 1
+        else:
+            errors.append(f"{filename}: {res.get('erro')}")
+
+        pct = round((idx / total) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx,
+            "total": total,
+            "percentual": pct,
+            "atualizados": updated_count,
+            "faixa_atual": filename,
+            "ultimo_sucesso": res.get("sucesso", False)
+        }, ensure_ascii=False), flush=True)
+
+    print(json.dumps({
+        "tipo": "fim",
+        "sucesso": True,
+        "total": total,
+        "atualizados": updated_count,
+        "erros": errors[:10]
+    }, ensure_ascii=False), flush=True)
 
 
 def batch_repair_tracks_online(filepaths: list):
@@ -404,11 +566,13 @@ def main():
     parser.add_argument("--subcrate", type=str, default="", help="Subcrate")
     parser.add_argument("--no-subcrates", action="store_true", help="Não incluir subcrates")
     parser.add_argument("--max-duration", type=float, default=60.0, help="Duração máxima suspeita (segundos)")
-    parser.add_argument("--categoria", type=str, default="todas", choices=["todas", "truncada", "curta", "baixa_qualidade", "corrompida"], help="Categoria em destaque")
+    parser.add_argument("--categoria", type=str, default="todas", choices=["todas", "truncada", "curta", "baixa_qualidade", "sample_rate", "corrompida"], help="Categoria em destaque")
     parser.add_argument("--limit", type=int, default=250, help="Limite de faixas na listagem")
     parser.add_argument("--offset", type=int, default=0, help="Offset de paginação")
     parser.add_argument("--repair-online", type=str, default="", help="Caminho do arquivo a reparar online")
     parser.add_argument("--batch-repair-online", type=str, default="", help="JSON de lista de caminhos a reparar online")
+    parser.add_argument("--resample-local", type=str, default="", help="Caminho do arquivo a normalizar frequência (44.1kHz)")
+    parser.add_argument("--batch-resample-local", type=str, default="", help="JSON de lista de caminhos a normalizar frequência")
 
     args = parser.parse_args()
     mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
@@ -431,8 +595,26 @@ def main():
             print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
             sys.exit(1)
 
+    if args.resample_local:
+        res = resample_track_local(args.resample_local)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.batch_resample_local:
+        try:
+            if args.batch_resample_local.startswith('['):
+                fps = json.loads(args.batch_resample_local)
+            else:
+                with open(args.batch_resample_local, 'r', encoding='utf-8') as f:
+                    fps = json.load(f)
+            batch_resample_tracks_local(fps)
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
+            sys.exit(1)
+
     if args.scan:
-        res = scan_audio_health(
+        scan_audio_health(
             mp3_dir,
             crate_raiz=args.crate_raiz,
             subcrate=args.subcrate,
@@ -440,9 +622,9 @@ def main():
             max_duration_suspicious=args.max_duration,
             filter_categoria=args.categoria,
             limit=args.limit,
-            offset=args.offset
+            offset=args.offset,
+            stream_progress=True
         )
-        print(json.dumps(res, ensure_ascii=False))
         sys.exit(0)
 
     parser.print_help()

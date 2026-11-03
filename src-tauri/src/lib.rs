@@ -1119,6 +1119,7 @@ mod commands {
     #[tauri::command]
     pub async fn scan_audio_health(
         app: AppHandle,
+        window: Window,
         mp3_path: String,
         crate_raiz: Option<String>,
         subcrate: Option<String>,
@@ -1168,9 +1169,110 @@ mod commands {
             cmd.arg(o.to_string());
         }
 
-        let output = cmd.output().map_err(|e| format!("Falha na auditoria de áudio: {}", e))?;
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Falha na auditoria de áudio: {}", e))?;
+
+        let mut final_json = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            for line_res in reader.lines() {
+                if let Ok(line) = line_res {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('{') {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window.emit("audio-health-scan-progress", parsed);
+                                continue;
+                            } else if tipo == "resultado" {
+                                if let Some(dados) = parsed.get("dados") {
+                                    final_json = dados.to_string();
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    if final_json.is_empty() && trimmed.starts_with('{') {
+                        final_json = trimmed.to_string();
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().map_err(|e| format!("Falha ao aguardar auditoria de áudio: {}", e))?;
+        if !status.success() && final_json.is_empty() {
+            return Err("Erro na execução da auditoria de áudio".to_string());
+        }
+
+        if final_json.is_empty() {
+            final_json = "{}".to_string();
+        }
+        Ok(final_json)
+    }
+
+    #[tauri::command]
+    pub async fn resample_track_local(app: AppHandle, filepath: String) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "audio_health.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--resample-local");
+        cmd.arg(&filepath);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao normalizar frequência: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn batch_resample_local(
+        app: AppHandle,
+        window: Window,
+        filepaths_json: String,
+    ) -> Result<(), String> {
+        let script = find_python_script(Some(&app), "audio_health.py");
+        let window_clone = window.clone();
+
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--batch-resample-local");
+            cmd.arg(&filepaths_json);
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window_clone.emit("audio-health-resample-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("audio-health-resample-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("audio-health-resample-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+        });
+
+        Ok(())
     }
 
     #[tauri::command]
@@ -1430,6 +1532,8 @@ pub fn run() {
             commands::scan_audio_health,
             commands::repair_track_online,
             commands::batch_repair_online,
+            commands::resample_track_local,
+            commands::batch_resample_local,
             commands::preview_auto_cues,
             commands::apply_auto_cues,
             commands::scan_crate_cues,
