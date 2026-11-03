@@ -33,6 +33,23 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     fileName: string;
   } | null>(null);
 
+  // Progresso em tempo real das varreduras de Sound Seal e Relocate
+  const [sealScanProgress, setSealScanProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    novos?: number;
+    faixa?: string;
+  } | null>(null);
+
+  const [relocateScanProgress, setRelocateScanProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    faixa?: string;
+    etapa?: string;
+  } | null>(null);
+
   // Seleção e Relocalização em Massa
   const [selectedRelinkItems, setSelectedRelinkItems] = useState<Map<string, { rel_path: string; source_path: string; nome: string }>>(new Map());
   const [selectedLostTracks, setSelectedLostTracks] = useState<Set<string>>(new Set());
@@ -127,14 +144,24 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     loadDuplicatesBySound();
   }, []);
 
-  // Listener para batch relink
+  // Listener para batch relink e varreduras em tempo real
   useEffect(() => {
     let unlistenProgress: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
+    let unlistenSealScan: (() => void) | undefined;
+    let unlistenRelocateScan: (() => void) | undefined;
 
     const setupListeners = async () => {
       if (isTauri) {
         const { listen } = await import('@tauri-apps/api/event');
+        unlistenSealScan = await listen<any>('sound-seal-scan-progress', (event) => {
+          setSealScanProgress(event.payload);
+        });
+
+        unlistenRelocateScan = await listen<any>('relocate-scan-progress', (event) => {
+          setRelocateScanProgress(event.payload);
+        });
+
         unlistenProgress = await listen<any>('sound-seal-relink-progress', (event) => {
           const payload = event.payload;
           setRelinkProgress({
@@ -162,6 +189,8 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
 
     setupListeners();
     return () => {
+      if (unlistenSealScan) unlistenSealScan();
+      if (unlistenRelocateScan) unlistenRelocateScan();
       if (unlistenProgress) unlistenProgress();
       if (unlistenFinished) unlistenFinished();
     };
@@ -211,6 +240,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       return;
     }
     setIsScanning(true);
+    setSealScanProgress(null);
     onAddLog(`🧬 Sound Seal: Extraindo assinaturas acústicas SHA-256 em ${mp3Path}...`);
 
     try {
@@ -218,7 +248,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
         const { invoke } = await import('@tauri-apps/api/core');
         const res = await invoke<string>('scan_sound_seals', {
           mp3Path,
-          batch: 500
+          batch: 0
         });
         if (!res || !res.trim()) throw new Error('O motor retornou resposta vazia.');
         let parsed: any;
@@ -229,12 +259,14 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
         }
         setStatus(parsed);
         loadDuplicatesBySound();
-        onAddLog(`✅ Sound Seal: Varredura concluída. ${parsed.total_selados} faixas seladas com sucesso.`);
+        const totalSel = parsed.total_selados ?? parsed.total_processados ?? 0;
+        onAddLog(`✅ Sound Seal: Varredura concluída. ${Number(totalSel).toLocaleString()} faixas seladas com sucesso.`);
       }
     } catch (e) {
       onAddLog(`❌ Erro no Sound Seal: ${e}`);
     } finally {
       setIsScanning(false);
+      setSealScanProgress(null);
     }
   };
 
@@ -245,6 +277,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       return;
     }
     setIsScanningRelocate(true);
+    setRelocateScanProgress(null);
     onAddLog(`🔍 Relocate: Rastreador de faixas perdidas ativado...`);
 
     try {
@@ -290,6 +323,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
       onAddLog(`❌ Erro no Relocate: ${e}`);
     } finally {
       setIsScanningRelocate(false);
+      setRelocateScanProgress(null);
     }
   };
 
@@ -907,6 +941,96 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           )}
         </div>
       </div>
+
+      {/* Barra de Progresso Real-time Slim (Estilo Tag Doctor) */}
+      {(isScanning || isScanningRelocate || isRelinkingBatch || isTrashingBatch) && (
+        <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border border-slate-700/60 rounded-lg text-xs shrink-0 shadow-lg animate-in fade-in duration-200">
+          <div className="flex items-center gap-2 overflow-hidden flex-1 mr-3 min-w-0">
+            {isScanning && (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 text-serato-cyan animate-spin shrink-0" />
+                <span className="text-serato-cyan font-bold truncate">Varrendo Biblioteca (Sound Seal):</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {sealScanProgress?.faixa || 'Iniciando extração acústica SHA-256...'}
+                </span>
+              </>
+            )}
+            {isScanningRelocate && (
+              <>
+                <Search className="w-3.5 h-3.5 text-serato-orange animate-spin shrink-0" />
+                <span className="text-serato-orange font-bold truncate">Rastreando Faixas Perdidas:</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {relocateScanProgress?.faixa || 'Inspecionando crates e database V2...'}
+                </span>
+              </>
+            )}
+            {isRelinkingBatch && (
+              <>
+                <Zap className="w-3.5 h-3.5 text-serato-cyan animate-bounce shrink-0" />
+                <span className="text-serato-cyan font-bold truncate">Religando faixas ao Serato:</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {relinkProgress?.faixa_atual || 'Processando relocalizações...'}
+                </span>
+              </>
+            )}
+            {isTrashingBatch && (
+              <>
+                <Trash2 className="w-3.5 h-3.5 text-rose-400 animate-pulse shrink-0" />
+                <span className="text-rose-400 font-bold truncate">Movendo cópias redundantes:</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {trashProgress?.fileName || 'Processando lixeira...'}
+                </span>
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2.5 shrink-0 font-mono text-[11px]">
+            {isScanning && sealScanProgress && (
+              <span className="text-serato-cyan font-bold">
+                {sealScanProgress.percentual}% ({sealScanProgress.processados.toLocaleString()}/{sealScanProgress.total.toLocaleString()})
+                {sealScanProgress.novos !== undefined && sealScanProgress.novos > 0 && ` • +${sealScanProgress.novos} novas`}
+              </span>
+            )}
+            {isScanningRelocate && relocateScanProgress && (
+              <span className="text-serato-orange font-bold">
+                {relocateScanProgress.percentual}% ({relocateScanProgress.processados.toLocaleString()}/{relocateScanProgress.total.toLocaleString()})
+              </span>
+            )}
+            {isRelinkingBatch && relinkProgress && (
+              <span className="text-serato-cyan font-bold">
+                {relinkProgress.percentual}% ({relinkProgress.processados.toLocaleString()}/{relinkProgress.total.toLocaleString()}) • ✅ {relinkProgress.atualizados}
+              </span>
+            )}
+            {isTrashingBatch && trashProgress && (
+              <span className="text-rose-300 font-bold">
+                {Math.round((trashProgress.current / Math.max(1, trashProgress.total)) * 100)}% ({trashProgress.current}/{trashProgress.total})
+              </span>
+            )}
+
+            <div className="w-24 bg-slate-950 rounded-full h-1.5 overflow-hidden ml-1 border border-white/5">
+              <div
+                className={`h-full transition-all duration-150 ${
+                  isScanning
+                    ? 'bg-gradient-to-r from-serato-cyan to-blue-500'
+                    : isScanningRelocate
+                      ? 'bg-gradient-to-r from-amber-500 to-serato-orange'
+                      : isRelinkingBatch
+                        ? 'bg-gradient-to-r from-serato-cyan to-emerald-400'
+                        : 'bg-gradient-to-r from-rose-500 to-amber-500'
+                }`}
+                style={{
+                  width: `${Math.min(100, Math.max(1,
+                    isScanning && sealScanProgress ? sealScanProgress.percentual :
+                    isScanningRelocate && relocateScanProgress ? relocateScanProgress.percentual :
+                    isRelinkingBatch && relinkProgress ? relinkProgress.percentual :
+                    isTrashingBatch && trashProgress ? Math.round((trashProgress.current / Math.max(1, trashProgress.total)) * 100) : 100
+                  ))}%`
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Conteúdo da Sub-Aba Sound Seal */}
       {activeSubTab === 'seal' && (

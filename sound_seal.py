@@ -121,9 +121,10 @@ def get_track_metadata(filepath_str: str):
     return bpm, key, duration
 
 
-def scan_sound_seals(mp3_base_dir: str, batch_size: int = 500, stream_json: bool = True):
+def scan_sound_seals(mp3_base_dir: str, batch_size: int = 0, stream_json: bool = True):
     """
     Varre a pasta de MP3 e gera os Sound Seals de forma incremental e resiliente.
+    batch_size = 0 significa varrer toda a biblioteca sem interrupção.
     Continua exatamente de onde parou após reinicialização.
     """
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
@@ -164,43 +165,58 @@ def scan_sound_seals(mp3_base_dir: str, batch_size: int = 500, stream_json: bool
             continue
 
         # Verifica cache
+        is_cached = False
         if path_str in cached:
             c_size, c_mtime, c_seal = cached[path_str]
             if c_size == size and abs(c_mtime - mtime) < 0.1 and c_seal:
-                continue
+                is_cached = True
 
-        # Calcula novo Sound Seal
-        seal = compute_audio_seal(path_str)
-        if not seal:
-            continue
+        if not is_cached:
+            # Calcula novo Sound Seal
+            seal = compute_audio_seal(path_str)
+            if seal:
+                bpm, key, duration = get_track_metadata(path_str)
+                crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
+                crate_raiz = crate_parts[0] if crate_parts else ""
 
-        bpm, key, duration = get_track_metadata(path_str)
-        crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
-        crate_raiz = crate_parts[0] if crate_parts else ""
+                cursor.execute("""
+                    INSERT OR REPLACE INTO sound_seals (filepath, filename, filesize, mtime, audio_seal, bpm, key, duration, crate_raiz, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (path_str, filename, size, mtime, seal, bpm, key, duration, crate_raiz))
 
-        cursor.execute("""
-            INSERT OR REPLACE INTO sound_seals (filepath, filename, filesize, mtime, audio_seal, bpm, key, duration, crate_raiz, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (path_str, filename, size, mtime, seal, bpm, key, duration, crate_raiz))
+                new_computed += 1
 
-        new_computed += 1
+        # Streaming de progresso fluido e responsivo
+        if stream_json and (processed_count % 35 == 0 or processed_count == total_files or (new_computed > 0 and new_computed % 5 == 0)):
+            if new_computed > 0 and new_computed % 25 == 0:
+                conn.commit()
+            pct = round((processed_count / max(1, total_files)) * 100, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": processed_count,
+                "total": total_files,
+                "percentual": pct,
+                "novos": new_computed,
+                "faixa": filename
+            }, ensure_ascii=False), flush=True)
 
-        if new_computed % 25 == 0:
-            conn.commit()
-            if stream_json:
-                elapsed = time.time() - start_time
-                speed = new_computed / elapsed if elapsed > 0 else 1
-                remaining = max(0, (total_files - processed_count) / speed) if speed > 0 else 0
-                pct = round((processed_count / total_files) * 100, 1) if total_files else 100
-                print(f"__SOUND_SEAL_PROGRESS__{json.dumps({'processed': processed_count, 'total': total_files, 'pct': pct, 'remaining_sec': round(remaining)})}")
-
-        if new_computed >= batch_size:
+        if batch_size > 0 and new_computed >= batch_size:
             break
 
     conn.commit()
     conn.close()
 
-    return get_sound_seal_status()
+    st = get_sound_seal_status()
+    if stream_json:
+        print(json.dumps({
+            "tipo": "fim",
+            "sucesso": True,
+            "total_processados": processed_count,
+            "total_arquivos": total_files,
+            "novos_selados": new_computed,
+            **st
+        }, ensure_ascii=False), flush=True)
+    return st
 
 
 def get_sound_seal_status():
@@ -413,7 +429,7 @@ def get_serato_target_path(rel_path: str, mp3_base: Path) -> Path:
     return mp3_base_res / clean_rel
 
 
-def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
+def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str, stream_json: bool = True):
     """
     Rastreia faixas do Serato cujo arquivo físico não existe no local registrado.
     Procura correspondências com Score de Confiança (100%, 87%, 77%) e na Lixeira (.Trashes).
@@ -452,35 +468,50 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
     if user_trash.exists():
         trashes_folders.append(user_trash)
 
+    crate_files = []
     for sc_dir in subcrates_dirs:
-        for crate_file in sc_dir.glob("*.crate"):
-            try:
-                content = crate_file.read_bytes()
-                idx = 0
-                while True:
-                    p = content.find(b'ptrk', idx)
-                    if p == -1 or p + 8 > len(content):
-                        break
-                    size = int.from_bytes(content[p+4:p+8], byteorder='big')
-                    raw_str = content[p+8:p+8+size]
-                    rel_path = raw_str.decode('utf-16-be', errors='ignore').strip()
-                    idx = p + 8 + size
+        crate_files.extend(list(sc_dir.glob("*.crate")))
+    total_crates = len(crate_files)
 
-                    if rel_path in checked_paths:
-                        continue
-                    checked_paths.add(rel_path)
+    for c_idx, crate_file in enumerate(crate_files, 1):
+        if stream_json and (c_idx % 5 == 0 or c_idx == total_crates):
+            pct = round((c_idx / max(1, total_crates)) * 50, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "etapa": "crates",
+                "processados": c_idx,
+                "total": total_crates,
+                "percentual": pct,
+                "faixa": f"Auditando Crate: {crate_file.stem.replace('%%', ' -> ')}"
+            }, ensure_ascii=False), flush=True)
 
-                    # Verifica se o arquivo existe usando resolução inteligente de volumes
-                    resolved = resolve_serato_path(rel_path, mp3_base)
-                    if not resolved:
-                        filename = Path(rel_path).name
-                        missing_tracks.append({
-                            "caminho_serato": rel_path,
-                            "nome": filename,
-                            "crate_origem": crate_file.stem.replace('%%', ' -> ')
-                        })
-            except Exception:
-                continue
+        try:
+            content = crate_file.read_bytes()
+            idx = 0
+            while True:
+                p = content.find(b'ptrk', idx)
+                if p == -1 or p + 8 > len(content):
+                    break
+                size = int.from_bytes(content[p+4:p+8], byteorder='big')
+                raw_str = content[p+8:p+8+size]
+                rel_path = raw_str.decode('utf-16-be', errors='ignore').strip()
+                idx = p + 8 + size
+
+                if rel_path in checked_paths:
+                    continue
+                checked_paths.add(rel_path)
+
+                # Verifica se o arquivo existe usando resolução inteligente de volumes
+                resolved = resolve_serato_path(rel_path, mp3_base)
+                if not resolved:
+                    filename = Path(rel_path).name
+                    missing_tracks.append({
+                        "caminho_serato": rel_path,
+                        "nome": filename,
+                        "crate_origem": crate_file.stem.replace('%%', ' -> ')
+                    })
+        except Exception:
+            continue
 
     # 2. Busca também na database V2 do Serato (banco central de faixas)
     db_candidates = [
@@ -524,7 +555,19 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
 
     # Agora para cada faixa faltante, busca candidatos com score
     results = []
-    for missing in missing_tracks[:1000]: # Analisa até 1000 faixas perdidas
+    total_eval = min(len(missing_tracks), 1000)
+    for m_idx, missing in enumerate(missing_tracks[:1000], 1):
+        if stream_json and (m_idx % 5 == 0 or m_idx == total_eval):
+            pct = round(50 + (m_idx / max(1, total_eval)) * 50, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "etapa": "matching",
+                "processados": m_idx,
+                "total": total_eval,
+                "percentual": pct,
+                "faixa": f"Buscando correspondência: {missing['nome']}"
+            }, ensure_ascii=False), flush=True)
+
         fname = missing["nome"]
         candidates = []
 
@@ -572,11 +615,14 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str):
         })
 
     conn.close()
-    return {
+    res = {
         "sucesso": True,
         "total_perdidas": len(missing_tracks),
         "analisadas": results
     }
+    if stream_json:
+        print(json.dumps({"tipo": "fim", **res}, ensure_ascii=False), flush=True)
+    return res
 
 
 def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
@@ -865,7 +911,7 @@ def main():
     parser.add_argument("--status", action="store_true", help="Retorna status do banco de Sound Seals")
     parser.add_argument("--duplicates", action="store_true", help="Retorna duplicatas por som")
     parser.add_argument("--relocate", action="store_true", help="Analisa faixas perdidas do Serato")
-    parser.add_argument("--batch", type=int, default=500, help="Tamanho do lote de varredura")
+    parser.add_argument("--batch", type=int, default=0, help="Tamanho do lote de varredura (0 = toda a biblioteca)")
     parser.add_argument("--relink", action="store_true", help="Religa uma faixa específica")
     parser.add_argument("--rel-path", type=str, default="", help="Caminho relativo esperado pelo Serato")
     parser.add_argument("--source-path", type=str, default="", help="Caminho do arquivo localizado no HD")
@@ -907,14 +953,12 @@ def main():
             sys.exit(1)
 
     if args.scan:
-        res = scan_sound_seals(mp3_dir, batch_size=args.batch)
-        print(json.dumps(res, ensure_ascii=False))
+        scan_sound_seals(mp3_dir, batch_size=args.batch, stream_json=True)
         sys.exit(0)
 
     if args.relocate:
         serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
-        res = scan_missing_and_relocate(serato_dir, mp3_dir)
-        print(json.dumps(res, ensure_ascii=False))
+        scan_missing_and_relocate(serato_dir, mp3_dir, stream_json=True)
         sys.exit(0)
 
     if args.remove_lost:
