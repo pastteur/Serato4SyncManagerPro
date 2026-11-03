@@ -26,6 +26,11 @@ export interface TagDoctorItem {
   formato: string;
   precisa_limpeza: boolean;
   duplicata_hd?: boolean;
+  audio_seal?: string;
+  sha_verified?: boolean;
+  sha_origem?: string;
+  sound_copies_count?: number;
+  twin_sample_fn?: string;
 }
 
 export interface CrateSubInfo {
@@ -1234,8 +1239,16 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
 
                       {/* Como Está Agora */}
                       <td className="py-2 px-3">
-                        <div className="font-sans font-medium text-slate-300 truncate max-w-[260px]" title={item.arquivo_atual}>
-                          {item.arquivo_atual}
+                        <div className="font-sans font-medium text-slate-300 truncate max-w-[260px] flex items-center gap-1.5" title={item.arquivo_atual}>
+                          <span className="truncate">{item.arquivo_atual}</span>
+                          {item.sound_copies_count && item.sound_copies_count > 1 && (
+                            <span 
+                              className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-amber-950/80 text-amber-300 border border-amber-700/50 shrink-0 cursor-help"
+                              title={`🧬 Sound Seal: ${item.sound_copies_count} cópias com áudio idêntico no HD\nExemplo: ${item.twin_sample_fn || ''}`}
+                            >
+                              {item.sound_copies_count} cópias
+                            </span>
+                          )}
                         </div>
                         <div className="text-[10px] text-slate-500 truncate max-w-[260px]">
                           Art: {item.artista_atual || '—'} | Tit: {item.titulo_atual || '—'}
@@ -1265,6 +1278,14 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                       {/* Como Vai Ficar */}
                       <td className="py-2 px-3">
                         <div className="font-sans font-semibold text-white flex items-center gap-1.5 truncate max-w-[340px]">
+                          {item.sha_verified && (
+                            <span
+                              className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-cyan-950/90 text-serato-cyan border border-serato-cyan/50 shrink-0 flex items-center gap-1 cursor-help"
+                              title={item.sha_origem || (item.sound_copies_count && item.sound_copies_count > 1 ? `Identidade acústica confirmada por SHA-256 (Gêmeo: ${item.twin_sample_fn || 'áudio gêmeo'})` : 'Assinatura acústica SHA-256 confirmada no banco')}
+                            >
+                              🧬 SHA
+                            </span>
+                          )}
                           {item.artista_sugerido ? (
                             <>
                               <span className="text-serato-cyan font-bold">{item.artista_sugerido}</span>

@@ -111,7 +111,164 @@ TRAILING_PUNCT = re.compile(r'(?<=\s)[\._]+$|\.{2,}$|[\s_]+$')
 LEADING_TRACK_NUM = re.compile(r'^\d{1,3}(?:\s*[-–.]\s*|\s+)(?=[A-Za-zÀ-ÿ])')
 
 TAG_CACHE_DB = Path.home() / ".serato_tag_cache.sqlite"
+SOUND_SEAL_DB = Path.home() / ".serato_sound_seals.sqlite"
 _SEEDED_TITLES = set()
+
+
+def get_sound_seals_map(filepaths: list) -> dict:
+    """
+    Retorna mapa de caminhos para metadados acústicos:
+    filepath -> { 'audio_seal': seal, 'bpm': bpm, 'key': key, 'duration': dur, 'sound_copies_count': cnt, 'twin_sample_fn': fn }
+    """
+    if not SOUND_SEAL_DB.exists() or not filepaths:
+        return {}
+
+    try:
+        conn = sqlite3.connect(str(SOUND_SEAL_DB))
+        cur = conn.cursor()
+
+        result = {}
+        for i in range(0, len(filepaths), 500):
+            batch = filepaths[i:i+500]
+            placeholders = ','.join(['?'] * len(batch))
+            cur.execute(f"""
+                SELECT filepath, filename, audio_seal, bpm, key, duration 
+                FROM sound_seals 
+                WHERE filepath IN ({placeholders})
+            """, batch)
+            for row in cur.fetchall():
+                fp, fn, seal, bpm, key, dur = row
+                result[fp] = {
+                    "filename": fn,
+                    "audio_seal": seal,
+                    "bpm": bpm,
+                    "key": key,
+                    "duration": dur
+                }
+
+        seals = [v["audio_seal"] for v in result.values() if v.get("audio_seal")]
+        if seals:
+            unique_seals = list(set(seals))
+            counts_map = {}
+            twins_sample_map = {}
+            for i in range(0, len(unique_seals), 500):
+                b_seals = unique_seals[i:i+500]
+                ph = ','.join(['?'] * len(b_seals))
+                cur.execute(f"""
+                    SELECT audio_seal, count(*), min(filename), min(filepath)
+                    FROM sound_seals
+                    WHERE audio_seal IN ({ph})
+                    GROUP BY audio_seal
+                """, b_seals)
+                for s, cnt, sample_fn, sample_fp in cur.fetchall():
+                    counts_map[s] = cnt
+                    twins_sample_map[s] = (sample_fn, sample_fp)
+
+            for fp, data in result.items():
+                s = data.get("audio_seal")
+                if s and s in counts_map:
+                    data["sound_copies_count"] = counts_map[s]
+                    data["twin_sample_fn"] = twins_sample_map[s][0]
+                    data["twin_sample_fp"] = twins_sample_map[s][1]
+
+        conn.close()
+        return result
+    except Exception:
+        return {}
+
+
+def sync_sound_seal_rename(old_path: str, new_path: str):
+    """Atualiza o banco de dados do Sound Seal após renomeio físico no HD."""
+    if not SOUND_SEAL_DB.exists():
+        return
+    try:
+        conn = sqlite3.connect(str(SOUND_SEAL_DB))
+        conn.execute("""
+            UPDATE sound_seals 
+            SET filepath = ?, filename = ?, updated_at = CURRENT_TIMESTAMP 
+            WHERE filepath = ?
+        """, (str(new_path), Path(new_path).name, str(old_path)))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def check_sound_seal_collision(src_path: str, dest_path: str) -> bool:
+    """Verifica se o arquivo de destino já existente tem a mesma assinatura acústica SHA-256."""
+    if not SOUND_SEAL_DB.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(SOUND_SEAL_DB))
+        cur = conn.cursor()
+        cur.execute("SELECT filepath, audio_seal FROM sound_seals WHERE filepath IN (?, ?)", (str(src_path), str(dest_path)))
+        rows = dict(cur.fetchall())
+        conn.close()
+        seal1 = rows.get(str(src_path))
+        seal2 = rows.get(str(dest_path))
+        return bool(seal1 and seal2 and seal1 == seal2)
+    except Exception:
+        return False
+
+
+def lookup_sound_seal_twin(filepath_str: str):
+    """
+    Busca se há gêmeo acústico (mesmo áudio SHA-256) na biblioteca que já tenha Artista e Título de alta qualidade.
+    Retorna (artista, titulo, nome_origem) ou (None, None, None).
+    """
+    if not SOUND_SEAL_DB.exists():
+        return None, None, None
+
+    try:
+        conn = sqlite3.connect(str(SOUND_SEAL_DB))
+        cur = conn.cursor()
+        cur.execute("SELECT audio_seal FROM sound_seals WHERE filepath = ?", (str(filepath_str),))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            conn.close()
+            return None, None, None
+
+        seal = row[0]
+        cur.execute("""
+            SELECT filepath, filename 
+            FROM sound_seals 
+            WHERE audio_seal = ? AND filepath != ?
+            LIMIT 5
+        """, (seal, str(filepath_str)))
+        twins = cur.fetchall()
+        conn.close()
+
+        for twin_fp, twin_fn in twins:
+            p = Path(twin_fp)
+            if not p.exists():
+                continue
+
+            # 1. Tenta ler tags ID3 do gêmeo
+            if mutagen:
+                try:
+                    audio = mutagen.File(str(p))
+                    if audio:
+                        t_art = ""
+                        t_tit = ""
+                        if 'TPE1' in audio: t_art = str(audio['TPE1']).strip()
+                        elif 'artist' in audio: t_art = str(audio['artist'][0]).strip()
+                        if 'TIT2' in audio: t_tit = str(audio['TIT2']).strip()
+                        elif 'title' in audio: t_tit = str(audio['title'][0]).strip()
+
+                        if t_art and t_tit and t_art.lower() not in INVALID_ARTISTS and len(t_art) >= 2:
+                            return t_art, t_tit, twin_fn
+                except Exception:
+                    pass
+
+            # 2. Tenta inferir pelo nome do arquivo do gêmeo se for no padrão Artista - Título
+            stem = p.stem
+            clean_res = clean_track_name(stem)
+            if clean_res.get("artist") and clean_res.get("title"):
+                return clean_res["artist"], clean_res["title"], twin_fn
+
+        return None, None, None
+    except Exception:
+        return None, None, None
 
 
 def init_tag_cache():
@@ -273,8 +430,20 @@ def enrich_missing_artists(items: list, stream_progress: bool = True):
         # Verifica se é genérico (Track 01, Faixa 1, etc.)
         is_generic_title = bool(re.match(r'^(?:track|faixa|audio|pista|musica|música)\s*\d+$', tit, re.IGNORECASE))
 
-        # Se não tem artista, ou não tem título, ou título é genérico
-        if not art or not tit or is_generic_title:
+        # 1. Tenta primeiro correspondência acústica com 100% de precisão criptográfica (Sound Seal)
+        found_art = ""
+        found_tit = ""
+        caminho_arquivo = item.get("caminho") or item.get("arquivo_atual")
+        if caminho_arquivo and not art:
+            twin_art, twin_tit, twin_fn = lookup_sound_seal_twin(caminho_arquivo)
+            if twin_art and twin_tit:
+                found_art = twin_art
+                found_tit = twin_tit
+                item["sha_verified"] = True
+                item["sha_origem"] = f"Gêmeo Acústico: {twin_fn}"
+
+        # 2. Se não tem artista, ou não tem título, ou título é genérico
+        if not found_art and (not art or not tit or is_generic_title):
             found_art, found_tit = lookup_musicbrainz_track(tit if not is_generic_title else "", art, crate)
 
             # Se não encontrou pelo título, tenta pelo stem do arquivo caso tenha hífens
@@ -1068,6 +1237,23 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
                         "duplicata_hd": is_collision_duplicate
                     })
 
+    # Enriquece os itens da página atual com dados acústicos e de duplicatas do Sound Seal
+    if items:
+        fps = [it["caminho"] for it in items]
+        seals_info = get_sound_seals_map(fps)
+        for it in items:
+            s = seals_info.get(it["caminho"])
+            if s:
+                it["audio_seal"] = s.get("audio_seal") or ""
+                it["sound_copies_count"] = s.get("sound_copies_count", 1)
+                it["twin_sample_fn"] = s.get("twin_sample_fn") or ""
+                if not it.get("bpm") and s.get("bpm"):
+                    it["bpm"] = s["bpm"]
+                if not it.get("key") and s.get("key"):
+                    it["key"] = s["key"]
+                if s.get("sound_copies_count", 1) > 1:
+                    it["sha_verified"] = True
+
     # Se carregou toda a biblioteca (limit <= 0), garante que total_dirty seja 100% idêntico
     # à contagem real de items com precisa_limpeza para eliminar qualquer divergência entre botão e tabela
     if limit <= 0 and items:
@@ -1149,6 +1335,7 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                 novo_nome = item["arquivo_sugerido"]
                 novo_caminho = file_path.parent / novo_nome
                 if novo_caminho != file_path:
+                    old_path_str = str(file_path)
                     is_same_file = False
                     try:
                         if novo_caminho.exists():
@@ -1164,11 +1351,13 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                                 temp_path.rename(novo_caminho)
                             else:
                                 file_path.rename(novo_caminho)
+                            sync_sound_seal_rename(old_path_str, str(novo_caminho))
                             file_path = novo_caminho
                         except Exception as e_ren:
                             errors.append(f"Renomear {file_path.name}: {e_ren}")
                     else:
-                        # Colisão: arquivo de mesmo nome já existe no disco, adiciona sufixo numérico
+                        # Colisão: verifica se é cópia idêntica por Sound Seal SHA-256
+                        is_twin = check_sound_seal_collision(str(file_path), str(novo_caminho))
                         try:
                             c = 1
                             alt_stem = Path(novo_nome).stem
@@ -1182,7 +1371,10 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                                 c += 1
                                 alt_dest = file_path.parent / f"{alt_stem} ({c}){file_path.suffix}"
                             file_path.rename(alt_dest)
+                            sync_sound_seal_rename(old_path_str, str(alt_dest))
                             file_path = alt_dest
+                            if is_twin:
+                                errors.append(f"Aviso: {file_path.name} é cópia acústica de {novo_caminho.name}.")
                         except Exception as e_ren:
                             errors.append(f"Renomear {file_path.name}: {e_ren}")
 
@@ -1373,6 +1565,7 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
             if rename_files and suggested_filename != filename:
                 dest_path = full_path.parent / suggested_filename
                 if dest_path != full_path:
+                    old_path_str = str(full_path)
                     is_same_file = False
                     try:
                         if dest_path.exists():
@@ -1388,11 +1581,13 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                                 temp_path.rename(dest_path)
                             else:
                                 full_path.rename(dest_path)
+                            sync_sound_seal_rename(old_path_str, str(dest_path))
                             full_path = dest_path
                         except Exception as e_rename:
                             errors.append(f"Renomear {filename}: {e_rename}")
                     else:
-                        # Colisão: arquivo de mesmo nome já existe no disco, adiciona sufixo numérico
+                        # Colisão: verifica se é cópia acústica por Sound Seal SHA-256
+                        is_twin = check_sound_seal_collision(str(full_path), str(dest_path))
                         try:
                             c = 1
                             alt_dest = full_path.parent / f"{suggested_stem} ({c}){ext}"
@@ -1405,7 +1600,10 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                                 c += 1
                                 alt_dest = full_path.parent / f"{suggested_stem} ({c}){ext}"
                             full_path.rename(alt_dest)
+                            sync_sound_seal_rename(old_path_str, str(alt_dest))
                             full_path = alt_dest
+                            if is_twin:
+                                errors.append(f"Aviso: {full_path.name} é cópia acústica de {dest_path.name}.")
                         except Exception as e_rename:
                             errors.append(f"Renomear {filename}: {e_rename}")
 
