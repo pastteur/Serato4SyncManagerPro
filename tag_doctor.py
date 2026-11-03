@@ -1382,7 +1382,7 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
         except Exception as e:
             errors.append(f"{file_path.name}: {e}")
 
-        if stream_progress and (idx % 2 == 0 or idx == total or total <= 30):
+        if stream_progress:
             pct = round((idx / max(1, total)) * 100, 1)
             print(json.dumps({
                 "tipo": "progresso",
@@ -1611,17 +1611,15 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
         except Exception as e:
             errors.append(f"{filename}: {e}")
 
-        # Streaming de progresso a cada 2 arquivos ou no final para fluidez absoluta
-        if idx % 2 == 0 or idx == total or total <= 30:
-            pct = round((idx / total) * 100, 1)
-            print(json.dumps({
-                "tipo": "progresso",
-                "processados": idx,
-                "total": total,
-                "percentual": pct,
-                "atualizados": updated_count,
-                "faixa_atual": filename
-            }, ensure_ascii=False), flush=True)
+        pct = round((idx / total) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx,
+            "total": total,
+            "percentual": pct,
+            "atualizados": updated_count,
+            "faixa_atual": filename
+        }, ensure_ascii=False), flush=True)
 
     print(json.dumps({
         "tipo": "fim",

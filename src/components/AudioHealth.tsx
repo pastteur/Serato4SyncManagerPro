@@ -65,6 +65,10 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     faixa_atual: string;
   } | null>(null);
 
+  // Ação individual em processamento na linha da tabela
+  const [processingSingleId, setProcessingSingleId] = useState<string | null>(null);
+  const [processingSingleAction, setProcessingSingleAction] = useState<'repair' | 'resample' | null>(null);
+
   // Modal de Confirmação em Tela (sem popups nativos que travam)
   const [modalConfig, setModalConfig] = useState<{
     isOpen: boolean;
@@ -311,8 +315,18 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     });
   };
 
-  // Correção online de uma única música
+  // Correção online de uma única música com barra de status ativa
   const handleRepairSingleOnline = async (item: any) => {
+    setProcessingSingleId(item.id);
+    setProcessingSingleAction('repair');
+    setIsRepairingOnline(true);
+    setRepairProgress({
+      processados: 0,
+      total: 1,
+      percentual: 35,
+      atualizados: 0,
+      faixa_atual: `Baixando versão oficial 320k: ${item.arquivo}...`
+    });
     onAddLog(`🌐 Iniciando busca e download em 320kbps para: ${item.arquivo}...`);
     try {
       if (isTauri) {
@@ -322,6 +336,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         });
         const data = JSON.parse(resJson);
         if (data.sucesso) {
+          setRepairProgress({
+            processados: 1,
+            total: 1,
+            percentual: 100,
+            atualizados: 1,
+            faixa_atual: `✅ Concluído: ${item.arquivo}`
+          });
           onAddLog(`🎉 ${item.arquivo}: ${data.mensagem}`);
           setItems(prev => prev.filter(i => i.id !== item.id));
         } else {
@@ -330,6 +351,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       }
     } catch (e) {
       onAddLog(`❌ Falha: ${e}`);
+    } finally {
+      setTimeout(() => {
+        setProcessingSingleId(null);
+        setProcessingSingleAction(null);
+        setIsRepairingOnline(false);
+        setRepairProgress(null);
+      }, 500);
     }
   };
 
@@ -418,8 +446,18 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     });
   };
 
-  // Normalizar frequência individual
+  // Normalizar frequência individual com barra de status ativa
   const handleResampleSingle = async (item: any) => {
+    setProcessingSingleId(item.id);
+    setProcessingSingleAction('resample');
+    setIsResamplingLocal(true);
+    setResampleProgress({
+      processados: 0,
+      total: 1,
+      percentual: 50,
+      atualizados: 0,
+      faixa_atual: `Normalizando para 44.100 Hz: ${item.arquivo}...`
+    });
     onAddLog(`⚡ Audio Health: Normalizando ${item.arquivo} para 44.100 Hz...`);
     try {
       if (isTauri) {
@@ -429,6 +467,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         });
         const data = JSON.parse(resJson);
         if (data.sucesso) {
+          setResampleProgress({
+            processados: 1,
+            total: 1,
+            percentual: 100,
+            atualizados: 1,
+            faixa_atual: `✅ Concluído: ${item.arquivo}`
+          });
           onAddLog(`✅ ${data.mensagem}`);
           setItems(prev => prev.filter(i => i.id !== item.id));
         } else {
@@ -437,6 +482,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       }
     } catch (e) {
       onAddLog(`❌ Falha no resample: ${e}`);
+    } finally {
+      setTimeout(() => {
+        setProcessingSingleId(null);
+        setProcessingSingleAction(null);
+        setIsResamplingLocal(false);
+        setResampleProgress(null);
+      }, 500);
     }
   };
 
@@ -919,12 +971,25 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       <button
                         type="button"
                         onClick={() => handleResampleSingle(item)}
-                        disabled={isResamplingLocal}
-                        className="flex items-center gap-1 px-2 py-1 rounded bg-purple-950/60 hover:bg-purple-900 text-purple-300 border border-purple-700/50 text-[11px] font-semibold transition cursor-pointer"
+                        disabled={isResamplingLocal || isRepairingOnline}
+                        className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold transition cursor-pointer border ${
+                          processingSingleId === item.id && processingSingleAction === 'resample'
+                            ? 'bg-purple-900 text-purple-200 border-purple-400 animate-pulse'
+                            : 'bg-purple-950/60 hover:bg-purple-900 text-purple-300 border-purple-700/50 disabled:opacity-40'
+                        }`}
                         title="Normaliza frequência para 44.100 Hz (320kbps CBR) localmente via FFmpeg"
                       >
-                        <Zap className="w-3 h-3 text-purple-400" />
-                        <span>44.1k</span>
+                        {processingSingleId === item.id && processingSingleAction === 'resample' ? (
+                          <>
+                            <RefreshCw className="w-3 h-3 text-purple-300 animate-spin" />
+                            <span>Convertendo...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Zap className="w-3 h-3 text-purple-400" />
+                            <span>44.1k</span>
+                          </>
+                        )}
                       </button>
                     )}
 
@@ -933,11 +998,24 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       type="button"
                       onClick={() => handleRepairSingleOnline(item)}
                       disabled={isRepairingOnline || isResamplingLocal}
-                      className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-950/50 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/40 text-[11px] font-semibold transition cursor-pointer"
+                      className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold transition cursor-pointer border ${
+                        processingSingleId === item.id && processingSingleAction === 'repair'
+                          ? 'bg-cyan-900 text-white border-cyan-400 animate-pulse'
+                          : 'bg-cyan-950/50 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/40 disabled:opacity-40'
+                      }`}
                       title="Baixa automaticamente versão 320kbps íntegra (44.1kHz) e substitui esta faixa"
                     >
-                      <DownloadCloud className="w-3.5 h-3.5" />
-                      <span>Baixar 320k</span>
+                      {processingSingleId === item.id && processingSingleAction === 'repair' ? (
+                        <>
+                          <RefreshCw className="w-3 h-3 text-serato-cyan animate-spin" />
+                          <span>Baixando 320k...</span>
+                        </>
+                      ) : (
+                        <>
+                          <DownloadCloud className="w-3.5 h-3.5" />
+                          <span>Baixar 320k</span>
+                        </>
+                      )}
                     </button>
 
                     {/* Revelar no Finder */}

@@ -497,6 +497,17 @@ def batch_resample_tracks_local(filepaths: list):
 
     for idx, fp in enumerate(filepaths, 1):
         filename = Path(fp).name
+        pct_start = round(((idx - 1) / max(1, total)) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx - 1,
+            "total": total,
+            "percentual": pct_start,
+            "atualizados": updated_count,
+            "faixa_atual": f"Normalizando: {filename}...",
+            "status": "processando"
+        }, ensure_ascii=False), flush=True)
+
         res = resample_track_local(fp)
         if res.get("sucesso"):
             updated_count += 1
@@ -510,7 +521,7 @@ def batch_resample_tracks_local(filepaths: list):
             "total": total,
             "percentual": pct,
             "atualizados": updated_count,
-            "faixa_atual": filename,
+            "faixa_atual": f"Concluído: {filename}",
             "ultimo_sucesso": res.get("sucesso", False)
         }, ensure_ascii=False), flush=True)
 
@@ -533,6 +544,17 @@ def batch_repair_tracks_online(filepaths: list):
 
     for idx, fp in enumerate(filepaths, 1):
         filename = Path(fp).name
+        pct_start = round(((idx - 1) / max(1, total)) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx - 1,
+            "total": total,
+            "percentual": pct_start,
+            "atualizados": updated_count,
+            "faixa_atual": f"Baixando: {filename}...",
+            "status": "baixando"
+        }, ensure_ascii=False), flush=True)
+
         res = repair_track_online(fp)
         if res.get("sucesso"):
             updated_count += 1
@@ -546,7 +568,7 @@ def batch_repair_tracks_online(filepaths: list):
             "total": total,
             "percentual": pct,
             "atualizados": updated_count,
-            "faixa_atual": filename,
+            "faixa_atual": f"Concluído: {filename}",
             "ultimo_sucesso": res.get("sucesso", False)
         }, ensure_ascii=False), flush=True)
 
