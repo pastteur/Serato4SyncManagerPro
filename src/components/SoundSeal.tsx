@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Shield, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw, XCircle } from 'lucide-react';
+import { Shield, ShieldCheck, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw, XCircle } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 interface SoundSealProps {
@@ -109,7 +109,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     }
   };
 
-  const loadDuplicatesBySound = async () => {
+  const loadDuplicatesBySound = async (preserveSelection: boolean = false) => {
     if (!isTauri) return;
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -121,14 +121,29 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
             const groups = parsed.duplicados_som || [];
             setDuplicatesBySound(groups);
 
-            // Pré-seleciona todas as cópias redundantes automaticamente (deixando a referência segura)
-            const initialSelected = new Set<string>();
-            groups.forEach((g: any) => {
-              (g.faixas || []).slice(1).forEach((f: any) => {
-                initialSelected.add(f.caminho);
+            if (!preserveSelection) {
+              // Pré-seleciona todas as cópias redundantes apenas na primeira carga geral
+              const initialSelected = new Set<string>();
+              groups.forEach((g: any) => {
+                (g.faixas || []).slice(1).forEach((f: any) => {
+                  initialSelected.add(f.caminho);
+                });
               });
-            });
-            setSelectedCopyPaths(initialSelected);
+              setSelectedCopyPaths(initialSelected);
+            } else {
+              // Preserva rigorosamente as escolhas manuais que o usuário já fez (sem remarcar tudo)
+              setSelectedCopyPaths(prev => {
+                const validPaths = new Set<string>();
+                const allAvailableCopies = new Set<string>();
+                groups.forEach((g: any) => {
+                  (g.faixas || []).slice(1).forEach((f: any) => allAvailableCopies.add(f.caminho));
+                });
+                prev.forEach(p => {
+                  if (allAvailableCopies.has(p)) validPaths.add(p);
+                });
+                return validPaths;
+              });
+            }
           }
         } catch (err) {
           console.error('JSON inválido em loadDuplicatesBySound:', res);
@@ -258,7 +273,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           throw new Error(`Resposta JSON inválida do motor: ${res.slice(0, 150)}`);
         }
         setStatus(parsed);
-        loadDuplicatesBySound();
+        loadDuplicatesBySound(true);
         const totalSel = parsed.total_selados ?? parsed.total_processados ?? 0;
         onAddLog(`✅ Sound Seal: Varredura concluída. ${Number(totalSel).toLocaleString()} faixas seladas com sucesso.`);
       }
@@ -351,6 +366,130 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   // Desmarcar todas as cópias
   const handleDeselectAllCopies = () => {
     setSelectedCopyPaths(new Set());
+  };
+
+  // Redefinir manualmente qual arquivo é a Referência Protegida (Master) de um grupo
+  const handleSetMaster = async (seal: string, filepath: string, nome: string, crate: string) => {
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('set_sound_seal_master', {
+          audioSeal: seal,
+          filepath
+        });
+      }
+
+      // Atualiza o estado em memória instantaneamente sem recarregar a tela
+      setDuplicatesBySound(prev => prev.map(g => {
+        if (g.seal !== seal) return g;
+        const faixas = [...(g.faixas || [])];
+        const targetIdx = faixas.findIndex((f: any) => f.caminho === filepath);
+        if (targetIdx === -1) return g;
+
+        // Move o novo master para a posição 0 e atualiza is_master
+        const [targetTrack] = faixas.splice(targetIdx, 1);
+        const updatedTarget = { ...targetTrack, is_master: true };
+        const updatedOthers = faixas.map((f: any) => ({ ...f, is_master: false }));
+        return {
+          ...g,
+          faixas: [updatedTarget, ...updatedOthers]
+        };
+      }));
+
+      // Desmarca o novo arquivo protegido de qualquer exclusão pendente
+      setSelectedCopyPaths(prev => {
+        const next = new Set(prev);
+        next.delete(filepath);
+        return next;
+      });
+
+      onAddLog(`🛡️ Sound Seal: Arquivo protegido redefinido com sucesso!`);
+      onAddLog(`📍 Pasta protegida: ${crate} -> ${nome}`);
+    } catch (e) {
+      onAddLog(`❌ Erro ao definir arquivo protegido: ${e}`);
+    }
+  };
+
+  // Marcar todas as cópias de um bloco específico
+  const handleSelectGroupCopies = (group: any) => {
+    setSelectedCopyPaths(prev => {
+      const next = new Set(prev);
+      (group.faixas || []).slice(1).forEach((f: any) => next.add(f.caminho));
+      return next;
+    });
+  };
+
+  // Desmarcar todas as cópias de um bloco específico
+  const handleDeselectGroupCopies = (group: any) => {
+    setSelectedCopyPaths(prev => {
+      const next = new Set(prev);
+      (group.faixas || []).forEach((f: any) => next.delete(f.caminho));
+      return next;
+    });
+  };
+
+  // Excluir cópias selecionadas apenas deste bloco específico
+  const handleTrashGroupCopies = (group: any) => {
+    if (!onMoveToTrash) return;
+    const groupCopiesToTrash = (group.faixas || []).slice(1).filter((f: any) => selectedCopyPaths.has(f.caminho));
+    if (groupCopiesToTrash.length === 0) {
+      onAddLog('⚠️ Nenhuma cópia marcada para exclusão neste bloco.');
+      return;
+    }
+
+    setModalConfig({
+      isOpen: true,
+      title: 'Excluir Cópias Deste Bloco',
+      message: `Deseja mover as ${groupCopiesToTrash.length} cópia(s) marcada(s) deste bloco para a Lixeira do Mac?\n\n🔒 O arquivo protegido permanecerá 100% preservado nesta pasta.\n\nDemais blocos da biblioteca NÃO serão afetados.`,
+      confirmText: `Mover ${groupCopiesToTrash.length} cópia(s)`,
+      variant: 'danger',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        onAddLog(`🗑️ Sound Seal: Movendo ${groupCopiesToTrash.length} cópia(s) do bloco para a Lixeira...`);
+        let deleted = 0;
+        const toDeletePaths = new Set<string>(groupCopiesToTrash.map((f: any) => String(f.caminho)));
+
+        for (const f of groupCopiesToTrash) {
+          const ok = await onMoveToTrash(f.caminho, f.caminho);
+          if (ok) deleted++;
+        }
+
+        // Remove referências perdidas das crates do Serato
+        if (isTauri && seratoPath && mp3Path) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('remove_lost_tracks', {
+              mp3Path,
+              seratoPath,
+              targetPath: null,
+              targetPaths: JSON.stringify(Array.from(toDeletePaths))
+            });
+          } catch (e) {
+            console.error('Falha ao purgar referências de crates:', e);
+          }
+        }
+
+        // Atualização instantânea em memória apenas deste bloco
+        setDuplicatesBySound(prev => prev.map(g => {
+          if (g.seal !== group.seal) return g;
+          const remaining = (g.faixas || []).filter((f: any) => !toDeletePaths.has(f.caminho));
+          return {
+            ...g,
+            faixas: remaining,
+            total_copias: remaining.length
+          };
+        }).filter(g => (g.total_copias || 0) >= 2));
+
+        setSelectedCopyPaths(prev => {
+          const next = new Set(prev);
+          toDeletePaths.forEach(p => next.delete(p));
+          return next;
+        });
+
+        loadStatus();
+        onAddLog(`✅ Concluído: ${deleted} cópias do bloco removidas com sucesso.`);
+      }
+    });
   };
 
   // Exclusão individual de uma cópia
@@ -450,7 +589,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
         setTrashProgress(null);
         onAddLog(`✅ Concluído: ${trashedCount} cópias redundantes movidas para a Lixeira e removidas do Serato.`);
         setSelectedCopyPaths(new Set());
-        loadDuplicatesBySound();
+        loadDuplicatesBySound(true);
         loadStatus();
       }
     });
@@ -1171,93 +1310,150 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                   <p className="text-[11px] text-slate-600 mt-1">Ajuste a busca ou clique em "Iniciar Sound Seal" para rodar a indexação acústica contínua.</p>
                 </div>
               ) : (
-                filteredDuplicatesBySound.map((group: any, idx: number) => (
-                  <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-2.5 space-y-1.5 text-xs">
-                    <div className="flex items-center justify-between font-mono text-[10px] text-serato-muted border-b border-white/5 pb-1">
-                      <span className="text-serato-cyan font-bold">SELO SHA-256: {group.seal.substring(0, 18)}...</span>
-                      <span className="text-serato-gold font-bold">{group.total_copias} arquivos com o mesmo áudio</span>
-                    </div>
+                filteredDuplicatesBySound.map((group: any, idx: number) => {
+                  const groupCopies = (group.faixas || []).slice(1);
+                  const selectedInGroupCount = groupCopies.filter((f: any) => selectedCopyPaths.has(f.caminho)).length;
 
-                    <div className="space-y-1 pt-1">
-                      {group.faixas.map((f: any, fIdx: number) => {
-                        const isReference = fIdx === 0;
-                        const isSelected = selectedCopyPaths.has(f.caminho);
+                  return (
+                    <div key={idx} className="bg-serato-card border border-serato-cardBorder rounded-lg p-2.5 space-y-2 text-xs">
+                      {/* Cabeçalho do Bloco Acústico com Ações Exclusivas do Bloco */}
+                      <div className="flex flex-wrap items-center justify-between font-mono text-[10px] text-serato-muted border-b border-white/5 pb-1.5 gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="text-serato-cyan font-bold">SELO SHA-256: {group.seal.substring(0, 18)}...</span>
+                          <span className="text-slate-500">•</span>
+                          <span className="text-serato-gold font-bold">{group.total_copias} arquivos com o mesmo áudio</span>
+                        </div>
 
-                        return (
-                          <div
-                            key={fIdx}
-                            className={`flex items-center justify-between p-1.5 rounded transition ${
-                              isReference
-                                ? 'bg-emerald-950/20 border border-emerald-900/30'
-                                : isSelected
-                                ? 'bg-amber-950/20 border border-amber-900/40'
-                                : 'hover:bg-white/[0.02]'
-                            }`}
+                        {/* Ações Rápidas por Bloco */}
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleSelectGroupCopies(group)}
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-serato-cyan border border-slate-700 text-[10px] font-mono cursor-pointer transition"
+                            title="Marcar todas as cópias deste bloco específico para exclusão"
                           >
-                            <div className="flex items-center gap-2.5 truncate max-w-xl">
-                              {/* Checkbox para cópias redundantes */}
-                              {!isReference ? (
-                                <input
-                                  type="checkbox"
-                                  checked={isSelected}
-                                  onChange={() => toggleSelectCopy(f.caminho)}
-                                  className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0 shrink-0"
-                                />
-                              ) : (
-                                <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
-                                  <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                            Marcar Cópias ({groupCopies.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeselectGroupCopies(group)}
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 text-[10px] font-mono cursor-pointer transition"
+                            title="Desmarcar todas as cópias deste bloco específico"
+                          >
+                            Desmarcar
+                          </button>
+                          {selectedInGroupCount > 0 && onMoveToTrash && (
+                            <button
+                              type="button"
+                              onClick={() => handleTrashGroupCopies(group)}
+                              className="px-2.5 py-0.5 rounded bg-rose-950 hover:bg-rose-900 text-rose-300 border border-rose-700 text-[10px] font-bold cursor-pointer transition flex items-center gap-1 shadow-sm animate-in fade-in"
+                              title="Move apenas as cópias marcadas deste bloco para a Lixeira, preservando a faixa protegida"
+                            >
+                              <Trash2 className="w-3 h-3 text-rose-400" />
+                              <span>Excluir Bloco ({selectedInGroupCount})</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="space-y-1 pt-0.5">
+                        {group.faixas.map((f: any, fIdx: number) => {
+                          const isReference = f.is_master || fIdx === 0;
+                          const isSelected = selectedCopyPaths.has(f.caminho);
+
+                          return (
+                            <div
+                              key={fIdx}
+                              className={`flex items-center justify-between p-1.5 rounded transition ${
+                                isReference
+                                  ? 'bg-emerald-950/25 border border-emerald-800/40'
+                                  : isSelected
+                                  ? 'bg-amber-950/20 border border-amber-900/40'
+                                  : 'hover:bg-white/[0.02]'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 truncate max-w-xl">
+                                {/* Checkbox para cópias redundantes */}
+                                {!isReference ? (
+                                  <input
+                                    type="checkbox"
+                                    checked={isSelected}
+                                    onChange={() => toggleSelectCopy(f.caminho)}
+                                    className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0 shrink-0 cursor-pointer"
+                                    title="Marcar para exclusão"
+                                  />
+                                ) : (
+                                  <span className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                                    <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                                  </span>
+                                )}
+
+                                {/* Orientação do Arquivo Protegido vs Cópia */}
+                                {isReference ? (
+                                  <span
+                                    className="text-[10px] px-2 py-0.5 rounded font-mono font-bold uppercase shrink-0 bg-emerald-950 text-emerald-300 border border-emerald-800 flex items-center gap-1 shadow-sm"
+                                    title="Esta faixa é a Referência Protegida (Master). Ela NUNCA será excluída e permanecerá nesta pasta."
+                                  >
+                                    <Shield className="w-3 h-3 text-emerald-400" />
+                                    <span>Protegido (Master)</span>
+                                  </span>
+                                ) : (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <span className="text-[10px] px-1.5 py-0.2 rounded font-mono font-bold uppercase bg-amber-950 text-amber-300 border border-amber-800">
+                                      Cópia
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSetMaster(group.seal, f.caminho, f.nome, f.crate)}
+                                      className="text-[10px] px-2 py-0.5 rounded font-mono font-semibold bg-slate-800 hover:bg-emerald-950 text-slate-300 hover:text-emerald-300 border border-slate-700 hover:border-emerald-600 transition flex items-center gap-1 cursor-pointer shadow-sm"
+                                      title={`Definir este arquivo como a Referência Protegida definitiva (preservando nesta pasta "${f.crate}") e transformando as outras em cópias`}
+                                    >
+                                      <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                      <span>Tornar Protegido</span>
+                                    </button>
+                                  </div>
+                                )}
+
+                                <span className={`truncate ${isReference ? 'font-semibold text-white' : 'text-slate-300'}`} title={f.caminho}>
+                                  {f.nome}
                                 </span>
-                              )}
+                                <span className="text-[10px] text-slate-400 shrink-0 font-medium">({f.crate})</span>
+                              </div>
 
-                              <span
-                                className={`text-[10px] px-1.5 py-0.2 rounded font-mono font-bold uppercase shrink-0 ${
-                                  isReference
-                                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-800'
-                                    : 'bg-amber-950 text-amber-300 border border-amber-800'
-                                }`}
-                              >
-                                {isReference ? 'Referência (Protegida)' : 'Cópia'}
-                              </span>
+                              <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
+                                {f.bpm && <span className="text-slate-400">{Math.round(parseFloat(f.bpm))} BPM</span>}
+                                {f.key && <span className="text-serato-cyan font-bold">{f.key}</span>}
 
-                              <span className={`truncate ${isReference ? 'font-semibold text-white' : 'text-slate-300'}`} title={f.caminho}>
-                                {f.nome}
-                              </span>
-                              <span className="text-[10px] text-slate-500 shrink-0">({f.crate})</span>
+                                {onOpenFileInFinder && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onOpenFileInFinder(f.caminho)}
+                                    className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 cursor-pointer transition"
+                                    title="Revelar no Finder"
+                                  >
+                                    <Eye className="w-3.5 h-3.5 text-serato-cyan" />
+                                  </button>
+                                )}
+
+                                {/* Botão de Lixeira Individual na cópia */}
+                                {!isReference && onMoveToTrash && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleTrashSingleCopy(f.caminho, f.nome)}
+                                    className="p-1 rounded bg-rose-950/50 hover:bg-rose-900 text-rose-300 border border-rose-800/40 cursor-pointer transition"
+                                    title="Mover esta cópia para a Lixeira"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </div>
                             </div>
-
-                            <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
-                              {f.bpm && <span className="text-slate-400">{Math.round(parseFloat(f.bpm))} BPM</span>}
-                              {f.key && <span className="text-serato-cyan font-bold">{f.key}</span>}
-
-                              {onOpenFileInFinder && (
-                                <button
-                                  type="button"
-                                  onClick={() => onOpenFileInFinder(f.caminho)}
-                                  className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 cursor-pointer"
-                                  title="Revelar no Finder"
-                                >
-                                  <Eye className="w-3.5 h-3.5 text-serato-cyan" />
-                                </button>
-                              )}
-
-                              {/* Botão de Lixeira Individual na cópia */}
-                              {!isReference && onMoveToTrash && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleTrashSingleCopy(f.caminho, f.nome)}
-                                  className="p-1 rounded bg-rose-950/50 hover:bg-rose-900 text-rose-300 border border-rose-800/40 cursor-pointer"
-                                  title="Mover esta cópia para a Lixeira"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </div>

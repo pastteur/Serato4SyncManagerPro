@@ -896,6 +896,26 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn set_sound_seal_master(app: AppHandle, audio_seal: String, filepath: String) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "sound_seal.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--set-master");
+        cmd.arg(&audio_seal);
+        cmd.arg(&filepath);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao definir master do Sound Seal: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro ao definir master do Sound Seal: {}", msg));
+        }
+        Ok(result)
+    }
+
+    #[tauri::command]
     pub async fn scan_missing_relocate(
         app: AppHandle,
         window: Window,
@@ -1524,6 +1544,7 @@ pub fn run() {
             commands::scan_sound_seals,
             commands::get_sound_seal_status,
             commands::get_sound_seal_duplicates,
+            commands::set_sound_seal_master,
             commands::scan_missing_relocate,
             commands::relink_track,
             commands::batch_relink_tracks,

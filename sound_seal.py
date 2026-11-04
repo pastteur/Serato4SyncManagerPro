@@ -54,6 +54,13 @@ def get_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sound_seal_masters (
+            audio_seal TEXT PRIMARY KEY,
+            master_filepath TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_seal ON sound_seals(audio_seal);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_filename ON sound_seals(filename);")
     return conn
@@ -318,10 +325,12 @@ def get_sound_seal_duplicates(limit: int = 5000):
 
     for seal, cnt in groups:
         cursor.execute("""
-            SELECT filepath, filename, filesize, bpm, key, duration, crate_raiz
-            FROM sound_seals
-            WHERE audio_seal = ?
-            ORDER BY filepath ASC
+            SELECT s.filepath, s.filename, s.filesize, s.bpm, s.key, s.duration, s.crate_raiz,
+                   CASE WHEN m.master_filepath = s.filepath THEN 1 ELSE 0 END as is_master
+            FROM sound_seals s
+            LEFT JOIN sound_seal_masters m ON s.audio_seal = m.audio_seal
+            WHERE s.audio_seal = ?
+            ORDER BY is_master DESC, s.filepath ASC
         """, (seal,))
         rows = cursor.fetchall()
 
@@ -339,7 +348,8 @@ def get_sound_seal_duplicates(limit: int = 5000):
                 "bpm": r[3],
                 "key": r[4],
                 "duracao": r[5],
-                "crate": r[6]
+                "crate": r[6],
+                "is_master": bool(r[7])
             })
 
         # Só retorna o grupo se restarem 2 ou mais cópias físicas existentes no disco
@@ -358,6 +368,25 @@ def get_sound_seal_duplicates(limit: int = 5000):
 
     conn.close()
     return {"sucesso": True, "duplicados_som": results}
+
+
+def set_sound_seal_master(audio_seal: str, filepath: str):
+    """
+    Define manualmente qual caminho físico é a referência protegida (master) de um determinado selo acústico.
+    Persiste a preferência no SQLite para que o usuário controle qual pasta/cópia deve ser preservada.
+    """
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO sound_seal_masters (audio_seal, master_filepath, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(audio_seal) DO UPDATE SET
+            master_filepath = excluded.master_filepath,
+            updated_at = CURRENT_TIMESTAMP
+    """, (audio_seal, filepath))
+    conn.commit()
+    conn.close()
+    return {"sucesso": True, "audio_seal": audio_seal, "master_filepath": filepath}
 
 
 def resolve_serato_path(rel_path: str, mp3_base: Path):
@@ -919,8 +948,15 @@ def main():
     parser.add_argument("--remove-lost", action="store_true", help="Remove faixas perdidas de todas as crates do Serato")
     parser.add_argument("--target-path", type=str, default="", help="Caminho relativo específico a remover")
     parser.add_argument("--target-paths", type=str, default="", help="JSON de lista de caminhos a remover")
+    parser.add_argument("--set-master", nargs=2, metavar=("SEAL", "FILEPATH"), help="Define manualmente o arquivo protegido de um selo acústico")
 
     args = parser.parse_args()
+
+    if args.set_master:
+        seal, fp = args.set_master
+        res = set_sound_seal_master(seal, fp)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
 
     if args.status:
         res = get_sound_seal_status()
