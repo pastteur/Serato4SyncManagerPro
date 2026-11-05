@@ -1342,6 +1342,9 @@ mod commands {
         } else if input_type == "file" {
             cmd.arg("--match-file");
             cmd.arg(&input_data);
+        } else if input_type == "folder" {
+            cmd.arg("--match-folder");
+            cmd.arg(&input_data);
         } else {
             cmd.arg("--match-text");
             cmd.arg(&input_data);

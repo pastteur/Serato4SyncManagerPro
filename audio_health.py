@@ -169,14 +169,20 @@ def inspect_track_health(filepath: Path, max_duration_suspicious: float = 60.0):
             "sample_rate": sample_rate
         }
 
-    # 4. Frequência fora do padrão DJ (≠ 44.100 Hz, ex: 48.000 Hz de vídeo/YouTube ou 22.050 Hz)
+    # 4. Frequência de amostragem
     if sample_rate > 0 and sample_rate != 44100:
+        is_48k = (sample_rate == 48000)
+        detalhes_msg = (
+            "Frequência de estúdio/broadcast: 48.000 Hz. Compatível e 100% segura no Serato DJ Pro / macOS (resampling transparente sem alteração de pitch). Normalização para 44.1 kHz recomendada apenas se for usar CDJs Pioneer antigas via USB."
+            if is_48k
+            else f"Taxa de amostragem reduzida: {sample_rate} Hz (corta frequências agudas acima de {sample_rate // 2} Hz). Recomendado upgrade para 44.100 Hz."
+        )
         return {
-            "status": "atencao",
+            "status": "informativo" if is_48k else "atencao",
             "categoria": "sample_rate",
-            "tipo_problema": "sample_rate_inadequado",
-            "severidade": "media" if sample_rate == 48000 else "alta",
-            "detalhes": f"Frequência fora do padrão DJ: {sample_rate} Hz (padrão é 44.100 Hz). Pode tocar acelerado ou com pitch alterado.",
+            "tipo_problema": "sample_rate_estudio" if is_48k else "sample_rate_reduzido",
+            "severidade": "baixa" if is_48k else "alta",
+            "detalhes": detalhes_msg,
             "duracao": round(duration, 1),
             "bitrate": round(bitrate / 1000) if bitrate else 0,
             "sample_rate": sample_rate

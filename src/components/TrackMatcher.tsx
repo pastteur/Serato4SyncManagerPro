@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle, ExternalLink, ArrowRight, FolderPlus, FileText, Globe } from 'lucide-react';
+import { Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle, ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap } from 'lucide-react';
 
 interface TrackMatcherProps {
   mp3Path: string;
@@ -14,52 +14,84 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
   onAddLog,
   onOpenFileInFinder
 }) => {
-  const [inputType, setInputType] = useState<'spotify' | 'text' | 'file'>('text');
+  const [inputType, setInputType] = useState<'spotify' | 'text' | 'folder' | 'file'>('folder');
   const [inputData, setInputData] = useState<string>('');
-  const [crateName, setCrateName] = useState<string>('Playlist Matcher');
+  const [crateName, setCrateName] = useState<string>('Novidades Pack');
   const [isMatching, setIsMatching] = useState<boolean>(false);
   const [matchResult, setMatchResult] = useState<any>(null);
   const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
 
   // Filtros de busca e status para os resultados
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'found' | 'missing'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'found' | 'upgrades' | 'missing'>('all');
 
   const filteredEncontradas = useMemo(() => {
     if (!matchResult?.encontradas) return [];
-    if (!searchTerm.trim()) return matchResult.encontradas;
+    let list = matchResult.encontradas;
+    if (statusFilter === 'upgrades') {
+      list = list.filter((it: any) => it.upgrade_disponivel);
+    }
+    if (!searchTerm.trim()) return list;
     const q = searchTerm.toLowerCase();
-    return matchResult.encontradas.filter((it: any) =>
+    return list.filter((it: any) =>
       it.solicitado?.toLowerCase().includes(q) ||
       it.arquivo_local?.toLowerCase().includes(q) ||
       it.caminho_completo?.toLowerCase().includes(q)
     );
-  }, [matchResult, searchTerm]);
+  }, [matchResult, searchTerm, statusFilter]);
 
   const filteredFaltantes = useMemo(() => {
     if (!matchResult?.faltantes) return [];
     if (!searchTerm.trim()) return matchResult.faltantes;
     const q = searchTerm.toLowerCase();
     return matchResult.faltantes.filter((it: any) =>
-      it.solicitado?.toLowerCase().includes(q)
+      it.solicitado?.toLowerCase().includes(q) ||
+      it.caminho_novo?.toLowerCase().includes(q)
     );
   }, [matchResult, searchTerm]);
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
+  const handleSelectIncomingFolder = async () => {
+    if (isTauri) {
+      try {
+        const { open } = await import('@tauri-apps/plugin-dialog');
+        const selected = await open({
+          directory: true,
+          multiple: false,
+          title: 'Selecionar Pasta com Novas Músicas / Downloads'
+        });
+        if (selected && typeof selected === 'string') {
+          setInputData(selected);
+          onAddLog(`📂 Pasta de novidades selecionada: ${selected}`);
+        }
+      } catch (err) {
+        console.error('Falha ao abrir diálogo de pasta:', err);
+      }
+    }
+  };
+
   const handleRunMatch = async (exportCrateNow: boolean = false) => {
     if (!inputData.trim()) {
-      onAddLog('⚠️ Informe o link do Spotify ou a lista de faixas para cruzar.');
+      onAddLog(
+        inputType === 'folder'
+          ? '⚠️ Selecione ou informe o caminho da pasta de novidades para cruzar.'
+          : '⚠️ Informe o link do Spotify ou a lista de faixas para cruzar.'
+      );
       return;
     }
     if (!mp3Path) {
-      onAddLog('⚠️ Selecione a pasta MP3 antes de realizar o cruzamento.');
+      onAddLog('⚠️ Selecione a pasta MP3 Master antes de realizar o cruzamento.');
       return;
     }
 
     setIsMatching(true);
     setExportSuccessMsg(null);
-    onAddLog(`🎧 Track Matcher: Cruzando playlist contra suas 31.355 faixas do HD...`);
+    onAddLog(
+      inputType === 'folder'
+        ? `🎧 Track Matcher: Varrendo pasta de novidades e cruzando contra as 31.355 faixas do HD...`
+        : `🎧 Track Matcher: Cruzando playlist contra suas 31.355 faixas do HD...`
+    );
 
     try {
       if (isTauri) {
@@ -75,7 +107,12 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
         setMatchResult(parsed);
 
         if (parsed.sucesso) {
-          onAddLog(`✅ Track Matcher: ${parsed.total_encontradas} faixas encontradas no HD (${parsed.total_faltantes} faltantes).`);
+          if (parsed.tipo_origem === 'folder') {
+            onAddLog(`✅ Track Matcher: ${parsed.total_solicitadas} faixas escaneadas na pasta. ${parsed.total_encontradas} já no HD (${parsed.total_upgrades || 0} upgrades de bitrate recomendados) e ${parsed.total_faltantes} faixas inéditas.`);
+          } else {
+            onAddLog(`✅ Track Matcher: ${parsed.total_encontradas} faixas encontradas no HD (${parsed.total_faltantes} faltantes).`);
+          }
+
           if (parsed.export_serato && parsed.export_serato.sucesso) {
             setExportSuccessMsg(parsed.export_serato.mensagem);
             onAddLog(`🎯 ${parsed.export_serato.mensagem}`);
@@ -142,32 +179,55 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
 
       {/* Input Controls */}
       <div className="bg-serato-card p-3 rounded-lg border border-serato-cardBorder space-y-2.5 shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-300 font-semibold">Origem da Playlist:</span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs text-slate-300 font-semibold mr-1">Origem do Cruzamento:</span>
+            
             <button
               type="button"
-              onClick={() => setInputType('text')}
-              className={`px-2.5 py-1 text-xs rounded transition flex items-center gap-1 cursor-pointer ${
+              onClick={() => {
+                setInputType('folder');
+                setInputData('');
+              }}
+              className={`px-2.5 py-1 text-xs rounded transition flex items-center gap-1.5 cursor-pointer ${
+                inputType === 'folder'
+                  ? 'bg-serato-gold text-black font-bold shadow'
+                  : 'bg-serato-dark text-slate-400 hover:text-white border border-serato-cardBorder'
+              }`}
+            >
+              <Folder className="w-3.5 h-3.5" />
+              <span>📁 Pasta de Novidades (Downloads / Packs)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setInputType('text');
+                setInputData('');
+              }}
+              className={`px-2.5 py-1 text-xs rounded transition flex items-center gap-1.5 cursor-pointer ${
                 inputType === 'text'
                   ? 'bg-serato-cyan text-black font-bold'
                   : 'bg-serato-dark text-slate-400 hover:text-white border border-serato-cardBorder'
               }`}
             >
-              <FileText className="w-3 h-3" />
+              <FileText className="w-3.5 h-3.5" />
               <span>Texto / Linhas</span>
             </button>
 
             <button
               type="button"
-              onClick={() => setInputType('spotify')}
-              className={`px-2.5 py-1 text-xs rounded transition flex items-center gap-1 cursor-pointer ${
+              onClick={() => {
+                setInputType('spotify');
+                setInputData('');
+              }}
+              className={`px-2.5 py-1 text-xs rounded transition flex items-center gap-1.5 cursor-pointer ${
                 inputType === 'spotify'
                   ? 'bg-[#1DB954] text-black font-bold'
                   : 'bg-serato-dark text-slate-400 hover:text-white border border-serato-cardBorder'
               }`}
             >
-              <Globe className="w-3 h-3" />
+              <Globe className="w-3.5 h-3.5" />
               <span>Spotify URL</span>
             </button>
           </div>
@@ -178,12 +238,38 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
               type="text"
               value={crateName}
               onChange={(e) => setCrateName(e.target.value)}
-              className="bg-serato-dark border border-serato-cardBorder px-2.5 py-1 text-xs rounded text-white font-mono w-48 focus:outline-none focus:border-serato-cyan"
+              className="bg-serato-dark border border-serato-cardBorder px-2.5 py-1 text-xs rounded text-white font-mono w-44 focus:outline-none focus:border-serato-cyan"
             />
           </div>
         </div>
 
-        {inputType === 'spotify' ? (
+        {inputType === 'folder' ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={inputData}
+                onChange={(e) => setInputData(e.target.value)}
+                placeholder="Selecione ou cole o caminho da pasta de novos MP3s baixados (ex: /Users/pastteur/Downloads/Pack2026)..."
+                className="flex-1 bg-serato-dark border border-serato-cardBorder px-3 py-1.5 text-xs rounded text-slate-200 placeholder-slate-500 font-mono focus:outline-none focus:border-serato-gold"
+              />
+              <button
+                type="button"
+                onClick={handleSelectIncomingFolder}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold bg-slate-800 hover:bg-slate-700 text-serato-gold border border-serato-gold/40 transition cursor-pointer shrink-0"
+              >
+                <Folder className="w-3.5 h-3.5 text-serato-gold" />
+                <span>Procurar Pasta...</span>
+              </button>
+            </div>
+            <div className="text-[11px] text-slate-400 bg-serato-dark/70 px-2.5 py-1 rounded border border-white/5 flex items-center gap-1.5">
+              <Zap className="w-3.5 h-3.5 text-serato-gold shrink-0" />
+              <span>
+                Varre todos os novos MP3, FLAC, WAV desta pasta e cruza com os 31.355 arquivos do HD. Identifica upgrades de bitrate (ex: 320k vs 128k) e músicas novas que você ainda não possui.
+              </span>
+            </div>
+          </div>
+        ) : inputType === 'spotify' ? (
           <input
             type="text"
             value={inputData}
@@ -212,10 +298,15 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
       {/* Resultados do Cruzamento */}
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
         <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs flex items-center justify-between text-slate-300">
-          <div className="flex items-center gap-3">
-            <span>Resultados: <b className="text-white">{matchResult?.total_solicitadas || 0}</b> solicitadas</span>
-            <span className="text-emerald-400 font-bold">✅ {matchResult?.total_encontradas || 0} no HD</span>
-            <span className="text-rose-400 font-bold">⚠️ {matchResult?.total_faltantes || 0} faltantes</span>
+          <div className="flex items-center gap-3 flex-wrap">
+            <span>Resultados: <b className="text-white">{matchResult?.total_solicitadas || 0}</b> faixas na pasta/lista</span>
+            <span className="text-emerald-400 font-bold">✅ {matchResult?.total_encontradas || 0} já no HD</span>
+            {matchResult?.total_upgrades > 0 && (
+              <span className="text-serato-gold font-bold">🚀 {matchResult.total_upgrades} Upgrades de Qualidade</span>
+            )}
+            <span className="text-rose-400 font-bold">
+              {matchResult?.tipo_origem === 'folder' ? '✨' : '⚠️'} {matchResult?.total_faltantes || 0} {matchResult?.tipo_origem === 'folder' ? 'inéditas / novas' : 'faltantes'}
+            </span>
           </div>
 
           {matchResult && matchResult.total_faltantes > 0 && (
@@ -225,16 +316,18 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 onClick={handleCopyMissingToClipboard}
                 className="text-[10px] px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 border border-serato-cardBorder cursor-pointer"
               >
-                Copiar Lista Faltantes
+                Copiar Lista {matchResult?.tipo_origem === 'folder' ? 'Inéditas' : 'Faltantes'}
               </button>
-              <button
-                type="button"
-                onClick={() => onAddLog(`📥 Baixar Faltantes: Você pode colar as ${matchResult.total_faltantes} faixas faltantes no utilitário de download integrado ou no spotdl / yt-dlp.`)}
-                className="text-[10px] px-2.5 py-0.5 rounded bg-serato-orange hover:bg-amber-400 text-black font-bold flex items-center gap-1 cursor-pointer"
-              >
-                <Download className="w-3 h-3" />
-                <span>📥 Baixar Faixas Faltantes</span>
-              </button>
+              {matchResult?.tipo_origem !== 'folder' && (
+                <button
+                  type="button"
+                  onClick={() => onAddLog(`📥 Baixar Faltantes: Você pode colar as ${matchResult.total_faltantes} faixas faltantes no utilitário de download integrado ou no spotdl / yt-dlp.`)}
+                  className="text-[10px] px-2.5 py-0.5 rounded bg-serato-orange hover:bg-amber-400 text-black font-bold flex items-center gap-1 cursor-pointer"
+                >
+                  <Download className="w-3 h-3" />
+                  <span>📥 Baixar Faixas Faltantes</span>
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -265,6 +358,21 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
               >
                 Todas ({(matchResult.encontradas?.length || 0) + (matchResult.faltantes?.length || 0)})
               </button>
+
+              {matchResult?.total_upgrades > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('upgrades')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-bold transition cursor-pointer border ${
+                    statusFilter === 'upgrades'
+                      ? 'bg-amber-950/80 text-serato-gold border-serato-gold shadow-sm'
+                      : 'bg-serato-dark text-serato-gold/70 border-serato-cardBorder hover:text-serato-gold'
+                  }`}
+                >
+                  🚀 Upgrades ({matchResult.total_upgrades})
+                </button>
+              )}
+
               <button
                 type="button"
                 onClick={() => setStatusFilter('found')}
@@ -274,8 +382,9 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                     : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                 }`}
               >
-                No HD ({matchResult.encontradas?.length || 0})
+                Já no HD ({matchResult.encontradas?.length || 0})
               </button>
+
               <button
                 type="button"
                 onClick={() => setStatusFilter('missing')}
@@ -285,7 +394,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                     : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                 }`}
               >
-                Faltantes ({matchResult.faltantes?.length || 0})
+                {matchResult?.tipo_origem === 'folder' ? 'Inéditas' : 'Faltantes'} ({matchResult.faltantes?.length || 0})
               </button>
             </div>
           </div>
@@ -295,27 +404,56 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           {!matchResult ? (
             <div className="py-12 text-center text-slate-500 font-sans">
               <Music className="w-8 h-8 opacity-20 text-serato-cyan mx-auto mb-2" />
-              <p>Cole uma playlist acima e clique em "Cruzar Playlist".</p>
-              <p className="text-[11px] text-slate-600 mt-1">O sistema buscará as músicas instantaneamente no seu HD.</p>
+              <p>Selecione uma pasta com novos áudios ou cole uma playlist acima e clique em "Cruzar Playlist".</p>
+              <p className="text-[11px] text-slate-600 mt-1">O sistema buscará as músicas instantaneamente no seu HD Master.</p>
             </div>
           ) : (
             <>
-              {(statusFilter === 'all' || statusFilter === 'found') && filteredEncontradas.map((item: any, idx: number) => (
-                <div key={`found-${idx}`} className="bg-serato-card border border-emerald-900/40 p-2 rounded flex items-center justify-between hover:bg-emerald-950/20">
-                  <div className="flex items-center gap-2 truncate max-w-xl">
-                    <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.2 rounded font-bold">
-                      {item.score}% MATCH
-                    </span>
-                    <span className="text-white font-sans font-medium">{item.solicitado}</span>
-                    <ArrowRight className="w-3 h-3 text-slate-600" />
+              {(statusFilter === 'all' || statusFilter === 'found' || statusFilter === 'upgrades') && filteredEncontradas.map((item: any, idx: number) => (
+                <div 
+                  key={`found-${idx}`} 
+                  className={`border p-2 rounded flex items-center justify-between transition ${
+                    item.upgrade_disponivel
+                      ? 'bg-amber-950/20 border-serato-gold/60 hover:bg-amber-950/30'
+                      : 'bg-serato-card border-emerald-900/40 hover:bg-emerald-950/20'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 truncate max-w-2xl">
+                    {item.upgrade_disponivel ? (
+                      <span className="text-[10px] bg-amber-950 text-serato-gold border border-serato-gold/40 px-1.5 py-0.5 rounded font-bold shrink-0 flex items-center gap-1">
+                        <Zap className="w-2.5 h-2.5 text-serato-gold" />
+                        UPGRADE
+                      </span>
+                    ) : (
+                      <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.2 rounded font-bold shrink-0">
+                        {item.score}% MATCH
+                      </span>
+                    )}
+
+                    <span className="text-white font-sans font-medium truncate">{item.solicitado}</span>
+                    <ArrowRight className="w-3 h-3 text-slate-600 shrink-0" />
                     <span className="text-slate-400 text-[10px] truncate" title={item.caminho_completo}>{item.arquivo_local}</span>
+
+                    {item.novo_bitrate !== undefined && (
+                      <span className="text-[10px] font-mono shrink-0 ml-1">
+                        {item.upgrade_disponivel ? (
+                          <span className="text-emerald-400 font-bold bg-emerald-950/60 px-1 py-0.5 rounded border border-emerald-700/40">
+                            {item.novo_bitrate}k {item.novo_formato} ➔ {item.lib_bitrate || '?'}k
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">
+                            ({item.lib_bitrate || '?'}k)
+                          </span>
+                        )}
+                      </span>
+                    )}
                   </div>
 
                   {onOpenFileInFinder && (
                     <button
                       type="button"
                       onClick={() => onOpenFileInFinder(item.caminho_completo)}
-                      className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300"
+                      className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 ml-2 shrink-0 cursor-pointer"
                       title="Revelar no Finder"
                     >
                       <ExternalLink className="w-3 h-3 text-serato-cyan" />
@@ -325,14 +463,21 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
               ))}
 
               {(statusFilter === 'all' || statusFilter === 'missing') && filteredFaltantes.map((item: any, idx: number) => (
-                <div key={`missing-${idx}`} className="bg-serato-card border border-rose-950/50 p-2 rounded flex items-center justify-between opacity-80">
+                <div key={`missing-${idx}`} className="bg-serato-card border border-rose-950/50 p-2 rounded flex items-center justify-between opacity-90">
                   <div className="flex items-center gap-2 truncate max-w-xl">
-                    <span className="text-[10px] bg-rose-950 text-rose-400 px-1.5 py-0.2 rounded font-bold">
-                      FALTANDO
+                    <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-800/40 px-1.5 py-0.2 rounded font-bold shrink-0">
+                      {matchResult?.tipo_origem === 'folder' ? 'INÉDITA / NOVA' : 'FALTANDO'}
                     </span>
-                    <span className="text-slate-300 font-sans">{item.solicitado}</span>
+                    <span className="text-slate-200 font-sans truncate">{item.solicitado}</span>
+                    {item.novo_bitrate ? (
+                      <span className="text-[10px] text-slate-500 font-mono">
+                        ({item.novo_bitrate}k {item.novo_formato})
+                      </span>
+                    ) : null}
                   </div>
-                  <span className="text-[10px] text-serato-orange">Não encontrada no HD</span>
+                  <span className="text-[10px] text-serato-orange shrink-0">
+                    {matchResult?.tipo_origem === 'folder' ? 'Não existe no HD Master' : 'Não encontrada no HD'}
+                  </span>
                 </div>
               ))}
 

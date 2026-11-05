@@ -128,7 +128,12 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   };
 
   // Carrega Auditoria
-  const loadHealthScan = async (cat: string = selectedCategory, dur: number = maxDuration) => {
+  const loadHealthScan = async (
+    cat: string = selectedCategory,
+    dur: number = maxDuration,
+    crateOverride?: string,
+    subcrateOverride?: string
+  ) => {
     if (!mp3Path) {
       onAddLog('⚠️ Selecione a pasta MP3 antes de escanear.');
       return;
@@ -136,10 +141,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
 
     setIsLoading(true);
     setScanProgress(null);
-    const scopeLabel = selectedSubcrate
-      ? `Subcrate: ${selectedCrate} -> ${selectedSubcrate}`
-      : selectedCrate
-        ? `Crate: ${selectedCrate}`
+    const activeCrate = crateOverride !== undefined ? crateOverride : selectedCrate;
+    const activeSub = subcrateOverride !== undefined ? subcrateOverride : selectedSubcrate;
+
+    const scopeLabel = activeSub
+      ? `Subcrate: ${activeCrate} -> ${activeSub}`
+      : activeCrate
+        ? `Crate: ${activeCrate}`
         : 'Biblioteca Completa';
 
     onAddLog(`🩺 Audio Health: Auditando saúde de ${scopeLabel} (Teto de faixa curta: < ${dur}s)...`);
@@ -149,8 +157,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         const { invoke } = await import('@tauri-apps/api/core');
         const resJson = await invoke<string>('scan_audio_health', {
           mp3Path,
-          crateRaiz: selectedCrate || null,
-          subcrate: selectedSubcrate || null,
+          crateRaiz: activeCrate || null,
+          subcrate: activeSub || null,
           includeSubcrates,
           maxDuration: dur,
           categoria: cat,
@@ -589,8 +597,10 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <select
             value={selectedCrate}
             onChange={(e) => {
-              setSelectedCrate(e.target.value);
+              const newCrate = e.target.value;
+              setSelectedCrate(newCrate);
               setSelectedSubcrate('');
+              loadHealthScan(selectedCategory, maxDuration, newCrate, '');
             }}
             className="bg-serato-dark border border-serato-cardBorder text-slate-200 text-xs font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer max-w-[200px]"
           >
@@ -603,7 +613,11 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           {selectedCrate && activeCrateData && activeCrateData.subcrates.length > 0 && (
             <select
               value={selectedSubcrate}
-              onChange={(e) => setSelectedSubcrate(e.target.value)}
+              onChange={(e) => {
+                const newSub = e.target.value;
+                setSelectedSubcrate(newSub);
+                loadHealthScan(selectedCategory, maxDuration, selectedCrate, newSub);
+              }}
               className="bg-serato-dark border border-serato-cardBorder text-serato-cyan text-xs font-semibold rounded px-2.5 py-1 focus:outline-none cursor-pointer max-w-[180px]"
             >
               <option value="">↳ Todas as Subcrates</option>

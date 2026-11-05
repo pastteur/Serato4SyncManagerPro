@@ -19,6 +19,11 @@ import argparse
 import urllib.request
 from pathlib import Path
 
+try:
+    import mutagen
+except ImportError:
+    mutagen = None
+
 # Garante flushing imediato
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
@@ -36,6 +41,74 @@ def normalize_str(s: str) -> str:
     s = re.sub(r'[^\w\s]', '', s) # remove pontuações
     s = re.sub(r'\s+', ' ', s).strip()
     return s
+
+
+def parse_incoming_folder(folder_path_str: str):
+    """
+    Varre uma pasta local de novos arquivos de áudio (downloads, novos packs)
+    e extrai metadados completos de cada faixa para cruzamento com a biblioteca master.
+    """
+    folder_path = Path(os.path.expanduser(folder_path_str)).resolve()
+    if not folder_path.exists():
+        return []
+
+    tracks = []
+    for root, _, files in os.walk(str(folder_path)):
+        if '/.' in root or '\\.' in root:
+            continue
+        for f in files:
+            if f.startswith('.') or f.startswith('._'):
+                continue
+            ext = Path(f).suffix.lower()
+            if ext in AUDIO_EXTENSIONS:
+                full_p = Path(root) / f
+                stem = full_p.stem
+                artist = ""
+                title = stem
+                bitrate = 0
+                sample_rate = 0
+                duration = 0.0
+                filesize = 0
+
+                try:
+                    filesize = full_p.stat().st_size
+                    if mutagen:
+                        audio = mutagen.File(str(full_p))
+                        if audio:
+                            if getattr(audio, 'info', None):
+                                duration = getattr(audio.info, 'length', 0.0)
+                                bitrate = getattr(audio.info, 'bitrate', 0)
+                                sample_rate = getattr(audio.info, 'sample_rate', 0)
+                            tags = getattr(audio, 'tags', None)
+                            if tags:
+                                if 'TPE1' in tags:
+                                    artist = str(tags['TPE1'])
+                                if 'TIT2' in tags:
+                                    title = str(tags['TIT2'])
+                except Exception:
+                    pass
+
+                if not artist and ' - ' in stem:
+                    parts = stem.split(' - ', 1)
+                    artist = parts[0].strip()
+                    title = parts[1].strip()
+
+                tracks.append({
+                    "raw": f"{artist} - {title}" if artist else stem,
+                    "artist": artist,
+                    "title": title,
+                    "filename": f,
+                    "filepath": str(full_p),
+                    "ext": ext,
+                    "filesize": filesize,
+                    "duration": round(duration, 1),
+                    "bitrate": round(bitrate / 1000) if bitrate else 0,
+                    "sample_rate": sample_rate,
+                    "clean_title": normalize_str(title),
+                    "clean_artist": normalize_str(artist),
+                    "is_local_file": True
+                })
+    return tracks
 
 
 def parse_text_lines(text_content: str):
@@ -218,25 +291,70 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
                     best_score = 80
 
         if best_match:
-            matched.append({
+            item_match = {
                 "solicitado": req["raw"],
                 "arquivo_local": best_match["filename"],
                 "caminho_completo": best_match["full_path"],
                 "caminho_rel": best_match["rel_path"],
                 "score": best_score
-            })
+            }
+
+            if req.get("is_local_file"):
+                item_match["caminho_novo"] = req.get("filepath")
+                item_match["novo_bitrate"] = req.get("bitrate", 0)
+                item_match["novo_formato"] = req.get("ext", "").replace(".", "").upper()
+                item_match["novo_tamanho"] = req.get("filesize", 0)
+
+                # Avalia qualidade da biblioteca existente
+                lib_bitrate = 0
+                lib_ext = Path(best_match["full_path"]).suffix.upper().replace(".", "")
+                lib_size = 0
+                try:
+                    lib_size = Path(best_match["full_path"]).stat().st_size
+                    if mutagen:
+                        la = mutagen.File(best_match["full_path"])
+                        if la and getattr(la, "info", None):
+                            lib_bitrate = round(getattr(la.info, "bitrate", 0) / 1000)
+                except Exception:
+                    pass
+
+                item_match["lib_bitrate"] = lib_bitrate
+                item_match["lib_formato"] = lib_ext
+                item_match["lib_tamanho"] = lib_size
+
+                # Upgrade se novo bitrate for superior em pelo menos 32k ou formato superior
+                is_upgrade = False
+                if req.get("bitrate", 0) > (lib_bitrate + 32):
+                    is_upgrade = True
+                elif req.get("ext") in ('.flac', '.wav', '.aif') and lib_ext in ('MP3', 'AAC', 'M4A') and lib_bitrate < 320:
+                    is_upgrade = True
+
+                item_match["upgrade_disponivel"] = is_upgrade
+                item_match["status_comparacao"] = "UPGRADE_DISPONIVEL" if is_upgrade else "JA_POSSUI_QUALIDADE"
+
+            matched.append(item_match)
         else:
-            missing.append({
+            missing_item = {
                 "solicitado": req["raw"],
                 "artista": req.get("artist", ""),
                 "titulo": req.get("title", req["raw"])
-            })
+            }
+            if req.get("is_local_file"):
+                missing_item["caminho_novo"] = req.get("filepath")
+                missing_item["novo_bitrate"] = req.get("bitrate", 0)
+                missing_item["novo_formato"] = req.get("ext", "").replace(".", "").upper()
+                missing_item["novo_tamanho"] = req.get("filesize", 0)
+                missing_item["status_comparacao"] = "FAIXA_NOVA"
+
+            missing.append(missing_item)
 
     return {
         "sucesso": True,
+        "tipo_origem": "folder" if any(t.get("is_local_file") for t in tracks_to_match) else "text",
         "total_solicitadas": len(tracks_to_match),
         "total_encontradas": len(matched),
         "total_faltantes": len(missing),
+        "total_upgrades": sum(1 for m in matched if m.get("upgrade_disponivel")),
         "encontradas": matched,
         "faltantes": missing
     }
@@ -291,6 +409,7 @@ def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Track Matcher")
     parser.add_argument("--match-text", type=str, default="", help="Conteúdo de texto com faixas")
     parser.add_argument("--match-file", type=str, default="", help="Arquivo CSV ou M3U para cruzamento")
+    parser.add_argument("--match-folder", type=str, default="", help="Pasta local contendo novos arquivos de áudio")
     parser.add_argument("--match-spotify", type=str, default="", help="URL de playlist do Spotify")
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3 do usuário")
     parser.add_argument("--serato", type=str, default="", help="Pasta Serato")
@@ -306,6 +425,8 @@ def main():
             print(json.dumps(res_spot, ensure_ascii=False))
             sys.exit(1)
         tracks = res_spot.get("faixas", [])
+    elif args.match_folder:
+        tracks = parse_incoming_folder(args.match_folder)
     elif args.match_file:
         tracks = parse_m3u_or_csv(args.match_file)
     elif args.match_text:
