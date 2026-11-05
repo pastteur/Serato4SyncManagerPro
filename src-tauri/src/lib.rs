@@ -1441,6 +1441,7 @@ mod commands {
         subcrate: Option<String>,
         include_subcrates: Option<bool>,
         only_pending: Option<bool>,
+        overwrite_existing: Option<bool>,
     ) -> Result<(), String> {
         let script = find_python_script(Some(&app), "auto_cue.py");
         let window_clone = window.clone();
@@ -1469,6 +1470,9 @@ mod commands {
             if let Some(true) = only_pending {
                 cmd.arg("--only-pending");
             }
+            if let Some(true) = overwrite_existing {
+                cmd.arg("--overwrite-existing");
+            }
 
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
@@ -1494,6 +1498,76 @@ mod commands {
                                 let _ = window_clone.emit("auto-cue-batch-progress", parsed);
                             } else if tipo == "fim" {
                                 let _ = window_clone.emit("auto-cue-batch-finished", parsed);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = child.wait();
+        });
+
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn repair_crate_cues(
+        app: AppHandle,
+        window: Window,
+        mp3_path: String,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
+    ) -> Result<(), String> {
+        let script = find_python_script(Some(&app), "auto_cue.py");
+        let window_clone = window.clone();
+
+        std::thread::spawn(move || {
+            let mut cmd = Command::new("/usr/bin/python3");
+            cmd.arg(&script);
+            cmd.arg("--repair-batch");
+            cmd.arg("--mp3");
+            cmd.arg(&mp3_path);
+            if let Some(cr) = crate_raiz {
+                if !cr.is_empty() {
+                    cmd.arg("--crate-raiz");
+                    cmd.arg(cr);
+                }
+            }
+            if let Some(sub) = subcrate {
+                if !sub.is_empty() {
+                    cmd.arg("--subcrate");
+                    cmd.arg(sub);
+                }
+            }
+            if let Some(false) = include_subcrates {
+                cmd.arg("--no-subcrates");
+            }
+
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window_clone.emit("auto-cue-repair-finished", serde_json::json!({
+                        "sucesso": false,
+                        "erro": e.to_string()
+                    }));
+                    return;
+                }
+            };
+
+            if let Some(stdout) = child.stdout.take() {
+                let reader = BufReader::new(stdout);
+                for line_res in reader.lines() {
+                    if let Ok(line) = line_res {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                            if tipo == "progresso" {
+                                let _ = window_clone.emit("auto-cue-repair-progress", parsed);
+                            } else if tipo == "fim" {
+                                let _ = window_clone.emit("auto-cue-repair-finished", parsed);
                             }
                         }
                     }
@@ -1559,6 +1633,7 @@ pub fn run() {
             commands::apply_auto_cues,
             commands::scan_crate_cues,
             commands::batch_apply_crate_cues,
+            commands::repair_crate_cues,
             commands::apply_batch_auto_cues
         ])
         .run(tauri::generate_context!())

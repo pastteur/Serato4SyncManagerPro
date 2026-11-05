@@ -386,7 +386,7 @@ def repair_track_online(filepath_str: str):
         "--audio-format", "mp3",
         "--audio-quality", "0",
         "--postprocessor-args", "ffmpeg:-ar 44100 -b:a 320k -id3v2_version 3",
-        "--match-filter", "!is_live & !is_short & duration > 60 & duration < 600",
+        "--match-filter", "!is_live & !is_short & duration > 60 & duration < 600 & title !~* '(?i)(sped up|speed up|nightcore|acelerad|pitch|chipmunk)'",
         "--max-downloads", "1",
         "-o", out_template,
         "--no-playlist",

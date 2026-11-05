@@ -42,6 +42,19 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
     faixa_atual: string;
   } | null>(null);
 
+  // Batch Repair State (Reparação de formatação binária Serato Markers2)
+  const [isRepairRunning, setIsRepairRunning] = useState<boolean>(false);
+  const [repairProgress, setRepairProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    atualizados: number;
+    faixa_atual: string;
+  } | null>(null);
+
+  // Proteção contra sobrescrita de cues manuais pré-existentes
+  const [protectManualCues, setProtectManualCues] = useState<boolean>(true);
+
   // Modal de Confirmação em Tela (sem popups nativos que travam)
   const [modalConfig, setModalConfig] = useState<{
     isOpen: boolean;
@@ -145,6 +158,8 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
   useEffect(() => {
     let unlistenProgress: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
+    let unlistenRepairProgress: (() => void) | undefined;
+    let unlistenRepairFinished: (() => void) | undefined;
 
     const setupListeners = async () => {
       if (isTauri) {
@@ -171,6 +186,29 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
             onAddLog(`❌ Erro no lote de Auto-Cues: ${payload.erro || 'Desconhecido'}`);
           }
         });
+
+        unlistenRepairProgress = await listen<any>('auto-cue-repair-progress', (event) => {
+          const payload = event.payload;
+          setRepairProgress({
+            processados: payload.processados || 0,
+            total: payload.total || 0,
+            percentual: payload.percentual || 0,
+            atualizados: payload.atualizados || 0,
+            faixa_atual: payload.faixa_atual || '',
+          });
+        });
+
+        unlistenRepairFinished = await listen<any>('auto-cue-repair-finished', (event) => {
+          const payload = event.payload;
+          setIsRepairRunning(false);
+          setRepairProgress(null);
+          if (payload.sucesso) {
+            onAddLog(`🛠️ Reparação concluída com sucesso! ${payload.atualizados} faixas ativadas para o Serato DJ Pro.`);
+            loadCrateTracks(selectedCrate, selectedSubcrate, includeSubcrates);
+          } else {
+            onAddLog(`❌ Erro na reparação de Cues: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
       }
     };
 
@@ -178,6 +216,8 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
     return () => {
       if (unlistenProgress) unlistenProgress();
       if (unlistenFinished) unlistenFinished();
+      if (unlistenRepairProgress) unlistenRepairProgress();
+      if (unlistenRepairFinished) unlistenRepairFinished();
     };
   }, []);
 
@@ -250,7 +290,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
       isOpen: true,
       title: 'Geração e Gravação em Massa de Hot Cues',
       message: `Deseja gerar e gravar os 5 Hot Cues oficiais do Serato em ${countLabel}?`,
-      detail: `Escopo: ${scopeLabel}\nOs marcadores serão gravados em GEOB:Serato Markers2 para acionamento direto nos pads do controlador.`,
+      detail: `Escopo: ${scopeLabel}\n\n${protectManualCues ? '🛡️ Proteção ativa: faixas com cues manuais pré-existentes serão preservadas intactas.' : '⚠️ Atenção: cues anteriores serão substituídos pelos 5 novos Hot Cues.'}\nOs marcadores serão gravados em GEOB:Serato Markers2 para acionamento direto nos pads do controlador.`,
       confirmText: 'Gravar Hot Cues',
       variant: 'warning',
       onConfirm: async () => {
@@ -274,13 +314,61 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
               crateRaiz: selectedCrate || null,
               subcrate: selectedSubcrate || null,
               includeSubcrates,
-              onlyPending
+              onlyPending,
+              overwriteExisting: !protectManualCues
             });
           }
         } catch (e) {
           setIsBatchRunning(false);
           setBatchProgress(null);
           onAddLog(`❌ Erro ao disparar lote: ${e}`);
+        }
+      }
+    });
+  };
+
+  // Reparação em lote da estrutura binária das tags Serato Markers2
+  const handleBatchRepairCues = () => {
+    const scopeLabel = selectedSubcrate
+      ? `Subcrate "${selectedCrate} -> ${selectedSubcrate}"`
+      : selectedCrate
+        ? `Crate "${selectedCrate}" ${includeSubcrates ? '(e todas as suas subcrates)' : '(apenas faixas na raiz)'}`
+        : 'Toda a Biblioteca';
+
+    setModalConfig({
+      isOpen: true,
+      title: 'Reparar & Ativar Hot Cues no Serato DJ Pro',
+      message: `Deseja reparar a formatação binária das tags Serato Markers2 em ${scopeLabel}?`,
+      detail: `Isso re-encoda as tags em formato nativo oficial do Serato DJ Pro sem precisar recalcular do zero.\n\nTodos os Hot Cues gravados passarão a aparecer instantaneamente nos pads do Serato DJ Pro!\n\n💡 Dica pós-reparo: No Serato DJ Pro, vá em 'Files', selecione a pasta e clique em 'Rescan ID3 Tags'.`,
+      confirmText: 'Reparar Cues Agora',
+      variant: 'info',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRepairRunning(true);
+        setRepairProgress({
+          processados: 0,
+          total: totalTracks,
+          percentual: 0,
+          atualizados: 0,
+          faixa_atual: 'Iniciando verificação e re-codificação binária...'
+        });
+
+        onAddLog(`🛠️ Disparando reparação binária de Hot Cues para ${scopeLabel}...`);
+
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('repair_crate_cues', {
+              mp3Path,
+              crateRaiz: selectedCrate || null,
+              subcrate: selectedSubcrate || null,
+              includeSubcrates
+            });
+          }
+        } catch (e) {
+          setIsRepairRunning(false);
+          setRepairProgress(null);
+          onAddLog(`❌ Erro ao disparar reparação: ${e}`);
         }
       }
     });
@@ -330,11 +418,34 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Toggle de Segurança de Cues Manuais */}
+          <label className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-950/40 hover:bg-emerald-950/60 text-emerald-300 border border-emerald-500/30 transition cursor-pointer select-none" title="Impede que faixas com Hot Cues criados manualmente no Serato sejam sobrescritas">
+            <input
+              type="checkbox"
+              checked={protectManualCues}
+              onChange={(e) => setProtectManualCues(e.target.checked)}
+              className="accent-emerald-400 cursor-pointer"
+            />
+            <span>🛡️ Proteger Cues Manuais</span>
+          </label>
+
+          {/* Botão Reparar Cues no Serato */}
+          <button
+            type="button"
+            onClick={handleBatchRepairCues}
+            disabled={isLoading || isBatchRunning || isRepairRunning || totalTracks === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-500/50 shadow-lg shadow-cyan-950/50 transition disabled:opacity-40 cursor-pointer"
+            title="Repara a formatação binária das tags Serato Markers2 para que o Serato DJ Pro leia e ative os 5 Hot Cues imediatamente nos pads"
+          >
+            <Sparkles className={`w-3.5 h-3.5 ${isRepairRunning ? 'animate-spin' : ''}`} />
+            <span>{isRepairRunning ? 'Reparando Cues...' : '🛠️ Reparar Cues no Serato'}</span>
+          </button>
+
           {/* Botão Gerar nas Pendentes */}
           <button
             type="button"
             onClick={() => handleBatchApplyCrate(true)}
-            disabled={isLoading || isBatchRunning || pendentesCount === 0}
+            disabled={isLoading || isBatchRunning || isRepairRunning || pendentesCount === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-600 transition disabled:opacity-30 cursor-pointer"
             title="Gera Hot Cues apenas nas faixas que ainda não possuem marcadores"
           >
@@ -346,7 +457,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
           <button
             type="button"
             onClick={() => handleBatchApplyCrate(false)}
-            disabled={isLoading || isBatchRunning || totalTracks === 0}
+            disabled={isLoading || isBatchRunning || isRepairRunning || totalTracks === 0}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-gold via-amber-500 to-serato-orange hover:opacity-90 text-black shadow-lg shadow-serato-gold/20 transition disabled:opacity-40 cursor-pointer"
             title="Gera Hot Cues para todas as faixas desta Crate"
           >
@@ -358,7 +469,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
           <button
             type="button"
             onClick={() => loadCrateTracks(selectedCrate, selectedSubcrate, includeSubcrates)}
-            disabled={isLoading || isBatchRunning}
+            disabled={isLoading || isBatchRunning || isRepairRunning}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-serato-card hover:bg-serato-gold/20 text-serato-gold border border-serato-gold/40 transition disabled:opacity-40 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
@@ -461,6 +572,37 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
             </span>
             <span className="text-serato-neonGreen font-semibold">
               ✅ {batchProgress.atualizados} marcadas no Serato
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Banner de Progresso da Reparação */}
+      {isRepairRunning && repairProgress && (
+        <div className="bg-cyan-950/40 border border-cyan-500/50 p-3 rounded-xl shadow-xl flex flex-col gap-1.5 shrink-0 animate-pulse">
+          <div className="flex items-center justify-between text-xs font-bold text-white">
+            <span className="flex items-center gap-2 text-cyan-300">
+              <Sparkles className="w-4 h-4 text-cyan-400 animate-spin" />
+              <span>Reparando & Ativando Hot Cues no Serato DJ Pro ({selectedCrate ? `Crate "${selectedCrate}"` : 'Toda a Biblioteca'})...</span>
+            </span>
+            <span className="font-mono text-cyan-300">
+              {repairProgress.percentual}% ({repairProgress.processados} / {repairProgress.total})
+            </span>
+          </div>
+
+          <div className="w-full bg-slate-900 rounded-full h-2.5 border border-cyan-900 overflow-hidden">
+            <div
+              className="bg-gradient-to-r from-cyan-500 via-teal-400 to-emerald-400 h-2.5 transition-all duration-200"
+              style={{ width: `${Math.min(100, Math.max(1, repairProgress.percentual))}%` }}
+            />
+          </div>
+
+          <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono truncate">
+            <span className="truncate max-w-[70%]">
+              🛠️ Reparando: <b className="text-cyan-200">{repairProgress.faixa_atual}</b>
+            </span>
+            <span className="text-emerald-400 font-semibold">
+              ✨ {repairProgress.atualizados} faixas ativadas
             </span>
           </div>
         </div>
