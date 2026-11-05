@@ -153,7 +153,14 @@ def scan_sound_seals(mp3_base_dir: str, batch_size: int = 0, stream_json: bool =
             if f.startswith('._') or f.startswith('.'):
                 continue
             if Path(f).suffix.lower() in AUDIO_EXTENSIONS:
-                all_files.append((Path(root) / f, f, os.path.relpath(root, str(base_path))))
+                fp = Path(root) / f
+                if fp.is_symlink() and not fp.exists():
+                    try:
+                        fp.unlink()
+                    except OSError:
+                        pass
+                    continue
+                all_files.append((fp, f, os.path.relpath(root, str(base_path))))
 
     total_files = len(all_files)
     processed_count = 0

@@ -210,6 +210,14 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
 
             caminho_completo = caminho_atual / arq
             if caminho_completo.suffix.lower() in AUDIO_EXTENSIONS:
+                # Blindagem contra links simbólicos quebrados (alvo foi excluído no disco)
+                if caminho_completo.is_symlink() and not caminho_completo.exists():
+                    try:
+                        caminho_completo.unlink()
+                    except OSError:
+                        pass
+                    continue
+
                 try:
                     tamanho = caminho_completo.stat().st_size
                 except OSError:

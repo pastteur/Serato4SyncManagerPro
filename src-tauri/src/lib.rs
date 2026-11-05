@@ -396,8 +396,14 @@ mod commands {
             }
         }
 
+        // Se o arquivo for um link simbólico quebrado (o link existe mas o alvo foi excluído):
+        if file_path.is_symlink() && !file_path.exists() {
+            let _ = std::fs::remove_file(&file_path);
+            return Ok(());
+        }
+
         // Se o arquivo realmente não existe mais no disco, ele já foi removido anteriormente
-        if !file_path.exists() {
+        if !file_path.exists() && !file_path.is_symlink() {
             // Retorna Ok para permitir que a interface e o banco limpem a referência sem travar
             return Ok(());
         }

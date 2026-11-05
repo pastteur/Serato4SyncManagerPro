@@ -97,7 +97,7 @@ def backup_track_cues(filepath: str, audio) -> bool:
             ))
         conn.close()
         return True
-    except Exception:
+    except Exception as e:
         return False
 
 
@@ -177,8 +177,27 @@ def extract_cues_from_raw_tag(raw_data: bytes) -> list:
         null_pos = raw_data.find(b'\x00', 2)
         b64 = raw_data[2:null_pos] if null_pos != -1 else raw_data[2:]
         b64 = b64.replace(b'\n', b'').replace(b'\r', b'')
-        padding = b'A==' if len(b64) % 4 == 1 else (b'=' * (-len(b64) % 4))
-        payload = base64.b64decode(b64 + padding)
+        
+        # Ajusta padding do Base64 do Serato que substitui '=' por 'A'
+        rem = len(b64) % 4
+        if rem == 2:
+            b64_to_decode = b64 + b'=='
+        elif rem == 3:
+            b64_to_decode = b64 + b'='
+        elif rem == 1:
+            b64_to_decode = b64[:-1] + b'=='
+        else:
+            b64_to_decode = b64
+
+        try:
+            payload = base64.b64decode(b64_to_decode)
+        except Exception:
+            # Fallback caso a substituição de 'A' necessite conversão manual
+            b64_clean = b64
+            while b64_clean.endswith(b'A') and len(b64_clean) % 4 != 0:
+                b64_clean = b64_clean[:-1]
+            b64_to_decode = b64_clean + (b'=' * (-len(b64_clean) % 4))
+            payload = base64.b64decode(b64_to_decode)
 
         pos = 2
         while pos < len(payload):
@@ -338,6 +357,9 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
                 cues_in_file = extract_cues_from_raw_tag(m2.data)
                 if cues_in_file:
                     has_existing_cues = True
+            m1 = audio.tags.get('GEOB:Serato Markers_')
+            if m1 and hasattr(m1, 'data') and len(m1.data) > 0:
+                has_existing_cues = True
 
         if has_existing_cues and not overwrite_existing:
             return {
@@ -377,10 +399,6 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
                 desc='Serato Markers2',
                 data=serato_data
             )
-            # Remove Markers_ legado se existir para evitar conflito de prioridade
-            if 'GEOB:Serato Markers_' in audio.tags:
-                del audio.tags['GEOB:Serato Markers_']
-
             # CRÍTICO: Serato DJ Pro requer ID3v2.3, NÃO v2.4
             audio.save(v2_version=3)
 

@@ -21,7 +21,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   const [status, setStatus] = useState<any>(null);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [duplicatesBySound, setDuplicatesBySound] = useState<any[]>([]);
-  const [masterStrategy, setMasterStrategy] = useState<'desc' | 'smart' | 'asc'>('desc');
+  const [masterStrategy, setMasterStrategy] = useState<'desc' | 'smart' | 'asc'>('asc');
   const [selectionMode, setSelectionMode] = useState<'manual' | 'auto'>('manual');
   const [relocateResults, setRelocateResults] = useState<any[]>([]);
   const [isScanningRelocate, setIsScanningRelocate] = useState<boolean>(false);
@@ -1313,9 +1313,9 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                     className="text-[11px] py-0.5 bg-slate-900 border-none text-emerald-300 font-mono cursor-pointer focus:outline-none"
                     title="Define a lógica automática para eleger o arquivo protegido (Master)"
                   >
-                    <option value="desc">🛡️ Invertida: Z ➔ A / Curadas (Recomendado)</option>
+                    <option value="asc">🔤 Direta: A ➔ Z / Pastas Originais (Recomendado)</option>
+                    <option value="desc">🛡️ Invertida: Z ➔ A / Pastas Finais</option>
                     <option value="smart">🧠 Inteligente: Subpastas & Nome Limpo</option>
-                    <option value="asc">🔤 Alfabética Padrão: A ➔ Z</option>
                   </select>
 
                   <button
