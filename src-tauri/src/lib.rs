@@ -1054,11 +1054,15 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn get_sound_seal_duplicates(app: AppHandle) -> Result<String, String> {
+    pub async fn get_sound_seal_duplicates(app: AppHandle, strategy: Option<String>) -> Result<String, String> {
         let script = find_python_script(Some(&app), "sound_seal.py");
         let mut cmd = Command::new("/usr/bin/python3");
         cmd.arg(&script);
         cmd.arg("--duplicates");
+        if let Some(s) = strategy {
+            cmd.arg("--strategy");
+            cmd.arg(s);
+        }
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar duplicatas do Sound Seal: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1087,6 +1091,43 @@ mod commands {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
             return Err(format!("Erro ao definir master do Sound Seal: {}", msg));
+        }
+        Ok(result)
+    }
+
+    #[tauri::command]
+    pub async fn batch_set_sound_seal_masters(app: AppHandle, masters_json: String) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "sound_seal.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--batch-set-masters");
+        cmd.arg(&masters_json);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao salvar masters em lote: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro ao salvar masters em lote: {}", msg));
+        }
+        Ok(result)
+    }
+
+    #[tauri::command]
+    pub async fn clear_sound_seal_masters(app: AppHandle) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "sound_seal.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--clear-masters");
+
+        let output = cmd.output().map_err(|e| format!("Falha ao limpar preferências de master: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro ao limpar masters: {}", msg));
         }
         Ok(result)
     }
@@ -1796,6 +1837,8 @@ pub fn run() {
             commands::get_sound_seal_status,
             commands::get_sound_seal_duplicates,
             commands::set_sound_seal_master,
+            commands::batch_set_sound_seal_masters,
+            commands::clear_sound_seal_masters,
             commands::scan_missing_relocate,
             commands::relink_track,
             commands::batch_relink_tracks,

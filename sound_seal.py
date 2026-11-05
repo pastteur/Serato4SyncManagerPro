@@ -304,8 +304,57 @@ def resolve_serato_dir(serato_dir_str: str) -> Path:
     return raw_path
 
 
-def get_sound_seal_duplicates(limit: int = 5000):
-    """Lista cópias que possuem exatamente o mesmo selo sonoro (áudio idêntico), podando arquivos deletados."""
+def score_master_candidate(filepath: str, crate_raiz: str = "", bpm: str = None, key: str = None) -> int:
+    """
+    Pontuação inteligente para eleger o arquivo de referência protegida (Master):
+    - Penaliza nomes contendo 'cópia', '(1)', etc.
+    - Penaliza pastas de staging/despejo ('01', '1', 'temp', 'downloads', 'inbox')
+    - Pontua hierarquia mais profunda e específica (subcrates curadas)
+    - Pontua anos mais recentes (ex: 2026, 2025...)
+    - Pontua completude de metadados (BPM e Key)
+    """
+    score = 0
+    p = Path(filepath)
+    fname = p.name.lower()
+    fpath = filepath.lower()
+
+    # Penalidades severas para nomes de cópia
+    copy_patterns = ['cópia', 'copia', 'copy', '(1)', '(2)', '(3)', '_1', '_2', ' - 1', ' - 2', 'dup']
+    if any(pat in fname for pat in copy_patterns):
+        score -= 2000
+
+    # Penalidades para pastas genéricas ou temporárias
+    staging_patterns = ['/downloads/', '/temp/', '/tmp/', '/inbox/', '/quarentena/', '/novas/', '/01/', '/1/']
+    if any(pat in fpath for pat in staging_patterns):
+        score -= 1000
+
+    # Bônus para profundidade da pasta (subpastas mais organizadas ganham prioridade)
+    depth = len(p.parts)
+    score += depth * 50
+
+    # Bônus para anos mais recentes no caminho (ex: 2026, 2025, 2024...)
+    for year in range(2026, 2010, -1):
+        if str(year) in fpath:
+            score += (year - 2010) * 30
+            break
+
+    # Bônus para metadados ricos (BPM / Key presentes)
+    if bpm and str(bpm).strip() not in ('', '0', '0.0'):
+        score += 20
+    if key and str(key).strip() != '':
+        score += 20
+
+    return score
+
+
+def get_sound_seal_duplicates(limit: int = 5000, strategy: str = "desc"):
+    """
+    Lista cópias que possuem exatamente o mesmo selo sonoro (áudio idêntico), podando arquivos deletados.
+    strategy:
+      - 'desc': Inverte a ordem alfabética (Z -> A), priorizando crates específicas e edições mais recentes.
+      - 'smart': Algoritmo inteligente baseado em hierarquia, nome limpo e metadados.
+      - 'asc': Ordem alfabética padrão (A -> Z).
+    """
     conn = get_db()
     cursor = conn.cursor()
 
@@ -323,14 +372,17 @@ def get_sound_seal_duplicates(limit: int = 5000):
     results = []
     dead_paths = []
 
+    # 'desc' e 'smart' ordenam s.filepath DESC no banco por padrão para que o Master inicial seja o mais qualificado
+    order_sql = "s.filepath DESC" if strategy in ("desc", "smart") else "s.filepath ASC"
+
     for seal, cnt in groups:
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT s.filepath, s.filename, s.filesize, s.bpm, s.key, s.duration, s.crate_raiz,
                    CASE WHEN m.master_filepath = s.filepath THEN 1 ELSE 0 END as is_master
             FROM sound_seals s
             LEFT JOIN sound_seal_masters m ON s.audio_seal = m.audio_seal
             WHERE s.audio_seal = ?
-            ORDER BY is_master DESC, s.filepath ASC
+            ORDER BY is_master DESC, {order_sql}
         """, (seal,))
         rows = cursor.fetchall()
 
@@ -341,6 +393,7 @@ def get_sound_seal_duplicates(limit: int = 5000):
                 dead_paths.append(r[0])
                 continue
 
+            score = score_master_candidate(r[0], r[6], r[3], r[4])
             items.append({
                 "caminho": r[0],
                 "nome": r[1],
@@ -349,8 +402,14 @@ def get_sound_seal_duplicates(limit: int = 5000):
                 "key": r[4],
                 "duracao": r[5],
                 "crate": r[6],
-                "is_master": bool(r[7])
+                "is_master": bool(r[7]),
+                "score": score
             })
+
+        # Se a estratégia for "smart" e nenhum master manual foi fixado (nenhum is_master == True):
+        # Ordenamos os candidatos por pontuação inteligente decrescente
+        if strategy == "smart" and not any(it["is_master"] for it in items):
+            items.sort(key=lambda x: (x["score"], x["caminho"]), reverse=True)
 
         # Só retorna o grupo se restarem 2 ou mais cópias físicas existentes no disco
         if len(items) > 1:
@@ -367,7 +426,7 @@ def get_sound_seal_duplicates(limit: int = 5000):
         conn.commit()
 
     conn.close()
-    return {"sucesso": True, "duplicados_som": results}
+    return {"sucesso": True, "duplicados_som": results, "estrategia": strategy}
 
 
 def set_sound_seal_master(audio_seal: str, filepath: str):
@@ -387,6 +446,38 @@ def set_sound_seal_master(audio_seal: str, filepath: str):
     conn.commit()
     conn.close()
     return {"sucesso": True, "audio_seal": audio_seal, "master_filepath": filepath}
+
+
+def batch_set_sound_seal_masters(masters: list):
+    """
+    Atualiza em lote múltiplos arquivos de referência protegida (masters).
+    masters: list de dicts [{"audio_seal": str, "filepath": str}]
+    """
+    if not masters:
+        return {"sucesso": True, "total_atualizados": 0}
+    conn = get_db()
+    cursor = conn.cursor()
+    params = [(m["audio_seal"], m["filepath"]) for m in masters if "audio_seal" in m and "filepath" in m]
+    cursor.executemany("""
+        INSERT INTO sound_seal_masters (audio_seal, master_filepath, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(audio_seal) DO UPDATE SET
+            master_filepath = excluded.master_filepath,
+            updated_at = CURRENT_TIMESTAMP
+    """, params)
+    conn.commit()
+    conn.close()
+    return {"sucesso": True, "total_atualizados": len(params)}
+
+
+def clear_all_sound_seal_masters():
+    """Limpa todas as preferências manuais de master, voltando à ordenação automática."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sound_seal_masters")
+    conn.commit()
+    conn.close()
+    return {"sucesso": True}
 
 
 def resolve_serato_path(rel_path: str, mp3_base: Path):
@@ -939,6 +1030,9 @@ def main():
     parser.add_argument("--serato", type=str, default="", help="Caminho da pasta Serato")
     parser.add_argument("--status", action="store_true", help="Retorna status do banco de Sound Seals")
     parser.add_argument("--duplicates", action="store_true", help="Retorna duplicatas por som")
+    parser.add_argument("--strategy", type=str, default="desc", choices=["desc", "smart", "asc"], help="Estratégia de ordenação do Master protegido ('desc', 'smart', 'asc')")
+    parser.add_argument("--batch-set-masters", type=str, default="", help="JSON de lista de masters a definir em lote")
+    parser.add_argument("--clear-masters", action="store_true", help="Limpa todas as preferências manuais de master")
     parser.add_argument("--relocate", action="store_true", help="Analisa faixas perdidas do Serato")
     parser.add_argument("--batch", type=int, default=0, help="Tamanho do lote de varredura (0 = toda a biblioteca)")
     parser.add_argument("--relink", action="store_true", help="Religa uma faixa específica")
@@ -952,6 +1046,21 @@ def main():
 
     args = parser.parse_args()
 
+    if args.clear_masters:
+        res = clear_all_sound_seal_masters()
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0)
+
+    if args.batch_set_masters:
+        try:
+            masters_data = json.loads(args.batch_set_masters)
+            res = batch_set_sound_seal_masters(masters_data)
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False))
+            sys.exit(1)
+
     if args.set_master:
         seal, fp = args.set_master
         res = set_sound_seal_master(seal, fp)
@@ -964,7 +1073,7 @@ def main():
         sys.exit(0)
 
     if args.duplicates:
-        res = get_sound_seal_duplicates()
+        res = get_sound_seal_duplicates(strategy=args.strategy)
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0)
 

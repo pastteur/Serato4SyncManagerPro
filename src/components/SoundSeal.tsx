@@ -21,6 +21,8 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   const [status, setStatus] = useState<any>(null);
   const [isScanning, setIsScanning] = useState<boolean>(false);
   const [duplicatesBySound, setDuplicatesBySound] = useState<any[]>([]);
+  const [masterStrategy, setMasterStrategy] = useState<'desc' | 'smart' | 'asc'>('desc');
+  const [selectionMode, setSelectionMode] = useState<'manual' | 'auto'>('manual');
   const [relocateResults, setRelocateResults] = useState<any[]>([]);
   const [isScanningRelocate, setIsScanningRelocate] = useState<boolean>(false);
 
@@ -109,11 +111,12 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     }
   };
 
-  const loadDuplicatesBySound = async (preserveSelection: boolean = false) => {
+  const loadDuplicatesBySound = async (preserveSelection: boolean = false, strategyOverride?: 'desc' | 'smart' | 'asc') => {
     if (!isTauri) return;
     try {
+      const strat = strategyOverride || masterStrategy;
       const { invoke } = await import('@tauri-apps/api/core');
-      const res = await invoke<string>('get_sound_seal_duplicates');
+      const res = await invoke<string>('get_sound_seal_duplicates', { strategy: strat });
       if (res && res.trim()) {
         try {
           const parsed = JSON.parse(res);
@@ -122,14 +125,19 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
             setDuplicatesBySound(groups);
 
             if (!preserveSelection) {
-              // Pré-seleciona todas as cópias redundantes apenas na primeira carga geral
-              const initialSelected = new Set<string>();
-              groups.forEach((g: any) => {
-                (g.faixas || []).slice(1).forEach((f: any) => {
-                  initialSelected.add(f.caminho);
+              if (selectionMode === 'auto') {
+                // Pré-seleciona todas as cópias redundantes no modo automático
+                const initialSelected = new Set<string>();
+                groups.forEach((g: any) => {
+                  (g.faixas || []).slice(1).forEach((f: any) => {
+                    initialSelected.add(f.caminho);
+                  });
                 });
-              });
-              setSelectedCopyPaths(initialSelected);
+                setSelectedCopyPaths(initialSelected);
+              } else {
+                // Modo manual (conferência cuidadosa 1 a 1): inicia totalmente limpo
+                setSelectedCopyPaths(new Set());
+              }
             } else {
               // Preserva rigorosamente as escolhas manuais que o usuário já fez (sem remarcar tudo)
               setSelectedCopyPaths(prev => {
@@ -408,6 +416,72 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     } catch (e) {
       onAddLog(`❌ Erro ao definir arquivo protegido: ${e}`);
     }
+  };
+
+  // Inverter o arquivo protegido de um bloco específico
+  const handleInvertSingleGroup = async (group: any) => {
+    if (!group.faixas || group.faixas.length < 2) return;
+    const targetTrack = group.faixas[1];
+    await handleSetMaster(group.seal, targetTrack.caminho, targetTrack.nome, targetTrack.crate);
+  };
+
+  // Inverter a orientação de TODOS os blocos de uma vez só (1-Click Global Invert)
+  const handleInvertAllMasters = async () => {
+    if (duplicatesBySound.length === 0) return;
+    try {
+      const mastersToUpdate: { audio_seal: string; filepath: string }[] = [];
+      const updatedGroups = duplicatesBySound.map(g => {
+        const faixas = [...(g.faixas || [])];
+        if (faixas.length < 2) return g;
+        // Gira para que a primeira cópia (index 1) se torne o Master (index 0)
+        const [oldMaster, newMaster, ...rest] = faixas;
+        const updatedNewMaster = { ...newMaster, is_master: true };
+        const updatedOldMaster = { ...oldMaster, is_master: false };
+        const reordered = [updatedNewMaster, updatedOldMaster, ...rest];
+        mastersToUpdate.push({ audio_seal: g.seal, filepath: updatedNewMaster.caminho });
+        return {
+          ...g,
+          faixas: reordered
+        };
+      });
+
+      setDuplicatesBySound(updatedGroups);
+
+      // Persiste no SQLite em lote
+      if (isTauri && mastersToUpdate.length > 0) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('batch_set_sound_seal_masters', {
+          mastersJson: JSON.stringify(mastersToUpdate)
+        });
+      }
+
+      onAddLog(`🔄 Orientação invertida em todos os ${mastersToUpdate.length} blocos!`);
+      onAddLog(`🛡️ As pastas/arquivos alternativos agora são os arquivos protegidos.`);
+    } catch (e) {
+      onAddLog(`❌ Erro ao inverter todos os blocos: ${e}`);
+    }
+  };
+
+  // Limpar todas as preferências manuais de master
+  const handleClearMasters = async () => {
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('clear_sound_seal_masters');
+      }
+      onAddLog(`🧹 Preferências manuais de proteção limpas. Recarregando com a estratégia ${masterStrategy}...`);
+      await loadDuplicatesBySound(true);
+    } catch (e) {
+      onAddLog(`❌ Erro ao limpar preferências de master: ${e}`);
+    }
+  };
+
+  // Alternar estratégia de proteção (Master)
+  const handleStrategyChange = async (newStrategy: 'desc' | 'smart' | 'asc') => {
+    setMasterStrategy(newStrategy);
+    const label = newStrategy === 'desc' ? 'Invertida (Z ➔ A / Curadas)' : newStrategy === 'smart' ? 'Inteligente (Subpastas/Curadas)' : 'Alfabética Padrão (A ➔ Z)';
+    onAddLog(`⚙️ Sound Seal: Estratégia de proteção alterada para "${label}".`);
+    await loadDuplicatesBySound(true, newStrategy);
   };
 
   // Marcar todas as cópias de um bloco específico
@@ -1226,30 +1300,95 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
 
           {/* Tabela de Cópias Reconhecidas Pelo Som */}
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
-            <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs font-semibold text-slate-200 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-3">
-                <span>Cópias Reconhecidas por Assinatura Sonora ({filteredDuplicatesBySound.length} de {duplicatesBySound.length} grupos)</span>
-                
-                {/* Botões Rápidos de Seleção */}
-                <div className="flex items-center gap-1.5 ml-2">
+            <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs font-semibold text-slate-200 flex flex-wrap items-center justify-between shrink-0 gap-2">
+              <div className="flex flex-wrap items-center gap-2.5">
+                <span>Cópias por Som ({filteredDuplicatesBySound.length} grupos)</span>
+
+                {/* Estratégia de Escolha do Master */}
+                <div className="flex items-center gap-1.5 bg-serato-dark/70 px-2 py-0.5 rounded border border-serato-cardBorder">
+                  <span className="text-[10px] text-slate-400">Proteção:</span>
+                  <select
+                    value={masterStrategy}
+                    onChange={(e) => handleStrategyChange(e.target.value as any)}
+                    className="text-[11px] py-0.5 bg-slate-900 border-none text-emerald-300 font-mono cursor-pointer focus:outline-none"
+                    title="Define a lógica automática para eleger o arquivo protegido (Master)"
+                  >
+                    <option value="desc">🛡️ Invertida: Z ➔ A / Curadas (Recomendado)</option>
+                    <option value="smart">🧠 Inteligente: Subpastas & Nome Limpo</option>
+                    <option value="asc">🔤 Alfabética Padrão: A ➔ Z</option>
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={handleInvertAllMasters}
+                    className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-700 font-mono transition cursor-pointer flex items-center gap-1 shadow-sm"
+                    title="Inverte a orientação do arquivo protegido em TODOS os blocos de uma vez só"
+                  >
+                    <RotateCcw className="w-2.5 h-2.5 text-emerald-400" />
+                    <span>Inverter Todos</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleClearMasters}
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-400 border border-slate-700 font-mono transition cursor-pointer"
+                    title="Limpa atribuições manuais e recalcula com a estratégia ativa"
+                  >
+                    Resetar
+                  </button>
+                </div>
+
+                {/* Modo de Conferência */}
+                <div className="flex items-center gap-1.5 border-l border-white/10 pl-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const nextMode = selectionMode === 'manual' ? 'auto' : 'manual';
+                      setSelectionMode(nextMode);
+                      if (nextMode === 'manual') {
+                        setSelectedCopyPaths(new Set());
+                      } else {
+                        setSelectedCopyPaths(new Set(allCopyPaths));
+                      }
+                    }}
+                    className={`text-[10px] px-2 py-0.5 rounded border font-mono transition cursor-pointer flex items-center gap-1 ${
+                      selectionMode === 'manual'
+                        ? 'bg-amber-950/40 text-amber-300 border-amber-700'
+                        : 'bg-serato-dark text-slate-300 border-serato-cardBorder'
+                    }`}
+                    title="Alterne entre conferência manual 1 a 1 (sem auto-marcação) e marcação automática de cópias"
+                  >
+                    {selectionMode === 'manual' ? (
+                      <>
+                        <Square className="w-2.5 h-2.5 text-amber-400" />
+                        <span>Conferência 1 a 1 (Manual)</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckSquare className="w-2.5 h-2.5 text-serato-cyan" />
+                        <span>Auto-Marcar Cópias</span>
+                      </>
+                    )}
+                  </button>
+
                   <button
                     type="button"
                     onClick={handleSelectAllCopies}
-                    className="text-[11px] px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-serato-cyan border border-serato-cardBorder font-mono transition cursor-pointer"
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-serato-cyan border border-serato-cardBorder font-mono transition cursor-pointer"
                   >
-                    Marcar Todas as Cópias ({allCopyPaths.length})
+                    Marcar Todas ({allCopyPaths.length})
                   </button>
                   <button
                     type="button"
                     onClick={handleDeselectAllCopies}
-                    className="text-[11px] px-2 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-slate-400 border border-serato-cardBorder font-mono transition cursor-pointer"
+                    className="text-[10px] px-1.5 py-0.5 rounded bg-serato-dark hover:bg-slate-700 text-slate-400 border border-serato-cardBorder font-mono transition cursor-pointer"
                   >
                     Desmarcar
                   </button>
                 </div>
               </div>
 
-              <span className="text-[10px] text-serato-muted font-mono">Mesmo som, nomes ou tags divergentes</span>
+              <span className="text-[10px] text-serato-muted font-mono hidden xl:inline">Mesmo som, nomes ou tags divergentes</span>
             </div>
 
             {/* Barra de Filtros e Busca da Sub-Aba Sound Seal */}
@@ -1326,6 +1465,17 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
 
                         {/* Ações Rápidas por Bloco */}
                         <div className="flex items-center gap-1.5">
+                          {group.faixas && group.faixas.length >= 2 && (
+                            <button
+                              type="button"
+                              onClick={() => handleInvertSingleGroup(group)}
+                              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-emerald-950 text-slate-300 hover:text-emerald-300 border border-slate-700 hover:border-emerald-600 text-[10px] font-mono cursor-pointer transition flex items-center gap-1"
+                              title="Alterna a proteção entre a faixa original e a cópia deste bloco"
+                            >
+                              <RotateCcw className="w-2.5 h-2.5 text-emerald-400" />
+                              <span>Inverter Master</span>
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => handleSelectGroupCopies(group)}
