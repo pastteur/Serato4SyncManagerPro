@@ -2610,6 +2610,7 @@ dependencies = [
 name = "serato4-sync-pro"
 version = "1.0.0"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
  "tauri",

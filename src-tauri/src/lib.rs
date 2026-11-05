@@ -10,6 +10,19 @@ pub struct DetectedPaths {
     pub serato: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SystemTelemetry {
+    pub cpu_percent: f32,
+    pub ram_used_gb: f32,
+    pub ram_total_gb: f32,
+    pub ram_percent: f32,
+    pub disk_name: String,
+    pub disk_free_gb: f32,
+    pub disk_total_gb: f32,
+    pub disk_percent: f32,
+    pub serato_running: bool,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SyncFinishedPayload {
     pub success: bool,
@@ -57,8 +70,171 @@ fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(script_name))
 }
 
+extern "C" {
+    fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::c_int;
+}
+
 mod commands {
     use super::*;
+
+    #[tauri::command]
+    #[allow(deprecated)]
+    pub fn get_system_telemetry() -> SystemTelemetry {
+        // 1. CPU Usage
+        let mut cpu_pct: f32 = 0.0;
+        unsafe {
+            #[repr(C)]
+            struct host_cpu_load_info {
+                cpu_ticks: [u32; 4],
+            }
+            let mut count = (std::mem::size_of::<host_cpu_load_info>() / std::mem::size_of::<libc::integer_t>()) as libc::mach_msg_type_number_t;
+            let mut load_info: host_cpu_load_info = std::mem::zeroed();
+            let host_port = libc::mach_host_self();
+            let kr = libc::host_statistics(
+                host_port,
+                libc::HOST_CPU_LOAD_INFO,
+                &mut load_info as *mut _ as *mut libc::integer_t,
+                &mut count,
+            );
+            mach_port_deallocate(libc::mach_task_self(), host_port);
+
+            if kr == 0 {
+                let user = load_info.cpu_ticks[0] as u64;
+                let system = load_info.cpu_ticks[1] as u64;
+                let idle = load_info.cpu_ticks[2] as u64;
+                let nice = load_info.cpu_ticks[3] as u64;
+
+                let total_ticks = user + system + idle + nice;
+                let active_ticks = user + system + nice;
+
+                static PREV_CPU: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
+                if let Ok(mut prev) = PREV_CPU.lock() {
+                    if prev.0 > 0 && total_ticks > prev.0 {
+                        let d_total = total_ticks - prev.0;
+                        let d_active = active_ticks.saturating_sub(prev.1);
+                        cpu_pct = ((d_active as f64 / d_total as f64) * 100.0) as f32;
+                    }
+                    *prev = (total_ticks, active_ticks);
+                }
+            }
+        }
+
+        // 2. RAM Usage
+        let mut total_ram_bytes: u64 = 8 * 1024 * 1024 * 1024;
+        let mut size = std::mem::size_of::<u64>();
+        unsafe {
+            let name = std::ffi::CString::new("hw.memsize").unwrap();
+            let _ = libc::sysctlbyname(
+                name.as_ptr(),
+                &mut total_ram_bytes as *mut _ as *mut libc::c_void,
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            );
+        }
+        let ram_total_gb = (total_ram_bytes as f64 / 1_073_741_824.0) as f32;
+
+        let mut used_ram_gb = 0.0;
+        unsafe {
+            #[repr(C)]
+            struct vm_statistics64 {
+                free_count: u32,
+                active_count: u32,
+                inactive_count: u32,
+                wire_count: u32,
+                zero_fill_count: u64,
+                reactivations: u64,
+                pageins: u64,
+                pageouts: u64,
+                faults: u64,
+                cow_faults: u64,
+                lookups: u64,
+                hits: u64,
+                purges: u64,
+                purgeable_count: u32,
+                speculative_count: u32,
+                decompressions: u64,
+                compressions: u64,
+                swapins: u64,
+                swapouts: u64,
+                compressor_page_count: u32,
+                throttled_count: u32,
+                external_page_count: u32,
+                internal_page_count: u32,
+                total_uncompressed_pages_in_compressor: u64,
+            }
+            let mut count = (std::mem::size_of::<vm_statistics64>() / std::mem::size_of::<libc::integer_t>()) as libc::mach_msg_type_number_t;
+            let mut vm_stat: vm_statistics64 = std::mem::zeroed();
+            let host_port = libc::mach_host_self();
+            let kr = libc::host_statistics64(
+                host_port,
+                libc::HOST_VM_INFO64,
+                &mut vm_stat as *mut _ as *mut libc::integer_t,
+                &mut count,
+            );
+            mach_port_deallocate(libc::mach_task_self(), host_port);
+
+            if kr == 0 {
+                let page_size = libc::sysconf(libc::_SC_PAGESIZE) as u64;
+                let active = (vm_stat.active_count + vm_stat.wire_count + vm_stat.compressor_page_count) as u64;
+                let used_bytes = active * page_size;
+                used_ram_gb = (used_bytes as f64 / 1_073_741_824.0) as f32;
+            }
+        }
+        let ram_percent = if ram_total_gb > 0.0 {
+            ((used_ram_gb / ram_total_gb) * 100.0).min(100.0)
+        } else {
+            0.0
+        };
+
+        // 3. Disk Usage
+        let (disk_name, target_path) = if std::path::Path::new("/Volumes/Pastteyr").exists() {
+            ("Pastteyr".to_string(), "/Volumes/Pastteyr")
+        } else {
+            ("Macintosh HD".to_string(), "/")
+        };
+
+        let mut disk_free_gb = 0.0;
+        let mut disk_total_gb = 0.0;
+        let mut disk_percent = 0.0;
+
+        if let Ok(c_path) = std::ffi::CString::new(target_path) {
+            let mut stat: std::mem::MaybeUninit<libc::statvfs> = std::mem::MaybeUninit::uninit();
+            if unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) } == 0 {
+                let stat = unsafe { stat.assume_init() };
+                let block_size = stat.f_frsize as u64;
+                let total_bytes = stat.f_blocks as u64 * block_size;
+                let free_bytes = stat.f_bavail as u64 * block_size;
+                let used_bytes = total_bytes.saturating_sub(free_bytes);
+
+                disk_total_gb = (total_bytes as f64 / 1_073_741_824.0) as f32;
+                disk_free_gb = (free_bytes as f64 / 1_073_741_824.0) as f32;
+                if total_bytes > 0 {
+                    disk_percent = ((used_bytes as f64 / total_bytes as f64) * 100.0) as f32;
+                }
+            }
+        }
+
+        // 4. Serato DJ Pro Running
+        let serato_running = Command::new("pgrep")
+            .arg("-x")
+            .arg("Serato DJ Pro")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        SystemTelemetry {
+            cpu_percent: (cpu_pct * 10.0).round() / 10.0,
+            ram_used_gb: (used_ram_gb * 10.0).round() / 10.0,
+            ram_total_gb: (ram_total_gb * 10.0).round() / 10.0,
+            ram_percent: ram_percent.round(),
+            disk_name,
+            disk_free_gb: (disk_free_gb * 10.0).round() / 10.0,
+            disk_total_gb: (disk_total_gb * 10.0).round() / 10.0,
+            disk_percent: disk_percent.round(),
+            serato_running,
+        }
+    }
 
     #[tauri::command]
     pub fn get_detected_paths() -> DetectedPaths {
@@ -1602,6 +1778,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            commands::get_system_telemetry,
             commands::get_detected_paths,
             commands::start_sync,
             commands::open_in_finder,
