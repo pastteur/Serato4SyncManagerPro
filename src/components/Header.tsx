@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio } from 'lucide-react';
+import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio, BookOpen } from 'lucide-react';
 
 interface HeaderProps {
   isRunning: boolean;
+  onOpenGuide?: () => void;
 }
 
 interface SystemTelemetry {
@@ -17,7 +18,7 @@ interface SystemTelemetry {
   serato_running: boolean;
 }
 
-export const Header: React.FC<HeaderProps> = ({ isRunning }) => {
+export const Header: React.FC<HeaderProps> = ({ isRunning, onOpenGuide }) => {
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   
   const [telemetry, setTelemetry] = useState<SystemTelemetry>({
@@ -149,8 +150,19 @@ export const Header: React.FC<HeaderProps> = ({ isRunning }) => {
 
       </div>
 
-      {/* Lado Direito: Badges do Sistema */}
+      {/* Lado Direito: Badges do Sistema & Esteira de Utilidades */}
       <div className="flex items-center space-x-2 shrink-0">
+        {onOpenGuide && (
+          <button
+            type="button"
+            onClick={onOpenGuide}
+            className="flex items-center space-x-1.5 text-[11px] text-serato-gold bg-serato-gold/10 hover:bg-serato-gold/20 px-2.5 py-1.5 rounded-lg border border-serato-gold/30 font-sans font-semibold transition cursor-pointer shadow-sm hover:scale-105 active:scale-95"
+            title="Manual de Arquitetura & Engenharia do Serato DJ Pro 4"
+          >
+            <BookOpen className="w-3.5 h-3.5 text-serato-gold" />
+            <span>Guia Serato 4</span>
+          </button>
+        )}
         <div className="flex items-center space-x-1.5 text-[11px] text-slate-400 bg-serato-card px-2.5 py-1.5 rounded-lg border border-serato-cardBorder font-sans">
           <Cpu className="w-3.5 h-3.5 text-serato-cyan" />
           <span>macOS Tahoe / Silicon</span>

@@ -13,7 +13,7 @@ import { BackupManager } from './components/BackupManager';
 import { AudioHealth } from './components/AudioHealth';
 import { AutoCueGenerator } from './components/AutoCueGenerator';
 import { LogEntry, SyncSummary } from './types';
-import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2 } from 'lucide-react';
+import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2, X } from 'lucide-react';
 
 // Tauri API dynamic loader
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -25,7 +25,8 @@ export const App: React.FC = () => {
   const [exportCsv, setExportCsv] = useState<boolean>(true);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [summary, setSummary] = useState<SyncSummary | null>(null);
-  const [activeTab, setActiveTab] = useState<'logs' | 'duplicates' | 'tree' | 'tagDoctor' | 'soundSeal' | 'matcher' | 'health' | 'autoCue' | 'backups' | 'guide'>('logs');
+  const [activeTab, setActiveTab] = useState<'logs' | 'duplicates' | 'tree' | 'tagDoctor' | 'soundSeal' | 'matcher' | 'health' | 'autoCue' | 'backups'>('logs');
+  const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
 
   const addLog = useCallback((message: string) => {
     const now = new Date();
@@ -302,9 +303,19 @@ export const App: React.FC = () => {
     }
   };
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isGuideOpen) {
+        setIsGuideOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isGuideOpen]);
+
   return (
     <div className="flex flex-col h-screen bg-serato-dark text-slate-100 overflow-hidden font-sans select-none">
-      <Header isRunning={isRunning} />
+      <Header isRunning={isRunning} onOpenGuide={() => setIsGuideOpen(true)} />
 
       {/* Main Container without Double Scrolling */}
       <main className="flex-1 min-h-0 flex flex-col p-2 md:p-3 space-y-2 overflow-hidden">
@@ -479,19 +490,6 @@ export const App: React.FC = () => {
             <History className="w-3.5 h-3.5 text-serato-neonGreen" />
             <span>Backups</span>
           </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('guide')}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-t-lg transition-all border-t border-x cursor-pointer shrink-0 ${
-              activeTab === 'guide'
-                ? 'bg-serato-dark text-slate-200 border-serato-cardBorder border-b-transparent shadow-md'
-                : 'bg-transparent text-serato-muted hover:text-white border-transparent'
-            }`}
-          >
-            <BookOpen className="w-3.5 h-3.5" />
-            <span>Guia Serato 4</span>
-          </button>
         </div>
 
         {/* Tab Contents: Persistent Tab Containers Mounted in Background to Avoid Interruptions */}
@@ -572,12 +570,35 @@ export const App: React.FC = () => {
               onOpenLogsFolder={handleOpenLogsFolder}
             />
           </div>
-
-          <div className={activeTab === 'guide' ? 'flex-1 min-h-0 flex flex-col h-full overflow-y-auto' : 'hidden'}>
-            <ArchitectureGuide />
-          </div>
         </div>
       </main>
+
+      {/* Modal / Dialog do Guia Serato 4 acessível a partir da esteira de utilidades do Header */}
+      {isGuideOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 sm:p-6 animate-in fade-in">
+          <div className="bg-serato-dark border border-serato-cardBorder rounded-2xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden">
+            <div className="bg-serato-header px-5 py-3 border-b border-serato-cardBorder flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <BookOpen className="w-5 h-5 text-serato-gold" />
+                <span className="text-sm font-bold text-white font-sans">
+                  Manual de Arquitetura & Engenharia • Serato DJ Pro 4
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsGuideOpen(false)}
+                className="p-1 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white transition cursor-pointer"
+                title="Fechar (ESC)"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-5">
+              <ArchitectureGuide />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
