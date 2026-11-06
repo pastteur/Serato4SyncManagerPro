@@ -19,14 +19,32 @@ import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History,
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
 export const App: React.FC = () => {
-  const [mp3Path, setMp3Path] = useState<string>('');
-  const [seratoPath, setSeratoPath] = useState<string>('');
+  const [mp3Path, setMp3Path] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('serato_sync_mp3_path') || '';
+    }
+    return '';
+  });
+  const [seratoPath, setSeratoPath] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('serato_sync_serato_path') || '';
+    }
+    return '';
+  });
   const [isRunning, setIsRunning] = useState<boolean>(false);
   const [exportCsv, setExportCsv] = useState<boolean>(true);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [summary, setSummary] = useState<SyncSummary | null>(null);
   const [activeTab, setActiveTab] = useState<'logs' | 'duplicates' | 'tree' | 'tagDoctor' | 'soundSeal' | 'matcher' | 'health' | 'autoCue' | 'backups'>('logs');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (mp3Path) localStorage.setItem('serato_sync_mp3_path', mp3Path);
+  }, [mp3Path]);
+
+  useEffect(() => {
+    if (seratoPath) localStorage.setItem('serato_sync_serato_path', seratoPath);
+  }, [seratoPath]);
 
   const addLog = useCallback((message: string) => {
     const now = new Date();
@@ -69,13 +87,18 @@ export const App: React.FC = () => {
     } else {
       // Browser Mock / Local Fallback
       setMp3Path('/Volumes/Pastteyr/Music/MP3');
-      setSeratoPath('/Volumes/Pastteyr/Serato');
+      setSeratoPath('/Volumes/Pastteyr/_Serato_');
       addLog('🔍 Auto-detecção simulada em ambiente Web Dev.');
     }
   }, [addLog]);
 
   useEffect(() => {
-    handleAutoDetect();
+    // Se o usuário já tiver caminhos no localStorage, não sobrescreve a menos que estejam vazios
+    const savedMp3 = localStorage.getItem('serato_sync_mp3_path');
+    const savedSerato = localStorage.getItem('serato_sync_serato_path');
+    if (!savedMp3 || !savedSerato) {
+      handleAutoDetect();
+    }
   }, [handleAutoDetect]);
 
   // Setup Tauri Event Listeners
@@ -124,6 +147,7 @@ export const App: React.FC = () => {
         const selected = await open({
           directory: true,
           multiple: false,
+          defaultPath: mp3Path || '/Volumes',
           title: 'Selecionar Pasta Master MP3'
         });
         if (selected && typeof selected === 'string') {
@@ -149,6 +173,7 @@ export const App: React.FC = () => {
         const selected = await open({
           directory: true,
           multiple: false,
+          defaultPath: seratoPath || '/Volumes',
           title: 'Selecionar Pasta Serato'
         });
         if (selected && typeof selected === 'string') {
@@ -159,7 +184,7 @@ export const App: React.FC = () => {
         addLog(`❌ Erro ao abrir diálogo do Finder: ${err}`);
       }
     } else {
-      const promptVal = prompt('Informe o caminho da pasta Serato:', seratoPath || '/Volumes/Pastteyr/Serato');
+      const promptVal = prompt('Informe o caminho da pasta Serato:', seratoPath || '/Volumes/Pastteyr/_Serato_');
       if (promptVal) {
         setSeratoPath(promptVal);
         addLog(`📂 Pasta Serato definida: ${promptVal}`);
@@ -171,6 +196,14 @@ export const App: React.FC = () => {
   const handleStartSync = async (dryRun: boolean = false) => {
     if (!mp3Path || !seratoPath) {
       addLog('⚠️ Por favor, selecione ambas as pastas (Músicas e Serato) antes de iniciar.');
+      setActiveTab('logs');
+      return;
+    }
+
+    // Trava de segurança: impede execução acidental na raiz, Mesa/Desktop ou diretório Home
+    const cleanMp3 = mp3Path.trim().replace(/\/$/, '');
+    if (cleanMp3 === '/' || cleanMp3.endsWith('/Desktop') || cleanMp3.endsWith('/Mesa')) {
+      addLog('❌ Operação bloqueada: A pasta MP3 não pode ser a Área de Trabalho (Mesa) nem a raiz do sistema.');
       setActiveTab('logs');
       return;
     }

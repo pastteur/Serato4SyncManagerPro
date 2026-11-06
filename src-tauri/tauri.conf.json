@@ -38,15 +38,15 @@
     "targets": [
       "app"
     ],
-    "resources": [
-      "../serato_macos_app.py",
-      "../tag_doctor.py",
-      "../sound_seal.py",
-      "../auto_cue.py",
-      "../audio_health.py",
-      "../track_matcher.py",
-      "../run_local_agent.py"
-    ],
+    "resources": {
+      "../serato_macos_app.py": "serato_macos_app.py",
+      "../tag_doctor.py": "tag_doctor.py",
+      "../sound_seal.py": "sound_seal.py",
+      "../auto_cue.py": "auto_cue.py",
+      "../audio_health.py": "audio_health.py",
+      "../track_matcher.py": "track_matcher.py",
+      "../run_local_agent.py": "run_local_agent.py"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

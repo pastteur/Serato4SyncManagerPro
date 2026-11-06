@@ -19,6 +19,7 @@ import csv
 import datetime
 import json
 import argparse
+import hashlib
 from pathlib import Path
 
 # Garante flushing imediato de logs em stdout/stderr para captura em tempo real
@@ -40,6 +41,19 @@ def normalizar_nfc(texto: str) -> str:
     if texto is None:
         return ""
     return unicodedata.normalize('NFC', str(texto))
+
+def calcular_assinatura_pasta(arquivos_meta: list) -> str:
+    """
+    Gera uma assinatura hash SHA-256 matemática baseada estritamente nos metadados físicos:
+    nome NFC + tamanho exato em bytes + st_mtime_ns de cada arquivo de áudio.
+    Garante 100% de precisão: se nenhum arquivo foi adicionado, alterado ou removido,
+    a assinatura permanece rigorosamente imutável.
+    """
+    h = hashlib.sha256()
+    for nome_nfc, tamanho, mtime_ns in sorted(arquivos_meta):
+        h.update(nome_nfc.encode('utf-8'))
+        h.update(struct.pack('>QQ', max(0, int(tamanho)), max(0, int(mtime_ns))))
+    return h.hexdigest()
 
 def criar_tag_tlv(tag_str: str, valor_str: str) -> bytes:
     """Gera bloco binário TLV (Tag 4 bytes + Length big-endian + UTF-16 BE)."""
@@ -79,7 +93,8 @@ def ler_faixas_crate_binaria(caminho_crate: Path) -> set:
                     faixas.add(normalizar_nfc(caminho_texto))
                 except UnicodeDecodeError:
                     pass
-            idx = val_start
+            # Salta para o fim deste bloco TLV para não ler bytes internos da tag anterior
+            idx = val_end
     except Exception as e:
         print(f"   ⚠️ Aviso ao ler crate prévia {caminho_crate.name}: {e}", flush=True)
     return faixas
@@ -144,9 +159,22 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     else:
         print("\n⚡ [SERATO 4 SYNC MANAGER PRO] - INICIANDO AUDITORIA E SINCRONIZAÇÃO NATIVA ⚡", flush=True)
 
-    path_mp3 = Path(os.path.expanduser(mp3_dir_str)).resolve()
-    path_serato = Path(os.path.expanduser(serato_dir_str)).resolve()
+    if not mp3_dir_str or not mp3_dir_str.strip():
+        print("❌ ERRO CRÍTICO: Caminho da pasta de músicas MP3 não informado.", flush=True)
+        return False, "Caminho MP3 não informado."
+    if not serato_dir_str or not serato_dir_str.strip():
+        print("❌ ERRO CRÍTICO: Caminho da pasta Serato não informado.", flush=True)
+        return False, "Caminho Serato não informado."
+
+    path_mp3 = Path(os.path.expanduser(mp3_dir_str.strip())).resolve()
+    path_serato = Path(os.path.expanduser(serato_dir_str.strip())).resolve()
     path_logs = Path(os.path.expanduser(logs_dir_str or str(DEFAULT_LOGS_DIR))).resolve()
+
+    # Blindagem de segurança: previne escanear acidentalmente raiz do sistema, Home ou Desktop
+    desktop_path = (Path.home() / "Desktop").resolve()
+    if path_mp3 in (Path.home().resolve(), desktop_path, Path("/").resolve()):
+        print(f"❌ ERRO DE SEGURANÇA: O caminho fornecido aponta para pasta do sistema ({path_mp3}). A sincronização requer o diretório de biblioteca de áudio.", flush=True)
+        return False, "Caminho do sistema bloqueado por segurança."
 
     print(f"📂 Pasta Master MP3  : {path_mp3}", flush=True)
     print(f"📂 Pasta Serato      : {path_serato}", flush=True)
@@ -161,8 +189,12 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     crates_dir.mkdir(parents=True, exist_ok=True)
     path_logs.mkdir(parents=True, exist_ok=True)
 
-    # Identifica crates físicas antigas presentes no disco
-    crates_fisicas_antigas = set([f.name for f in crates_dir.glob("*.crate")]) if crates_dir.exists() else set()
+    # Identifica crates físicas antigas presentes no disco (normalizadas em NFC e ignorando arquivos temporários/backups)
+    crates_fisicas_antigas = set([
+        normalizar_nfc(f.name) 
+        for f in crates_dir.glob("*.crate") 
+        if not f.name.startswith('.') and not f.name.endswith('.bak') and not f.name.endswith('.tmp')
+    ]) if crates_dir.exists() else set()
 
     cache_file = path_logs / ".serato_sync_cache.json"
     cache_anterior = carregar_cache(cache_file)
@@ -202,6 +234,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             continue
 
         musicas_pasta_relativas = []
+        arquivos_pasta_meta = []
         tamanho_total_pasta = 0
 
         for arq in arquivos:
@@ -219,12 +252,16 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     continue
 
                 try:
-                    tamanho = caminho_completo.stat().st_size
+                    st = caminho_completo.stat()
+                    tamanho = st.st_size
+                    mtime_ns = getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9))
                 except OSError:
                     tamanho = 0
+                    mtime_ns = 0
 
                 tamanho_total_pasta += tamanho
                 nome_nfc = normalizar_nfc(arq)
+                arquivos_pasta_meta.append((nome_nfc, tamanho, mtime_ns))
                 chave_duplicado = (nome_nfc, tamanho)
 
                 # Auditoria de duplicados com inclusão integral em ambas as crates
@@ -304,14 +341,36 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                 ]
             }
 
-            # TRAVA MATEMÁTICA ANTI-FALSO-POSITIVO
+            # TRAVA MATEMÁTICA PURA (Metadados Físicos de Arquivos + Crate)
             chave_cache = normalizar_nfc(str(caminho_atual.resolve()))
             qtd_arquivos = len(musicas_pasta_relativas)
+            sig_pasta = calcular_assinatura_pasta(arquivos_pasta_meta)
 
-            novo_cache[chave_cache] = {
-                "qtd": qtd_arquivos,
-                "bytes": tamanho_total_pasta
-            }
+            crate_existe = caminho_crate.exists()
+            crate_tamanho = 0
+            if crate_existe:
+                try:
+                    c_stat = caminho_crate.stat()
+                    crate_tamanho = c_stat.st_size
+                except OSError:
+                    pass
+
+            dados_prev_cache = cache_anterior.get(chave_cache)
+            cache_perfeito = (
+                dados_prev_cache is not None and
+                dados_prev_cache.get("sig") == sig_pasta and
+                dados_prev_cache.get("qtd") == qtd_arquivos and
+                dados_prev_cache.get("bytes") == tamanho_total_pasta and
+                crate_existe and
+                crate_tamanho > 8 and
+                dados_prev_cache.get("crate_bytes") == crate_tamanho
+            )
+
+            # Se a assinatura matemática física confere 100%, PULA I/O e LEITURA BINÁRIA
+            if cache_perfeito:
+                novo_cache[chave_cache] = dados_prev_cache
+                crates_inalteradas += 1
+                continue
 
             # LEITURA PRÉVIA DA CRATE BINÁRIA ATUAL DO DISCO (Rastreando tag ptrk)
             faixas_antigas_crate = ler_faixas_crate_binaria(caminho_crate)
@@ -320,17 +379,6 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             # Comparação cirúrgica: novas vs antigas
             faixas_adicionadas = conjunto_novo - faixas_antigas_crate
             faixas_removidas = faixas_antigas_crate - conjunto_novo
-
-            dados_prev_cache = cache_anterior.get(chave_cache)
-            cache_bate = (dados_prev_cache is not None and 
-                          dados_prev_cache.get("qtd") == qtd_arquivos and 
-                          dados_prev_cache.get("bytes") == tamanho_total_pasta and 
-                          caminho_crate.exists())
-
-            # Se bate o cache e a crate binária confere, pula reescrita física (Smart Crate Writing)
-            if cache_bate and len(faixas_adicionadas) == 0 and len(faixas_removidas) == 0:
-                crates_inalteradas += 1
-                continue
 
             # Log de Movimentação Individual de Músicas
             prefixo_log = "🔍 [ANÁLISE] " if dry_run else ""
@@ -355,6 +403,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     print(f"      ... (-{len(faixas_removidas) - 3} outras faixas)", flush=True)
 
             # ESCRITA ATÔMICA DA CRATE (.tmp -> shutil.move)
+            tamanho_gravado = crate_tamanho
             if not dry_run:
                 tmp_crate = caminho_crate.with_suffix('.tmp')
                 try:
@@ -364,6 +413,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                             ptrk = criar_tag_tlv('ptrk', mus)
                             otrk = b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
                             f.write(otrk)
+                    tamanho_gravado = tmp_crate.stat().st_size
                     shutil.move(tmp_crate, caminho_crate)
                     total_crates_gravadas += 1
                     if not faixas_adicionadas and not faixas_removidas:
@@ -375,8 +425,15 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                 if not faixas_adicionadas and not faixas_removidas:
                     print(f"   🔍 [ANÁLISE] Crate seria atualizada: {nome_exibicao} ({qtd_arquivos} faixas)", flush=True)
 
-    # Detecção de Crates Deletadas no HD
-    for antiga in crates_fisicas_antigas:
+            novo_cache[chave_cache] = {
+                "qtd": qtd_arquivos,
+                "bytes": tamanho_total_pasta,
+                "sig": sig_pasta,
+                "crate_bytes": tamanho_gravado
+            }
+
+    # Detecção de Crates Deletadas no HD (Auditoria NFC estrita)
+    for antiga in sorted(list(crates_fisicas_antigas)):
         if antiga not in crates_processadas_agora:
             if not dry_run:
                 try:
@@ -391,7 +448,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             movimentacoes_log.append(msg_del)
 
     # Detecção de Crates Novas Criadas
-    for nova in crates_processadas_agora:
+    for nova in sorted(list(crates_processadas_agora)):
         if nova not in crates_fisicas_antigas:
             nome_amigavel = nova.replace(".crate", "").replace("%%", " -> ")
             msg_new = f"📂 Nova Crate COMPLETA Criada: [{nome_amigavel}]"
@@ -414,18 +471,35 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                 lista_pref.append(f"{master}%%{sub}")
 
     if not dry_run:
-        tmp_pref = neworder_file.with_suffix('.tmp')
-        try:
-            with open(tmp_pref, 'wb') as f:
-                f.write(b'vrsn\x00\x00\x00\x08\x001\x00.\x000\x000')
-                for item in lista_pref:
-                    item_limpo = item.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
-                    nior = criar_tag_tlv('tvcn', normalizar_nfc(item_limpo))
-                    f.write(b'nior' + struct.pack('>I', len(nior)) + nior)
-            shutil.move(tmp_pref, neworder_file)
-            print("   ✓ neworder.pref gravado com sucesso.", flush=True)
-        except Exception as e:
-            print(f"   ❌ Erro ao atualizar neworder.pref: {e}", file=sys.stderr, flush=True)
+        # Monta blocos nior com normalização NFC
+        blocos_nior = []
+        for item in lista_pref:
+            item_limpo = item.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
+            nior = criar_tag_tlv('tvcn', normalizar_nfc(item_limpo))
+            blocos_nior.append(b'nior' + struct.pack('>I', len(nior)) + nior)
+
+        novo_conteudo_pref = b'vrsn\x00\x00\x00\x08\x001\x00.\x000\x000' + b''.join(blocos_nior)
+
+        # Checagem de integridade binária: só grava se houve alteração real
+        pref_alterado = True
+        if neworder_file.exists():
+            try:
+                if neworder_file.read_bytes() == novo_conteudo_pref:
+                    pref_alterado = False
+            except Exception:
+                pass
+
+        if pref_alterado:
+            tmp_pref = neworder_file.with_suffix('.tmp')
+            try:
+                with open(tmp_pref, 'wb') as f:
+                    f.write(novo_conteudo_pref)
+                shutil.move(tmp_pref, neworder_file)
+                print("   ✓ neworder.pref gravado com sucesso.", flush=True)
+            except Exception as e:
+                print(f"   ❌ Erro ao atualizar neworder.pref: {e}", file=sys.stderr, flush=True)
+        else:
+            print("   🔒 neworder.pref inalterado (HD protegido contra escrita redundante).", flush=True)
         
         salvar_cache(cache_file, novo_cache)
     else:
