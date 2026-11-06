@@ -422,6 +422,38 @@ def repair_track_online(filepath_str: str):
         }
 
     try:
+        # TRAVA RÍGIDA DE SEGURANÇA POR TEMPO (Tolerância máxima: ±10 segundos)
+        # Protege o DJ contra substituição caso o arquivo esteja com nome trocado
+        orig_dur = 0.0
+        try:
+            from mutagen.mp3 import MP3
+            orig_mp3 = MP3(str(file_p))
+            orig_dur = round(orig_mp3.info.length, 1)
+        except Exception:
+            pass
+
+        cand_dur = 0.0
+        try:
+            from mutagen.mp3 import MP3
+            cand_mp3 = MP3(str(downloaded_mp3))
+            cand_dur = round(cand_mp3.info.length, 1)
+        except Exception:
+            pass
+
+        # Aplica a trava se o arquivo original tem duração de música normal (> 50s)
+        if orig_dur > 50.0 and cand_dur > 0.0:
+            diff_time = round(abs(cand_dur - orig_dur), 1)
+            if diff_time > 10.0:
+                shutil.rmtree(str(temp_dir), ignore_errors=True)
+                return {
+                    "sucesso": False,
+                    "bloqueado_seguranca": True,
+                    "erro": f"Substituição cancelada por segurança: Duração local ({orig_dur}s) difere da versão encontrada ({cand_dur}s) por {diff_time}s (limite de 10s). Evitou sobrescrever faixa possivelmente com nome trocado.",
+                    "duracao_local": orig_dur,
+                    "duracao_baixada": cand_dur,
+                    "diferenca": diff_time
+                }
+
         # Preserva tags Serato e ID3v2.3 do arquivo original (cues, beatgrid, bpm, tom, etc.)
         try:
             from mutagen.id3 import ID3
@@ -445,12 +477,241 @@ def repair_track_online(filepath_str: str):
             "sucesso": True,
             "arquivo": file_p.name,
             "fonte": used_provider,
+            "duracao_local": orig_dur,
+            "duracao_baixada": cand_dur,
             "quarentena": str(quarantine_file),
             "mensagem": f"Faixa substituída com sucesso por versão 320kbps (44.1kHz CBR) via {used_provider} preservando Cues e Tags."
         }
     except Exception as e:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
         return {"sucesso": False, "erro": f"Falha ao substituir arquivo: {str(e)}"}
+
+
+def preaudit_track_online(filepath_str: str) -> dict:
+    """
+    Pré-audita uma faixa online SEM baixar nem alterar arquivos no disco (Modo Simulação / Dry-Run).
+    Compara a duração do arquivo local com os candidatos disponíveis no YouTube e SoundCloud.
+    Retorna se a faixa é compatível (diferença <= 10s) ou divergente (diferença > 10s).
+    """
+    yt_dlp = get_yt_dlp_bin()
+    if not yt_dlp:
+        return {"status": "erro", "mensagem": "yt-dlp não localizado."}
+
+    file_p = Path(filepath_str)
+    if not file_p.exists():
+        return {"status": "erro", "mensagem": "Arquivo não encontrado no disco."}
+
+    local_dur = 0.0
+    try:
+        from mutagen.mp3 import MP3
+        m = MP3(file_p)
+        local_dur = round(m.info.length, 1)
+    except Exception:
+        pass
+
+    stem = file_p.stem
+    clean_query = stem
+    if ' - ' in clean_query:
+        parts = [p.strip() for p in clean_query.split(' - ') if p.strip()]
+        if len(parts) >= 3:
+            parts.pop()
+            clean_query = ' - '.join(parts)
+    clean_query = clean_query.replace('_', ' ')
+    import re
+    clean_query = re.sub(r'[\(\[].*?[\)\]]', '', clean_query)
+    clean_query = re.sub(r'\s*\.\s*\d+.*$', '', clean_query).strip()
+    clean_query = re.sub(r'\s+', ' ', clean_query)
+
+    strategies = [
+        ("YouTube Oficial", f"ytsearch1:{clean_query} audio oficial"),
+        ("YouTube Geral", f"ytsearch1:{clean_query}"),
+        ("SoundCloud", f"scsearch1:{clean_query}")
+    ]
+
+    env = os.environ.copy()
+    env["PATH"] = f"{FFMPEG_DIR}:{env.get('PATH', '')}"
+
+    for prov, search_term in strategies:
+        cmd = [
+            yt_dlp,
+            "--flat-playlist",
+            "--dump-single-json",
+            "--no-warnings",
+            "--quiet",
+            search_term
+        ]
+        try:
+            res = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=12)
+            if res.returncode == 0 and res.stdout.strip():
+                data = json.loads(res.stdout)
+                entries = data.get("entries") or []
+                if entries and entries[0]:
+                    cand = entries[0]
+                    cand_title = cand.get("title") or ""
+                    cand_dur = cand.get("duration") or 0.0
+                    if cand_dur:
+                        cand_dur = round(float(cand_dur), 1)
+                        diff = round(abs(cand_dur - local_dur), 1)
+                        is_comp = diff <= 10.0
+                        return {
+                            "status": "compativel" if is_comp else "incompativel",
+                            "caminho": str(file_p),
+                            "arquivo": file_p.name,
+                            "duracao_local": local_dur,
+                            "online_titulo": cand_title,
+                            "online_duracao": cand_dur,
+                            "diferenca": diff,
+                            "provedor": prov,
+                            "compativel": is_comp,
+                            "mensagem": f"Compatível (Diferença: {diff}s · {prov})" if is_comp else f"Divergência de {diff}s (>10s) · Online: {cand_dur}s"
+                        }
+        except Exception:
+            continue
+
+    return {
+        "status": "nao_encontrado",
+        "caminho": str(file_p),
+        "arquivo": file_p.name,
+        "duracao_local": local_dur,
+        "compativel": False,
+        "mensagem": "Nenhuma versão correspondente localizada nas fontes oficiais."
+    }
+
+
+def batch_preaudit_tracks_online(filepaths: list):
+    """Executa pré-auditoria de compatibilidade online em lote com streaming de progresso."""
+    total = len(filepaths)
+    print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
+    compativel_count = 0
+    incompativel_count = 0
+    nao_encontrado_count = 0
+    resultados = {}
+
+    for idx, fp in enumerate(filepaths, 1):
+        filename = Path(fp).name
+        pct_start = round(((idx - 1) / max(1, total)) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx - 1,
+            "total": total,
+            "percentual": pct_start,
+            "compativeis": compativel_count,
+            "incompativeis": incompativel_count,
+            "nao_encontrados": nao_encontrado_count,
+            "faixa_atual": f"Consultando: {filename}...",
+            "status": "consultando"
+        }, ensure_ascii=False), flush=True)
+
+        res = preaudit_track_online(fp)
+        resultados[fp] = res
+        status = res.get("status")
+        if status == "compativel":
+            compativel_count += 1
+        elif status == "incompativel":
+            incompativel_count += 1
+        else:
+            nao_encontrado_count += 1
+
+        pct = round((idx / total) * 100, 1)
+        print(json.dumps({
+            "tipo": "progresso",
+            "processados": idx,
+            "total": total,
+            "percentual": pct,
+            "compativeis": compativel_count,
+            "incompativeis": incompativel_count,
+            "nao_encontrados": nao_encontrado_count,
+            "faixa_atual": f"{'✅' if status == 'compativel' else '⚠️'} {filename}: {res.get('mensagem')}",
+            "resultado_item": res
+        }, ensure_ascii=False), flush=True)
+
+    print(json.dumps({
+        "tipo": "fim",
+        "sucesso": True,
+        "total": total,
+        "compativeis": compativel_count,
+        "incompativeis": incompativel_count,
+        "nao_encontrados": nao_encontrado_count,
+        "resultados": resultados
+    }, ensure_ascii=False), flush=True)
+
+
+def rename_audio_track(filepath_str: str, new_name_str: str) -> dict:
+    """
+    Renomeia o arquivo físico no disco, atualiza tags ID3 (Título e Artista)
+    e sincroniza o banco do Sound Seal para manter integridade no Serato DJ.
+    """
+    file_p = Path(os.path.expanduser(filepath_str)).resolve()
+    if not file_p.exists():
+        return {"sucesso": False, "erro": "Arquivo original não encontrado no disco."}
+
+    new_name = new_name_str.strip()
+    if not new_name.lower().endswith(file_p.suffix.lower()):
+        new_name += file_p.suffix
+
+    new_file_p = file_p.parent / new_name
+    if new_file_p == file_p:
+        return {"sucesso": True, "novo_caminho": str(file_p), "novo_nome": file_p.name, "mensagem": "Nome inalterado."}
+
+    is_same_file = False
+    try:
+        if new_file_p.exists():
+            is_same_file = os.path.samefile(file_p, new_file_p)
+    except Exception:
+        pass
+
+    if new_file_p.exists() and not is_same_file:
+        return {"sucesso": False, "erro": f"Já existe outro arquivo chamado '{new_name}' nesta pasta."}
+
+    try:
+        # Renomeio seguro com proteção APFS case-insensitive
+        if is_same_file:
+            temp_p = file_p.parent / f".tmp_{abs(hash(str(file_p)))}.tmp"
+            file_p.rename(temp_p)
+            temp_p.rename(new_file_p)
+        else:
+            file_p.rename(new_file_p)
+
+        # Atualiza tags ID3 se estiver no formato 'Artista - Titulo'
+        try:
+            from mutagen.id3 import ID3, TIT2, TPE1
+            stem_clean = new_file_p.stem
+            if ' - ' in stem_clean:
+                parts = [p.strip() for p in stem_clean.split(' - ') if p.strip()]
+                artist = parts[0]
+                title = parts[1] if len(parts) > 1 else stem_clean
+                id3 = ID3(str(new_file_p))
+                id3['TPE1'] = TPE1(encoding=3, text=artist)
+                id3['TIT2'] = TIT2(encoding=3, text=title)
+                id3.save(v2_version=3)
+        except Exception:
+            pass
+
+        # Sincroniza com banco Sound Seal se o módulo existir
+        try:
+            sound_seal_db = Path.home() / "Library" / "Application Support" / "Serato" / "Library" / "sound_seal.sqlite"
+            if sound_seal_db.exists():
+                import sqlite3
+                conn = sqlite3.connect(str(sound_seal_db))
+                conn.execute("""
+                    UPDATE sound_seals 
+                    SET filepath = ?, filename = ?, updated_at = CURRENT_TIMESTAMP 
+                    WHERE filepath = ?
+                """, (str(new_file_p), new_file_p.name, str(file_p)))
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
+
+        return {
+            "sucesso": True,
+            "novo_caminho": str(new_file_p),
+            "novo_nome": new_file_p.name,
+            "mensagem": f"Arquivo renomeado com sucesso para '{new_file_p.name}'"
+        }
+    except Exception as e:
+        return {"sucesso": False, "erro": f"Erro ao renomear arquivo: {str(e)}"}
 
 
 def resample_track_local(filepath_str: str) -> dict:
@@ -615,9 +876,36 @@ def main():
     parser.add_argument("--batch-repair-online", type=str, default="", help="JSON de lista de caminhos a reparar online")
     parser.add_argument("--resample-local", type=str, default="", help="Caminho do arquivo a normalizar frequência (44.1kHz)")
     parser.add_argument("--batch-resample-local", type=str, default="", help="JSON de lista de caminhos a normalizar frequência")
+    parser.add_argument("--preaudit-online", type=str, default="", help="Caminho do arquivo a pré-auditar online")
+    parser.add_argument("--batch-preaudit-online", type=str, default="", help="JSON de lista de caminhos a pré-auditar online")
+    parser.add_argument("--rename-track", type=str, default="", help="Caminho do arquivo a renomear")
+    parser.add_argument("--new-name", type=str, default="", help="Novo nome do arquivo")
 
     args = parser.parse_args()
     mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+
+    if args.rename_track and args.new_name:
+        res = rename_audio_track(args.rename_track, args.new_name)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.preaudit_online:
+        res = preaudit_track_online(args.preaudit_online)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0)
+
+    if args.batch_preaudit_online:
+        try:
+            if args.batch_preaudit_online.startswith('['):
+                fps = json.loads(args.batch_preaudit_online)
+            else:
+                with open(args.batch_preaudit_online, 'r', encoding='utf-8') as f:
+                    fps = json.load(f)
+            batch_preaudit_tracks_online(fps)
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
+            sys.exit(1)
 
     if args.repair_online:
         res = repair_track_online(args.repair_online)

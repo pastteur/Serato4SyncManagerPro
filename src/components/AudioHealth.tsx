@@ -1,5 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2, Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree, Search } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import {
+  Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2,
+  Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree, Search,
+  Play, Pause, Volume2, X, Edit3, ShieldCheck, AlertCircle
+} from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -54,6 +58,49 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     atualizados: number;
     faixa_atual: string;
   } | null>(null);
+
+  // Varredura Prévia de Compatibilidade (Simulação Dry-Run)
+  const [isPreAuditing, setIsPreAuditing] = useState<boolean>(false);
+  const [preAuditProgress, setPreAuditProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    compativeis: number;
+    incompativeis: number;
+    nao_encontrados: number;
+    faixa_atual: string;
+  } | null>(null);
+  const [preAuditResults, setPreAuditResults] = useState<Record<string, {
+    status: 'compativel' | 'incompativel' | 'nao_encontrado';
+    duracao_local?: number;
+    online_titulo?: string;
+    online_duracao?: number;
+    diferenca?: number;
+    provedor?: string;
+    mensagem: string;
+  }>>({});
+
+  // Player de Áudio Pré-Escuta Ilimitado com Seek Bar
+  const [playingTrack, setPlayingTrack] = useState<any | null>(null);
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [audioDuration, setAudioDuration] = useState<number>(0);
+  const [volume, setVolume] = useState<number>(0.8);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Modal de Renomeação Imediata
+  const [renameModal, setRenameModal] = useState<{
+    isOpen: boolean;
+    item: any | null;
+    newName: string;
+    isSaving: boolean;
+    error?: string;
+  }>({
+    isOpen: false,
+    item: null,
+    newName: '',
+    isSaving: false,
+  });
 
   // Normalização Local de Frequência 44.1k via FFmpeg
   const [isResamplingLocal, setIsResamplingLocal] = useState<boolean>(false);
@@ -192,13 +239,15 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     loadCrates();
   }, [mp3Path]);
 
-  // Listener de streaming para scanner, reparação online e resample local
+  // Listener de streaming para scanner, reparação online, pré-auditoria e resample local
   useEffect(() => {
     let unlistenScan: (() => void) | undefined;
     let unlistenProgress: (() => void) | undefined;
     let unlistenFinished: (() => void) | undefined;
     let unlistenResampleProg: (() => void) | undefined;
     let unlistenResampleFin: (() => void) | undefined;
+    let unlistenPreauditProg: (() => void) | undefined;
+    let unlistenPreauditFin: (() => void) | undefined;
 
     const setupListeners = async () => {
       if (isTauri) {
@@ -227,6 +276,49 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
             loadHealthScan(selectedCategory, maxDuration);
           } else {
             onAddLog(`❌ Erro na correção online: ${payload.erro || 'Desconhecido'}`);
+          }
+        });
+
+        unlistenPreauditProg = await listen<any>('audio-health-preaudit-progress', (event) => {
+          const p = event.payload;
+          setPreAuditProgress({
+            processados: p.processados || 0,
+            total: p.total || 0,
+            percentual: p.percentual || 0,
+            compativeis: p.compativeis || 0,
+            incompativeis: p.incompativeis || 0,
+            nao_encontrados: p.nao_encontrados || 0,
+            faixa_atual: p.faixa_atual || '',
+          });
+          if (p.resultado_item && p.resultado_item.caminho) {
+            setPreAuditResults(prev => ({
+              ...prev,
+              [p.resultado_item.caminho]: p.resultado_item
+            }));
+          }
+        });
+
+        unlistenPreauditFin = await listen<any>('audio-health-preaudit-finished', (event) => {
+          const p = event.payload;
+          setIsPreAuditing(false);
+          setPreAuditProgress(null);
+          if (p.sucesso) {
+            if (p.resultados) {
+              setPreAuditResults(prev => ({ ...prev, ...p.resultados }));
+              // SELEÇÃO INTELIGENTE: Seleciona automaticamente APENAS as compatíveis!
+              // Desmarca qualquer divergente (>10s) para proteção absoluta do usuário!
+              const compIds = new Set<string>();
+              items.forEach(it => {
+                const res = p.resultados[it.caminho];
+                if (res && res.status === 'compativel') {
+                  compIds.add(it.id);
+                }
+              });
+              setSelectedIds(compIds);
+            }
+            onAddLog(`✅ Varredura Prévia concluída! ${p.compativeis} compatíveis (selecionadas), ${p.incompativeis} divergentes (desmarcadas por segurança), ${p.nao_encontrados} não localizadas.`);
+          } else {
+            onAddLog(`❌ Erro na varredura prévia: ${p.erro || 'Desconhecido'}`);
           }
         });
 
@@ -260,10 +352,193 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       if (unlistenScan) unlistenScan();
       if (unlistenProgress) unlistenProgress();
       if (unlistenFinished) unlistenFinished();
+      if (unlistenPreauditProg) unlistenPreauditProg();
+      if (unlistenPreauditFin) unlistenPreauditFin();
       if (unlistenResampleProg) unlistenResampleProg();
       if (unlistenResampleFin) unlistenResampleFin();
     };
-  }, [selectedCategory, maxDuration]);
+  }, [selectedCategory, maxDuration, items]);
+
+  // Limpeza do player de áudio ao desmontar
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  // Player de Áudio Pré-Escuta
+  const playTrack = async (item: any) => {
+    if (playingTrack?.id === item.id) {
+      if (audioRef.current) {
+        if (isPlaying) {
+          audioRef.current.pause();
+          setIsPlaying(false);
+        } else {
+          audioRef.current.play().catch(e => onAddLog(`❌ Erro play: ${e}`));
+          setIsPlaying(true);
+        }
+      }
+      return;
+    }
+
+    try {
+      let src = item.caminho;
+      if (isTauri) {
+        const { convertFileSrc } = await import('@tauri-apps/api/core');
+        src = convertFileSrc(item.caminho);
+      }
+      if (!audioRef.current) {
+        audioRef.current = new Audio(src);
+      } else {
+        audioRef.current.pause();
+        audioRef.current.src = src;
+      }
+      audioRef.current.volume = volume;
+      audioRef.current.currentTime = 0;
+      setPlayingTrack(item);
+      setCurrentTime(0);
+      setAudioDuration(item.duracao_seg || 0);
+
+      audioRef.current.onloadedmetadata = () => {
+        if (audioRef.current) {
+          setAudioDuration(audioRef.current.duration || item.duracao_seg || 0);
+        }
+      };
+
+      audioRef.current.ontimeupdate = () => {
+        if (audioRef.current) {
+          setCurrentTime(audioRef.current.currentTime);
+        }
+      };
+
+      audioRef.current.onended = () => {
+        setIsPlaying(false);
+      };
+
+      await audioRef.current.play();
+      setIsPlaying(true);
+    } catch (err) {
+      onAddLog(`❌ Falha ao reproduzir áudio: ${err}`);
+    }
+  };
+
+  const stopPlayback = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+    }
+    setIsPlaying(false);
+    setPlayingTrack(null);
+  };
+
+  const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const time = Number(e.target.value);
+    setCurrentTime(time);
+    if (audioRef.current) {
+      audioRef.current.currentTime = time;
+    }
+  };
+
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const vol = Number(e.target.value);
+    setVolume(vol);
+    if (audioRef.current) {
+      audioRef.current.volume = vol;
+    }
+  };
+
+  const formatTime = (secs: number) => {
+    if (!secs || isNaN(secs)) return '0:00';
+    const m = Math.floor(secs / 60);
+    const s = Math.floor(secs % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  // Disparo da Varredura Prévia em Massa
+  const handlePreAuditBatch = async () => {
+    const targets = selectedIds.size > 0
+      ? filteredItems.filter(i => selectedIds.has(i.id))
+      : filteredItems;
+
+    if (targets.length === 0) {
+      onAddLog('⚠️ Nenhuma faixa disponível para pré-auditar.');
+      return;
+    }
+
+    setIsPreAuditing(true);
+    setPreAuditProgress({
+      processados: 0,
+      total: targets.length,
+      percentual: 0,
+      compativeis: 0,
+      incompativeis: 0,
+      nao_encontrados: 0,
+      faixa_atual: 'Iniciando varredura prévia de compatibilidade...',
+    });
+
+    onAddLog(`🔍 Disparando Varredura Prévia em ${targets.length} faixas (comparação de duração online sem tocar nos arquivos)...`);
+
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const filepaths = targets.map(t => t.caminho);
+        await invoke('batch_preaudit_online', {
+          filepathsJson: JSON.stringify(filepaths)
+        });
+      }
+    } catch (e) {
+      setIsPreAuditing(false);
+      setPreAuditProgress(null);
+      onAddLog(`❌ Falha ao iniciar varredura prévia: ${e}`);
+    }
+  };
+
+  // Abertura do Modal de Renomeação Imediata
+  const openRenameModal = (item: any) => {
+    setRenameModal({
+      isOpen: true,
+      item,
+      newName: item.arquivo,
+      isSaving: false,
+    });
+  };
+
+  // Execução da Renomeação Imediata
+  const handleConfirmRename = async () => {
+    if (!renameModal.item || !renameModal.newName.trim()) return;
+    setRenameModal(prev => ({ ...prev, isSaving: true, error: undefined }));
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('rename_audio_track', {
+          filepath: renameModal.item.caminho,
+          newName: renameModal.newName.trim()
+        });
+        const data = JSON.parse(resJson);
+        if (data.sucesso) {
+          onAddLog(`✏️ ${data.mensagem}`);
+          setItems(prev => prev.map(it => {
+            if (it.id === renameModal.item.id) {
+              return {
+                ...it,
+                arquivo: data.novo_nome,
+                caminho: data.novo_caminho,
+              };
+            }
+            return it;
+          }));
+          setRenameModal({ isOpen: false, item: null, newName: '', isSaving: false });
+        } else {
+          setRenameModal(prev => ({ ...prev, isSaving: false, error: data.erro }));
+        }
+      }
+    } catch (e: any) {
+      setRenameModal(prev => ({ ...prev, isSaving: false, error: e.toString() }));
+    }
+  };
 
   // Mover faixa individual para lixeira
   const handleTrashSingle = (item: any) => {
@@ -537,11 +812,23 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
+          {/* Varredura Prévia de Compatibilidade (Dry-Run / Simulação) */}
+          <button
+            type="button"
+            onClick={handlePreAuditBatch}
+            disabled={isLoading || isRepairingOnline || isPreAuditing || filteredItems.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-500/50 transition disabled:opacity-30 cursor-pointer shadow-lg shadow-emerald-950/20"
+            title="Consulta a duração online sem alterar nenhum arquivo e sinaliza quais são 100% seguras para substituição"
+          >
+            <ShieldCheck className={`w-3.5 h-3.5 ${isPreAuditing ? 'animate-spin text-emerald-400' : 'text-emerald-400'}`} />
+            <span>{isPreAuditing ? 'Auditando Online...' : `🔍 Pré-Auditar Compatibilidade`}</span>
+          </button>
+
           {/* Mover Lote para Lixeira */}
           <button
             type="button"
             onClick={handleTrashBatch}
-            disabled={isLoading || isRepairingOnline || selectedIds.size === 0}
+            disabled={isLoading || isRepairingOnline || isPreAuditing || selectedIds.size === 0}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-rose-950/40 hover:bg-rose-900 text-rose-300 border border-rose-800/50 transition disabled:opacity-30 cursor-pointer"
             title="Move todas as faixas selecionadas para a Lixeira"
           >
@@ -553,9 +840,9 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <button
             type="button"
             onClick={handleRepairBatchOnline}
-            disabled={isLoading || isRepairingOnline || selectedIds.size === 0}
+            disabled={isLoading || isRepairingOnline || isPreAuditing || selectedIds.size === 0}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-cyan to-blue-500 hover:opacity-90 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-30 cursor-pointer"
-            title="Busca e baixa versões completas em 320kbps substituindo as faixas com problemas selecionadas"
+            title="Busca e baixa versões completas em 320kbps substituindo as faixas com problemas selecionadas com trava de segurança de ±10s"
           >
             <DownloadCloud className={`w-3.5 h-3.5 ${isRepairingOnline ? 'animate-bounce' : ''}`} />
             <span>{isRepairingOnline ? 'Baixando em 320k...' : `🌐 Corrigir Online 320k (${selectedIds.size})`}</span>
@@ -565,7 +852,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <button
             type="button"
             onClick={() => loadHealthScan(selectedCategory, maxDuration)}
-            disabled={isLoading || isRepairingOnline || isResamplingLocal}
+            disabled={isLoading || isRepairingOnline || isResamplingLocal || isPreAuditing}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-950/40 transition disabled:opacity-40 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
@@ -734,7 +1021,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       </div>
 
       {/* Barra de Progresso Real-time Slim (Estilo Tag Doctor / Sound Seal) */}
-      {(isLoading || isRepairingOnline || isResamplingLocal) && (
+      {(isLoading || isRepairingOnline || isResamplingLocal || isPreAuditing) && (
         <div className="flex items-center justify-between px-3 py-1.5 bg-slate-900/90 border border-slate-700/60 rounded-lg text-xs shrink-0 shadow-lg animate-in fade-in duration-200">
           <div className="flex items-center gap-2 overflow-hidden flex-1 mr-3 min-w-0">
             {isLoading && (
@@ -743,6 +1030,15 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                 <span className="text-rose-400 font-bold truncate">Auditando Integridade dos Arquivos:</span>
                 <span className="text-slate-300 truncate text-[11px]">
                   {scanProgress?.faixa || 'Iniciando auditoria física...'}
+                </span>
+              </>
+            )}
+            {isPreAuditing && (
+              <>
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 animate-spin shrink-0" />
+                <span className="text-emerald-400 font-bold truncate">Varredura Prévia de Compatibilidade:</span>
+                <span className="text-slate-300 truncate text-[11px]">
+                  {preAuditProgress?.faixa_atual || 'Consultando fontes oficiais...'}
                 </span>
               </>
             )}
@@ -772,6 +1068,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                 {scanProgress.percentual}% ({scanProgress.processados.toLocaleString()}/{scanProgress.total.toLocaleString()})
               </span>
             )}
+            {isPreAuditing && preAuditProgress && (
+              <span className="text-emerald-300 font-bold flex items-center gap-1.5">
+                <span>{preAuditProgress.percentual}% ({preAuditProgress.processados}/{preAuditProgress.total})</span>
+                <span className="text-emerald-400">🟢 {preAuditProgress.compativeis}</span>
+                <span className="text-rose-400">🔴 {preAuditProgress.incompativeis}</span>
+              </span>
+            )}
             {isRepairingOnline && repairProgress && (
               <span className="text-serato-cyan font-bold">
                 {repairProgress.percentual}% ({repairProgress.processados}/{repairProgress.total}) • ✅ {repairProgress.atualizados}
@@ -788,13 +1091,16 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                 className={`h-full transition-all duration-150 ${
                   isLoading
                     ? 'bg-gradient-to-r from-rose-500 to-amber-500'
-                    : isRepairingOnline
-                      ? 'bg-gradient-to-r from-serato-cyan to-blue-500'
-                      : 'bg-gradient-to-r from-purple-500 to-indigo-500'
+                    : isPreAuditing
+                      ? 'bg-gradient-to-r from-emerald-500 to-teal-400'
+                      : isRepairingOnline
+                        ? 'bg-gradient-to-r from-serato-cyan to-blue-500'
+                        : 'bg-gradient-to-r from-purple-500 to-indigo-500'
                 }`}
                 style={{
                   width: `${Math.min(100, Math.max(1,
                     isLoading && scanProgress ? scanProgress.percentual :
+                    isPreAuditing && preAuditProgress ? preAuditProgress.percentual :
                     isRepairingOnline && repairProgress ? repairProgress.percentual :
                     isResamplingLocal && resampleProgress ? resampleProgress.percentual : 100
                   ))}%`
@@ -934,6 +1240,25 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                   </div>
 
                   <div className="flex items-center gap-2 shrink-0 font-mono text-[11px]">
+                    {/* Badge de Varredura Prévia de Compatibilidade */}
+                    {preAuditResults[item.caminho] && (
+                      <span
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border shrink-0 ${
+                          preAuditResults[item.caminho].status === 'compativel'
+                            ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/50'
+                            : preAuditResults[item.caminho].status === 'incompativel'
+                            ? 'bg-rose-950/80 text-rose-300 border-rose-500/50'
+                            : 'bg-amber-950/80 text-amber-300 border-amber-500/50'
+                        }`}
+                        title={preAuditResults[item.caminho].mensagem}
+                      >
+                        {preAuditResults[item.caminho].status === 'compativel' && '🟢 Compatível'}
+                        {preAuditResults[item.caminho].status === 'incompativel' && '🔴 Divergente'}
+                        {preAuditResults[item.caminho].status === 'nao_encontrado' && '🟡 Não Localizado'}
+                        {preAuditResults[item.caminho].diferenca !== undefined && ` (${preAuditResults[item.caminho].diferenca}s)`}
+                      </span>
+                    )}
+
                     <span className="text-slate-300">{item.duracao_seg}s</span>
                     {item.bitrate_kbps > 0 && (
                       <span className="text-serato-cyan">{item.bitrate_kbps} kbps</span>
@@ -943,6 +1268,34 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                         {item.sample_rate} Hz
                       </span>
                     )}
+
+                    {/* Botão Play / Ouvir com Player Ilimitado */}
+                    <button
+                      type="button"
+                      onClick={() => playTrack(item)}
+                      className={`p-1.5 rounded transition cursor-pointer flex items-center justify-center border ${
+                        playingTrack?.id === item.id && isPlaying
+                          ? 'bg-serato-cyan text-black border-cyan-300 shadow-md shadow-serato-cyan/30'
+                          : 'bg-serato-dark hover:bg-slate-700 text-slate-300 border-white/5'
+                      }`}
+                      title={playingTrack?.id === item.id && isPlaying ? "Pausar áudio" : "Ouvir áudio local com barra de busca"}
+                    >
+                      {playingTrack?.id === item.id && isPlaying ? (
+                        <Pause className="w-3.5 h-3.5 fill-current" />
+                      ) : (
+                        <Play className="w-3.5 h-3.5 fill-current ml-0.5" />
+                      )}
+                    </button>
+
+                    {/* Botão Renomear Imediato */}
+                    <button
+                      type="button"
+                      onClick={() => openRenameModal(item)}
+                      className="p-1.5 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 border border-white/5 cursor-pointer"
+                      title="Renomear faixa e atualizar tags ID3 sem sair do app"
+                    >
+                      <Edit3 className="w-3.5 h-3.5 text-serato-gold" />
+                    </button>
 
                     {/* Botão Baixar Online */}
                     <button
@@ -954,7 +1307,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                           ? 'bg-cyan-900 text-white border-cyan-400 animate-pulse'
                           : 'bg-cyan-950/50 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/40 disabled:opacity-40'
                       }`}
-                      title="Baixa automaticamente versão 320kbps íntegra (44.1kHz) e substitui esta faixa"
+                      title="Baixa automaticamente versão 320kbps íntegra (44.1kHz) e substitui esta faixa (com trava de segurança de ±10s)"
                     >
                       {processingSingleId === item.id && processingSingleAction === 'repair' ? (
                         <>
@@ -999,6 +1352,126 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           )}
         </div>
       </div>
+
+      {/* Dock do Player de Áudio Ilimitado com Barra de Rolagem */}
+      {playingTrack && (
+        <div className="bg-slate-900 border border-serato-cyan/40 p-2.5 rounded-lg flex items-center justify-between gap-3 shadow-2xl shrink-0 animate-in slide-in-from-bottom duration-200">
+          <div className="flex items-center gap-2.5 min-w-0 max-w-[280px]">
+            <button
+              onClick={() => playTrack(playingTrack)}
+              className="p-2 rounded-full bg-serato-cyan text-black hover:opacity-90 font-bold shrink-0 cursor-pointer shadow-md shadow-serato-cyan/20"
+              title={isPlaying ? "Pausar" : "Tocar"}
+            >
+              {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
+            </button>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white truncate" title={playingTrack.arquivo}>
+                {playingTrack.arquivo}
+              </div>
+              <div className="text-[10px] text-serato-cyan font-mono flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                <span>Ouvindo áudio local no HD</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Seek Bar com rolagem ilimitada */}
+          <div className="flex-1 flex items-center gap-2.5 max-w-xl px-2">
+            <span className="text-[11px] font-mono text-slate-400 w-11 text-right">{formatTime(currentTime)}</span>
+            <input
+              type="range"
+              min={0}
+              max={audioDuration || 100}
+              step={0.1}
+              value={currentTime}
+              onChange={handleSeek}
+              className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-serato-cyan hover:accent-cyan-300"
+            />
+            <span className="text-[11px] font-mono text-slate-400 w-11">{formatTime(audioDuration)}</span>
+          </div>
+
+          {/* Volume e Botão Fechar */}
+          <div className="flex items-center gap-2 shrink-0">
+            <Volume2 className="w-3.5 h-3.5 text-slate-400" />
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={volume}
+              onChange={handleVolumeChange}
+              className="w-16 h-1 bg-slate-800 rounded appearance-none cursor-pointer accent-slate-400"
+              title={`Volume: ${Math.round(volume * 100)}%`}
+            />
+            <button
+              onClick={stopPlayback}
+              className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer ml-1"
+              title="Fechar player"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Renomeação Rápida */}
+      {renameModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-serato-gold/40 rounded-xl p-5 max-w-lg w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Edit3 className="w-4 h-4 text-serato-gold" />
+                <h4 className="text-sm font-bold text-white">Renomear Faixa</h4>
+              </div>
+              <button
+                onClick={() => setRenameModal({ isOpen: false, item: null, newName: '', isSaving: false })}
+                className="text-slate-400 hover:text-white p-1 rounded"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-xs text-slate-300 font-semibold">Novo Nome do Arquivo:</label>
+              <input
+                type="text"
+                value={renameModal.newName}
+                onChange={(e) => setRenameModal(prev => ({ ...prev, newName: e.target.value }))}
+                className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:border-serato-gold focus:outline-none"
+                placeholder="Artista - Titulo.mp3"
+                autoFocus
+              />
+              <p className="text-[11px] text-slate-400">
+                💡 O arquivo físico no HD será renomeado e as tags ID3 (Título e Artista) serão sincronizadas automaticamente.
+              </p>
+              {renameModal.error && (
+                <div className="text-xs text-rose-400 bg-rose-950/50 border border-rose-800 p-2 rounded">
+                  {renameModal.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setRenameModal({ isOpen: false, item: null, newName: '', isSaving: false })}
+                disabled={renameModal.isSaving}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRename}
+                disabled={renameModal.isSaving || !renameModal.newName.trim()}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-serato-gold hover:opacity-90 text-black transition cursor-pointer disabled:opacity-50"
+              >
+                {renameModal.isSaving ? 'Salvando...' : 'Salvar Novo Nome'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ConfirmModal
         isOpen={modalConfig.isOpen}
