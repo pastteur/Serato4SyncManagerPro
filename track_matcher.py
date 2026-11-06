@@ -14,9 +14,11 @@ import sys
 import os
 import re
 import json
+import shutil
 import sqlite3
 import argparse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -405,6 +407,127 @@ def export_matched_to_serato_crate(crate_name: str, matched_items: list, serato_
     }
 
 
+def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str) -> dict:
+    """
+    Substitui a faixa antiga de menor qualidade pela nova faixa diretamente no mesmo local físico.
+    Move a antiga para quarentena e clona tags Serato Markers (Hot Cues / Beatgrid).
+    """
+    inc_p = Path(os.path.expanduser(incoming_path_str)).resolve()
+    dest_p = Path(os.path.expanduser(destination_path_str)).resolve()
+
+    if not inc_p.exists():
+        return {"sucesso": False, "erro": "Arquivo novo da pasta de novidades não encontrado."}
+    if not dest_p.exists():
+        return {"sucesso": False, "erro": "Arquivo original da biblioteca não encontrado no disco."}
+
+    quarantine_dir = Path.home() / ".serato_quarentena_audio"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    quarantine_file = quarantine_dir / f"upgrade_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{dest_p.name}"
+
+    try:
+        # Clona tags Serato e ID3v2.3 da antiga para a nova antes de sobrescrever
+        try:
+            if mutagen:
+                from mutagen.id3 import ID3
+                old_id3 = ID3(str(dest_p))
+                new_id3 = ID3(str(inc_p))
+                for tag_key in ['GEOB:Serato Markers2', 'GEOB:Serato BeatGrid', 'TBPM', 'TKEY']:
+                    if tag_key in old_id3 and tag_key not in new_id3:
+                        new_id3[tag_key] = old_id3[tag_key]
+                new_id3.save(v2_version=3)
+        except Exception:
+            pass
+
+        # Backup da antiga na quarentena
+        shutil.copy2(str(dest_p), str(quarantine_file))
+
+        # Sobrescreve no local exato da biblioteca
+        if inc_p.suffix.lower() == dest_p.suffix.lower():
+            shutil.copy2(str(inc_p), str(dest_p))
+            final_path = dest_p
+        else:
+            new_target = dest_p.with_suffix(inc_p.suffix)
+            shutil.copy2(str(inc_p), str(new_target))
+            dest_p.unlink(missing_ok=True)
+            final_path = new_target
+
+        return {
+            "sucesso": True,
+            "arquivo": final_path.name,
+            "caminho_final": str(final_path),
+            "quarentena": str(quarantine_file),
+            "mensagem": f"Upgrade concluído com sucesso no local original ({final_path.name})."
+        }
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
+
+
+def batch_replace_upgrades(upgrades_list: list) -> dict:
+    """Executa substituição de faixas em lote para upgrades de qualidade."""
+    total = len(upgrades_list)
+    updated = 0
+    errors = []
+
+    for item in upgrades_list:
+        inc = item.get("caminho_novo")
+        dest = item.get("caminho_completo")
+        if inc and dest:
+            res = replace_track_with_upgrade(inc, dest)
+            if res.get("sucesso"):
+                updated += 1
+            else:
+                errors.append(f"{Path(dest).name}: {res.get('erro')}")
+
+    return {
+        "sucesso": True,
+        "total": total,
+        "atualizados": updated,
+        "erros": errors,
+        "mensagem": f"{updated} de {total} faixas atualizadas com sucesso no próprio local do HD."
+    }
+
+
+def integrate_new_tracks_to_crate(tracks_list: list, target_crate_folder: str) -> dict:
+    """Copia as faixas inéditas/selecionadas para a pasta da Crate escolhida pelo usuário."""
+    dest_dir = Path(os.path.expanduser(target_crate_folder)).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    errors = []
+    copied_files = []
+
+    for item in tracks_list:
+        src = item.get("caminho_novo") or item.get("caminho_completo")
+        if not src:
+            continue
+        src_p = Path(src)
+        if not src_p.exists():
+            errors.append(f"Arquivo não encontrado: {src}")
+            continue
+
+        dest_file = dest_dir / src_p.name
+        if dest_file.exists():
+            stem = src_p.stem
+            ext = src_p.suffix
+            dest_file = dest_dir / f"{stem}_novo{ext}"
+
+        try:
+            shutil.copy2(str(src_p), str(dest_file))
+            copied += 1
+            copied_files.append(str(dest_file))
+        except Exception as e:
+            errors.append(f"{src_p.name}: {str(e)}")
+
+    return {
+        "sucesso": True,
+        "total": len(tracks_list),
+        "copiados": copied,
+        "destino": str(dest_dir),
+        "erros": errors,
+        "mensagem": f"{copied} nova(s) faixa(s) copiada(s) e integrada(s) na pasta '{dest_dir.name}'."
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Track Matcher")
     parser.add_argument("--match-text", type=str, default="", help="Conteúdo de texto com faixas")
@@ -414,9 +537,40 @@ def main():
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3 do usuário")
     parser.add_argument("--serato", type=str, default="", help="Pasta Serato")
     parser.add_argument("--export-crate", type=str, default="", help="Nome da Crate para exportar")
+    parser.add_argument("--replace-upgrades", type=str, default="", help="JSON de lista de pares de upgrade para substituir")
+    parser.add_argument("--integrate-tracks", type=str, default="", help="JSON de faixas a copiar e integrar")
+    parser.add_argument("--target-folder", type=str, default="", help="Pasta de destino para integração")
 
     args = parser.parse_args()
     mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+
+    if args.replace_upgrades:
+        try:
+            if args.replace_upgrades.startswith('['):
+                items_up = json.loads(args.replace_upgrades)
+            else:
+                with open(args.replace_upgrades, 'r', encoding='utf-8') as f:
+                    items_up = json.load(f)
+            res = batch_replace_upgrades(items_up)
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            sys.exit(1)
+
+    if args.integrate_tracks and args.target_folder:
+        try:
+            if args.integrate_tracks.startswith('['):
+                items_int = json.loads(args.integrate_tracks)
+            else:
+                with open(args.integrate_tracks, 'r', encoding='utf-8') as f:
+                    items_int = json.load(f)
+            res = integrate_new_tracks_to_crate(items_int, args.target_folder)
+            print(json.dumps(res, ensure_ascii=False))
+            sys.exit(0)
+        except Exception as e:
+            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            sys.exit(1)
 
     tracks = []
     if args.match_spotify:

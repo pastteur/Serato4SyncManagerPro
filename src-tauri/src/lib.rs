@@ -1363,6 +1363,41 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn replace_upgrades_track_matcher(
+        app: AppHandle,
+        upgrades_json: String,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "track_matcher.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--replace-upgrades");
+        cmd.arg(&upgrades_json);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao substituir upgrades: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    }
+
+    #[tauri::command]
+    pub async fn integrate_tracks_to_crate(
+        app: AppHandle,
+        tracks_json: String,
+        target_folder: String,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "track_matcher.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--integrate-tracks");
+        cmd.arg(&tracks_json);
+        cmd.arg("--target-folder");
+        cmd.arg(&target_folder);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao integrar faixas na Crate: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    }
+
+    #[tauri::command]
     pub async fn scan_audio_health(
         app: AppHandle,
         window: Window,
@@ -1935,6 +1970,8 @@ pub fn run() {
             commands::batch_relink_tracks,
             commands::remove_lost_tracks,
             commands::match_tracks,
+            commands::replace_upgrades_track_matcher,
+            commands::integrate_tracks_to_crate,
             commands::scan_audio_health,
             commands::repair_track_online,
             commands::batch_repair_online,

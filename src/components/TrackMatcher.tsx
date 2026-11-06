@@ -1,5 +1,9 @@
-import React, { useState, useMemo } from 'react';
-import { Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle, ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import {
+  Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle,
+  ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap,
+  CheckSquare, Square, RefreshCw, X, Layers, PlusCircle, Check
+} from 'lucide-react';
 
 interface TrackMatcherProps {
   mp3Path: string;
@@ -24,6 +28,79 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
   // Filtros de busca e status para os resultados
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'found' | 'upgrades' | 'missing'>('all');
+
+  // Seleção granular de faixas com Checkboxes
+  const [selectedFound, setSelectedFound] = useState<Set<string>>(new Set());
+  const [selectedMissing, setSelectedMissing] = useState<Set<string>>(new Set());
+
+  // Rastreamento de ações concluídas
+  const [replacedUpgrades, setReplacedUpgrades] = useState<Set<string>>(new Set());
+  const [integratedMissing, setIntegratedMissing] = useState<Set<string>>(new Set());
+
+  // Estados de processamento
+  const [isUpgrading, setIsUpgrading] = useState<boolean>(false);
+  const [isIntegrating, setIsIntegrating] = useState<boolean>(false);
+
+  // Lista de Crates do Serato / Pastas do HD
+  const [cratesList, setCratesList] = useState<any[]>([]);
+
+  // Modal de Integração de Músicas
+  const [integrateModal, setIntegrateModal] = useState<{
+    isOpen: boolean;
+    itemsToIntegrate: any[];
+    targetMode: 'existing' | 'new';
+    selectedCrate: string;
+    selectedSubcrate: string;
+    newCrateName: string;
+    isSaving: boolean;
+    error?: string;
+  }>({
+    isOpen: false,
+    itemsToIntegrate: [],
+    targetMode: 'existing',
+    selectedCrate: '',
+    selectedSubcrate: '',
+    newCrateName: 'Novidades 2026',
+    isSaving: false
+  });
+
+  // Modal de Confirmação de Substituição de Upgrades
+  const [upgradeModal, setUpgradeModal] = useState<{
+    isOpen: boolean;
+    itemsToUpgrade: any[];
+    isProcessing: boolean;
+  }>({
+    isOpen: false,
+    itemsToUpgrade: [],
+    isProcessing: false
+  });
+
+  const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+
+  // Carrega a estrutura de crates e subcrates do usuário para a integração
+  useEffect(() => {
+    const loadCrates = async () => {
+      if (!mp3Path || !isTauri) return;
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const res = await invoke<string>('list_crates_tag_doctor', { mp3Path });
+        const parsed = JSON.parse(res);
+        if (parsed.sucesso && parsed.crates) {
+          setCratesList(parsed.crates);
+          if (parsed.crates.length > 0) {
+            setIntegrateModal(prev => ({
+              ...prev,
+              selectedCrate: parsed.crates[0].nome,
+              selectedSubcrate: parsed.crates[0].subcrates?.[0]?.nome || ''
+            }));
+          }
+        }
+      } catch (err) {
+        console.error('Falha ao carregar lista de crates no TrackMatcher:', err);
+      }
+    };
+    loadCrates();
+  }, [mp3Path]);
 
   const filteredEncontradas = useMemo(() => {
     if (!matchResult?.encontradas) return [];
@@ -50,7 +127,11 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     );
   }, [matchResult, searchTerm]);
 
-  const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+  // Contadores selecionados
+  const selectedUpgradesCount = useMemo(() => {
+    if (!matchResult?.encontradas) return 0;
+    return matchResult.encontradas.filter((it: any) => it.upgrade_disponivel && selectedFound.has(it.caminho_completo)).length;
+  }, [matchResult, selectedFound]);
 
   const handleSelectIncomingFolder = async () => {
     if (isTauri) {
@@ -89,8 +170,8 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     setExportSuccessMsg(null);
     onAddLog(
       inputType === 'folder'
-        ? `🎧 Track Matcher: Varrendo pasta de novidades e cruzando contra as 31.355 faixas do HD...`
-        : `🎧 Track Matcher: Cruzando playlist contra suas 31.355 faixas do HD...`
+        ? `🎧 Track Matcher: Varrendo pasta de novidades e cruzando contra as faixas do HD...`
+        : `🎧 Track Matcher: Cruzando playlist contra suas faixas do HD...`
     );
 
     try {
@@ -107,8 +188,21 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
         setMatchResult(parsed);
 
         if (parsed.sucesso) {
+          // Seleciona inicialmente todos os upgrades e todas as inéditas
+          const initFound = new Set<string>();
+          (parsed.encontradas || []).forEach((it: any) => {
+            if (it.upgrade_disponivel) initFound.add(it.caminho_completo);
+          });
+          setSelectedFound(initFound);
+
+          const initMissing = new Set<string>();
+          (parsed.faltantes || []).forEach((it: any) => {
+            initMissing.add(it.caminho_novo || it.solicitado);
+          });
+          setSelectedMissing(initMissing);
+
           if (parsed.tipo_origem === 'folder') {
-            onAddLog(`✅ Track Matcher: ${parsed.total_solicitadas} faixas escaneadas na pasta. ${parsed.total_encontradas} já no HD (${parsed.total_upgrades || 0} upgrades de bitrate recomendados) e ${parsed.total_faltantes} faixas inéditas.`);
+            onAddLog(`✅ Track Matcher: ${parsed.total_solicitadas} faixas escaneadas na pasta. ${parsed.total_encontradas} já no HD (${parsed.total_upgrades || 0} upgrades de qualidade) e ${parsed.total_faltantes} faixas inéditas.`);
           } else {
             onAddLog(`✅ Track Matcher: ${parsed.total_encontradas} faixas encontradas no HD (${parsed.total_faltantes} faltantes).`);
           }
@@ -135,24 +229,204 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     onAddLog(`📋 Lista de ${matchResult.faltantes.length} faixas faltantes copiada para a área de transferência!`);
   };
 
+  // Toggle de seleção individual
+  const toggleSelectFound = (path: string) => {
+    setSelectedFound(prev => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  };
+
+  const toggleSelectMissing = (key: string) => {
+    setSelectedMissing(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  // Substituição de Upgrades no Próprio Local Físico do HD
+  const handleTriggerUpgrades = (items: any[]) => {
+    if (items.length === 0) return;
+    setUpgradeModal({
+      isOpen: true,
+      itemsToUpgrade: items,
+      isProcessing: false
+    });
+  };
+
+  const handleConfirmReplaceUpgrades = async () => {
+    const items = upgradeModal.itemsToUpgrade;
+    if (items.length === 0) return;
+    setUpgradeModal(prev => ({ ...prev, isProcessing: true }));
+    setIsUpgrading(true);
+
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('replace_upgrades_track_matcher', {
+          upgradesJson: JSON.stringify(items)
+        });
+        const parsed = JSON.parse(resJson);
+        if (parsed.sucesso) {
+          onAddLog(`🚀 ${parsed.mensagem}`);
+          setReplacedUpgrades(prev => {
+            const next = new Set(prev);
+            items.forEach(it => next.add(it.caminho_completo));
+            return next;
+          });
+          setUpgradeModal({ isOpen: false, itemsToUpgrade: [], isProcessing: false });
+        } else {
+          onAddLog(`❌ Falha na substituição de upgrades: ${parsed.erro}`);
+        }
+      }
+    } catch (e) {
+      onAddLog(`❌ Erro ao substituir upgrades: ${e}`);
+    } finally {
+      setIsUpgrading(false);
+      setUpgradeModal(prev => ({ ...prev, isProcessing: false }));
+    }
+  };
+
+  // Abrir Modal de Integração de Músicas
+  const handleOpenIntegrateModal = (items: any[]) => {
+    if (items.length === 0) {
+      onAddLog('⚠️ Selecione ao menos uma faixa para integrar.');
+      return;
+    }
+    setIntegrateModal(prev => ({
+      ...prev,
+      isOpen: true,
+      itemsToIntegrate: items,
+      isSaving: false,
+      error: undefined
+    }));
+  };
+
+  // Confirmação de Integração de Músicas na Crate
+  const handleConfirmIntegrate = async () => {
+    const { itemsToIntegrate, targetMode, selectedCrate, selectedSubcrate, newCrateName } = integrateModal;
+    if (itemsToIntegrate.length === 0) return;
+
+    let targetFolder = '';
+    if (targetMode === 'existing') {
+      if (!selectedCrate) {
+        setIntegrateModal(prev => ({ ...prev, error: 'Selecione uma Crate de destino.' }));
+        return;
+      }
+      if (selectedSubcrate) {
+        targetFolder = `${mp3Path}/${selectedCrate}/${selectedSubcrate}`;
+      } else {
+        targetFolder = `${mp3Path}/${selectedCrate}`;
+      }
+    } else {
+      if (!newCrateName.trim()) {
+        setIntegrateModal(prev => ({ ...prev, error: 'Informe o nome da nova Crate.' }));
+        return;
+      }
+      targetFolder = `${mp3Path}/${newCrateName.trim()}`;
+    }
+
+    setIntegrateModal(prev => ({ ...prev, isSaving: true, error: undefined }));
+    setIsIntegrating(true);
+
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('integrate_tracks_to_crate', {
+          tracksJson: JSON.stringify(itemsToIntegrate),
+          targetFolder
+        });
+        const parsed = JSON.parse(resJson);
+        if (parsed.sucesso) {
+          onAddLog(`📥 ${parsed.mensagem}`);
+          setIntegratedMissing(prev => {
+            const next = new Set(prev);
+            itemsToIntegrate.forEach(it => next.add(it.caminho_novo || it.solicitado));
+            return next;
+          });
+          setIntegrateModal(prev => ({ ...prev, isOpen: false, itemsToIntegrate: [], isSaving: false }));
+        } else {
+          setIntegrateModal(prev => ({ ...prev, isSaving: false, error: parsed.erro }));
+        }
+      }
+    } catch (e: any) {
+      setIntegrateModal(prev => ({ ...prev, isSaving: false, error: e.toString() }));
+    } finally {
+      setIsIntegrating(false);
+    }
+  };
+
+  // Crate ativa selecionada para dropdown de subcrates
+  const activeCrateData = useMemo(() => {
+    return cratesList.find(c => c.nome === integrateModal.selectedCrate);
+  }, [cratesList, integrateModal.selectedCrate]);
+
+  // Destino formatado para pré-visualização no modal
+  const previewTargetDestination = useMemo(() => {
+    if (integrateModal.targetMode === 'existing') {
+      if (integrateModal.selectedSubcrate) {
+        return `${mp3Path}/${integrateModal.selectedCrate}/${integrateModal.selectedSubcrate}`;
+      }
+      return `${mp3Path}/${integrateModal.selectedCrate}`;
+    }
+    return `${mp3Path}/${integrateModal.newCrateName.trim() || 'Nova_Crate'}`;
+  }, [mp3Path, integrateModal]);
+
   return (
-    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3">
+    <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3 relative">
       {/* Top Header */}
       <div className="flex flex-wrap items-center justify-between pb-2.5 border-b border-serato-cardBorder shrink-0 gap-2">
         <div>
           <h3 className="text-sm font-bold text-white flex items-center gap-2">
             <Music className="w-4 h-4 text-serato-cyan" />
-            <span>Track Matcher & Importador de Playlists (Spotify / Web)</span>
+            <span>Track Matcher & Importador de Playlists (Spotify / Pastas Locais)</span>
             <span className="text-[10px] bg-serato-neonGreen/20 text-serato-neonGreen px-2 py-0.5 rounded-full border border-serato-neonGreen/30 font-mono">
-              Cruza com 31.355 músicas do HD
+              Cruzamento Automático com o HD
             </span>
           </h3>
           <p className="text-[11px] text-serato-muted">
-            Cole uma playlist do Spotify, YouTube Music ou lista de texto. O sistema localiza o que você já tem no HD e cria a Crate no Serato instantaneamente.
+            Cruza novas pastas ou playlists com seu HD Master, detecta faixas inéditas para integrar e upgrades de bitrate para substituir no próprio local.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Botão de Substituir Upgrades Selecionados */}
+          {selectedUpgradesCount > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const itemsToUp = matchResult.encontradas.filter((it: any) => it.upgrade_disponivel && selectedFound.has(it.caminho_completo));
+                handleTriggerUpgrades(itemsToUp);
+              }}
+              disabled={isUpgrading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-serato-gold hover:opacity-90 text-black shadow-lg shadow-amber-950/40 transition cursor-pointer"
+            >
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>Substituir {selectedUpgradesCount} Upgrades</span>
+            </button>
+          )}
+
+          {/* Botão de Integrar Músicas Selecionadas */}
+          {matchResult?.tipo_origem === 'folder' && selectedMissing.size > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const itemsToInt = matchResult.faltantes.filter((it: any) => selectedMissing.has(it.caminho_novo || it.solicitado));
+                handleOpenIntegrateModal(itemsToInt);
+              }}
+              disabled={isIntegrating}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-950/40 transition cursor-pointer"
+            >
+              <PlusCircle className="w-3.5 h-3.5" />
+              <span>Integrar {selectedMissing.size} Inéditas na Crate</span>
+            </button>
+          )}
+
+          {/* Gerar Crate no Serato */}
           {matchResult && matchResult.encontradas && matchResult.encontradas.length > 0 && (
             <button
               type="button"
@@ -161,7 +435,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan hover:bg-cyan-300 text-black shadow-lg shadow-serato-cyan/20 transition cursor-pointer"
             >
               <FolderPlus className="w-3.5 h-3.5" />
-              <span>Gerar Crate no Serato ({matchResult.encontradas.length})</span>
+              <span>Gerar Crate Serato ({matchResult.encontradas.length})</span>
             </button>
           )}
 
@@ -172,7 +446,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
             className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-bold bg-serato-card hover:bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 transition disabled:opacity-40 cursor-pointer"
           >
             <Sparkles className="w-3.5 h-3.5" />
-            <span>{isMatching ? 'Cruzando...' : '🔍 Cruzar Playlist'}</span>
+            <span>{isMatching ? 'Cruzando...' : '🔍 Cruzar Playlist / Pasta'}</span>
           </button>
         </div>
       </div>
@@ -265,7 +539,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
             <div className="text-[11px] text-slate-400 bg-serato-dark/70 px-2.5 py-1 rounded border border-white/5 flex items-center gap-1.5">
               <Zap className="w-3.5 h-3.5 text-serato-gold shrink-0" />
               <span>
-                Varre todos os novos MP3, FLAC, WAV desta pasta e cruza com os 31.355 arquivos do HD. Identifica upgrades de bitrate (ex: 320k vs 128k) e músicas novas que você ainda não possui.
+                Varre todas as novas faixas desta pasta. Identifica automaticamente upgrades de bitrate para sobrescrever no próprio local do HD e faixas inéditas para copiar para qualquer Crate.
               </span>
             </div>
           </div>
@@ -400,86 +674,172 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           </div>
         )}
 
+        {/* Lista de Resultados */}
         <div className="overflow-y-auto flex-1 p-2 space-y-1.5 text-xs font-mono">
           {!matchResult ? (
             <div className="py-12 text-center text-slate-500 font-sans">
               <Music className="w-8 h-8 opacity-20 text-serato-cyan mx-auto mb-2" />
-              <p>Selecione uma pasta com novos áudios ou cole uma playlist acima e clique em "Cruzar Playlist".</p>
+              <p>Selecione uma pasta com novos áudios ou cole uma playlist acima e clique em "Cruzar Playlist / Pasta".</p>
               <p className="text-[11px] text-slate-600 mt-1">O sistema buscará as músicas instantaneamente no seu HD Master.</p>
             </div>
           ) : (
             <>
-              {(statusFilter === 'all' || statusFilter === 'found' || statusFilter === 'upgrades') && filteredEncontradas.map((item: any, idx: number) => (
-                <div 
-                  key={`found-${idx}`} 
-                  className={`border p-2 rounded flex items-center justify-between transition ${
-                    item.upgrade_disponivel
-                      ? 'bg-amber-950/20 border-serato-gold/60 hover:bg-amber-950/30'
-                      : 'bg-serato-card border-emerald-900/40 hover:bg-emerald-950/20'
-                  }`}
-                >
-                  <div className="flex items-center gap-2 truncate max-w-2xl">
-                    {item.upgrade_disponivel ? (
-                      <span className="text-[10px] bg-amber-950 text-serato-gold border border-serato-gold/40 px-1.5 py-0.5 rounded font-bold shrink-0 flex items-center gap-1">
-                        <Zap className="w-2.5 h-2.5 text-serato-gold" />
-                        UPGRADE
-                      </span>
-                    ) : (
-                      <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.2 rounded font-bold shrink-0">
-                        {item.score}% MATCH
-                      </span>
-                    )}
+              {/* Faixas Encontradas / Upgrades */}
+              {(statusFilter === 'all' || statusFilter === 'found' || statusFilter === 'upgrades') && filteredEncontradas.map((item: any, idx: number) => {
+                const isSelected = selectedFound.has(item.caminho_completo);
+                const isReplaced = replacedUpgrades.has(item.caminho_completo);
 
-                    <span className="text-white font-sans font-medium truncate">{item.solicitado}</span>
-                    <ArrowRight className="w-3 h-3 text-slate-600 shrink-0" />
-                    <span className="text-slate-400 text-[10px] truncate" title={item.caminho_completo}>{item.arquivo_local}</span>
+                return (
+                  <div 
+                    key={`found-${idx}`} 
+                    className={`border p-2 rounded flex items-center justify-between transition ${
+                      isReplaced
+                        ? 'bg-emerald-950/30 border-emerald-700/60'
+                        : item.upgrade_disponivel
+                        ? 'bg-amber-950/20 border-serato-gold/60 hover:bg-amber-950/30'
+                        : 'bg-serato-card border-emerald-900/40 hover:bg-emerald-950/20'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 truncate max-w-2xl">
+                      {/* Checkbox por arquivo */}
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => toggleSelectFound(item.caminho_completo)}
+                        className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0 cursor-pointer shrink-0"
+                      />
 
-                    {item.novo_bitrate !== undefined && (
-                      <span className="text-[10px] font-mono shrink-0 ml-1">
-                        {item.upgrade_disponivel ? (
-                          <span className="text-emerald-400 font-bold bg-emerald-950/60 px-1 py-0.5 rounded border border-emerald-700/40">
-                            {item.novo_bitrate}k {item.novo_formato} ➔ {item.lib_bitrate || '?'}k
-                          </span>
-                        ) : (
-                          <span className="text-slate-500">
-                            ({item.lib_bitrate || '?'}k)
-                          </span>
-                        )}
-                      </span>
-                    )}
+                      {isReplaced ? (
+                        <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-600 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          ATUALIZADO NO LOCAL
+                        </span>
+                      ) : item.upgrade_disponivel ? (
+                        <span className="text-[10px] bg-amber-950 text-serato-gold border border-serato-gold/40 px-1.5 py-0.5 rounded font-bold shrink-0 flex items-center gap-1">
+                          <Zap className="w-2.5 h-2.5 text-serato-gold" />
+                          UPGRADE DISPONÍVEL
+                        </span>
+                      ) : (
+                        <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.2 rounded font-bold shrink-0">
+                          {item.score}% MATCH
+                        </span>
+                      )}
+
+                      <span className="text-white font-sans font-medium truncate">{item.solicitado}</span>
+                      <ArrowRight className="w-3 h-3 text-slate-600 shrink-0" />
+                      <span className="text-slate-400 text-[10px] truncate" title={item.caminho_completo}>{item.arquivo_local}</span>
+
+                      {item.novo_bitrate !== undefined && (
+                        <span className="text-[10px] font-mono shrink-0 ml-1">
+                          {item.upgrade_disponivel ? (
+                            <span className="text-emerald-400 font-bold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-700/40">
+                              {item.novo_bitrate}k {item.novo_formato} ➔ {item.lib_bitrate || '?'}k
+                            </span>
+                          ) : (
+                            <span className="text-slate-500">
+                              ({item.lib_bitrate || '?'}k)
+                            </span>
+                          )}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Botão de Substituir Upgrade no próprio local */}
+                      {item.upgrade_disponivel && !isReplaced && (
+                        <button
+                          type="button"
+                          onClick={() => handleTriggerUpgrades([item])}
+                          disabled={isUpgrading}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-amber-950/70 hover:bg-amber-900 text-serato-gold border border-serato-gold/50 transition cursor-pointer shadow"
+                          title="Sobrescreve o arquivo no local exato da biblioteca com a versão de maior bitrate"
+                        >
+                          <Zap className="w-3 h-3 fill-current" />
+                          <span>Substituir no Local</span>
+                        </button>
+                      )}
+
+                      {onOpenFileInFinder && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenFileInFinder(item.caminho_completo)}
+                          className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 cursor-pointer"
+                          title="Revelar no Finder"
+                        >
+                          <ExternalLink className="w-3 h-3 text-serato-cyan" />
+                        </button>
+                      )}
+                    </div>
                   </div>
+                );
+              })}
 
-                  {onOpenFileInFinder && (
-                    <button
-                      type="button"
-                      onClick={() => onOpenFileInFinder(item.caminho_completo)}
-                      className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 ml-2 shrink-0 cursor-pointer"
-                      title="Revelar no Finder"
-                    >
-                      <ExternalLink className="w-3 h-3 text-serato-cyan" />
-                    </button>
-                  )}
-                </div>
-              ))}
+              {/* Faixas Inéditas / Faltantes */}
+              {(statusFilter === 'all' || statusFilter === 'missing') && filteredFaltantes.map((item: any, idx: number) => {
+                const key = item.caminho_novo || item.solicitado;
+                const isSelected = selectedMissing.has(key);
+                const isIntegrated = integratedMissing.has(key);
 
-              {(statusFilter === 'all' || statusFilter === 'missing') && filteredFaltantes.map((item: any, idx: number) => (
-                <div key={`missing-${idx}`} className="bg-serato-card border border-rose-950/50 p-2 rounded flex items-center justify-between opacity-90">
-                  <div className="flex items-center gap-2 truncate max-w-xl">
-                    <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-800/40 px-1.5 py-0.2 rounded font-bold shrink-0">
-                      {matchResult?.tipo_origem === 'folder' ? 'INÉDITA / NOVA' : 'FALTANDO'}
-                    </span>
-                    <span className="text-slate-200 font-sans truncate">{item.solicitado}</span>
-                    {item.novo_bitrate ? (
-                      <span className="text-[10px] text-slate-500 font-mono">
-                        ({item.novo_bitrate}k {item.novo_formato})
+                return (
+                  <div
+                    key={`missing-${idx}`}
+                    className={`border p-2 rounded flex items-center justify-between transition ${
+                      isIntegrated
+                        ? 'bg-emerald-950/30 border-emerald-700/60'
+                        : 'bg-serato-card border-rose-950/50 hover:bg-rose-950/10'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 truncate max-w-xl">
+                      {/* Checkbox por arquivo para mover/integrar */}
+                      {matchResult?.tipo_origem === 'folder' && (
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectMissing(key)}
+                          className="rounded border-slate-700 bg-serato-dark text-emerald-400 focus:ring-0 cursor-pointer shrink-0"
+                        />
+                      )}
+
+                      {isIntegrated ? (
+                        <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-600 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          INTEGRADA NA CRATE
+                        </span>
+                      ) : (
+                        <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-800/40 px-1.5 py-0.2 rounded font-bold shrink-0">
+                          {matchResult?.tipo_origem === 'folder' ? 'INÉDITA / NOVA' : 'FALTANDO'}
+                        </span>
+                      )}
+
+                      <span className="text-slate-200 font-sans truncate">{item.solicitado}</span>
+                      {item.novo_bitrate ? (
+                        <span className="text-[10px] text-slate-500 font-mono">
+                          ({item.novo_bitrate}k {item.novo_formato})
+                        </span>
+                      ) : null}
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {/* Botão de Integrar faixa individual na Crate */}
+                      {matchResult?.tipo_origem === 'folder' && !isIntegrated && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenIntegrateModal([item])}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border border-emerald-600/50 transition cursor-pointer"
+                          title="Copia esta música inédita para uma Crate existente ou nova no HD"
+                        >
+                          <PlusCircle className="w-3 h-3 text-emerald-400" />
+                          <span>Integrar em Crate...</span>
+                        </button>
+                      )}
+
+                      <span className="text-[10px] text-serato-orange shrink-0">
+                        {matchResult?.tipo_origem === 'folder' ? 'Não existe no HD Master' : 'Não encontrada no HD'}
                       </span>
-                    ) : null}
+                    </div>
                   </div>
-                  <span className="text-[10px] text-serato-orange shrink-0">
-                    {matchResult?.tipo_origem === 'folder' ? 'Não existe no HD Master' : 'Não encontrada no HD'}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
 
               {filteredEncontradas.length === 0 && filteredFaltantes.length === 0 && (
                 <div className="py-8 text-center text-slate-500 font-sans">
@@ -490,6 +850,212 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           )}
         </div>
       </div>
+
+      {/* Modal de Integração de Músicas na Crate (Crate Existente vs Nova Crate) */}
+      {integrateModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-emerald-500/40 rounded-xl p-5 max-w-lg w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <FolderPlus className="w-5 h-5 text-emerald-400" />
+                <h4 className="text-sm font-bold text-white">Integrar Faixas na Biblioteca Serato</h4>
+              </div>
+              <button
+                onClick={() => setIntegrateModal(prev => ({ ...prev, isOpen: false }))}
+                className="text-slate-400 hover:text-white p-1 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="text-xs text-slate-300">
+                Você selecionou <b className="text-emerald-400 font-mono">{integrateModal.itemsToIntegrate.length}</b> faixa(s) inédita(s) para copiar para sua biblioteca:
+              </div>
+
+              {/* Seletor de Modo: Crate Existente ou Nova Crate */}
+              <div className="grid grid-cols-2 gap-2 bg-slate-950 p-1 rounded-lg border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIntegrateModal(prev => ({ ...prev, targetMode: 'existing' }))}
+                  className={`py-1.5 px-3 rounded text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    integrateModal.targetMode === 'existing'
+                      ? 'bg-emerald-600 text-white shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Folder className="w-3.5 h-3.5" />
+                  <span>Crate Existente</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setIntegrateModal(prev => ({ ...prev, targetMode: 'new' }))}
+                  className={`py-1.5 px-3 rounded text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    integrateModal.targetMode === 'new'
+                      ? 'bg-emerald-600 text-white shadow'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <PlusCircle className="w-3.5 h-3.5" />
+                  <span>Criar Nova Crate</span>
+                </button>
+              </div>
+
+              {integrateModal.targetMode === 'existing' ? (
+                <div className="space-y-2.5 bg-slate-950/60 p-3 rounded-lg border border-slate-800">
+                  <div className="space-y-1">
+                    <label className="text-xs text-slate-300 font-semibold">Selecione a Crate Principal:</label>
+                    <select
+                      value={integrateModal.selectedCrate}
+                      onChange={(e) => {
+                        const newCr = e.target.value;
+                        const crData = cratesList.find(c => c.nome === newCr);
+                        setIntegrateModal(prev => ({
+                          ...prev,
+                          selectedCrate: newCr,
+                          selectedSubcrate: crData?.subcrates?.[0]?.nome || ''
+                        }));
+                      }}
+                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:border-emerald-500 focus:outline-none cursor-pointer"
+                    >
+                      {cratesList.map(c => (
+                        <option key={c.nome} value={c.nome}>📁 {c.nome} ({c.total} faixas)</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {activeCrateData && activeCrateData.subcrates?.length > 0 && (
+                    <div className="space-y-1">
+                      <label className="text-xs text-slate-300 font-semibold">Subcrate (Opcional):</label>
+                      <select
+                        value={integrateModal.selectedSubcrate}
+                        onChange={(e) => setIntegrateModal(prev => ({ ...prev, selectedSubcrate: e.target.value }))}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-serato-cyan font-mono focus:border-emerald-500 focus:outline-none cursor-pointer"
+                      >
+                        <option value="">↳ Na Raiz de {integrateModal.selectedCrate}</option>
+                        {activeCrateData.subcrates.map((sub: any) => (
+                          <option key={sub.nome} value={sub.nome}>↳ Subcrate: {sub.nome} ({sub.total} faixas)</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-2 bg-slate-950/60 p-3 rounded-lg border border-slate-800">
+                  <label className="text-xs text-slate-300 font-semibold">Nome da Nova Crate / Pasta:</label>
+                  <input
+                    type="text"
+                    value={integrateModal.newCrateName}
+                    onChange={(e) => setIntegrateModal(prev => ({ ...prev, newCrateName: e.target.value }))}
+                    placeholder="Ex: Afro House 2026, Novidades Funk, etc."
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white font-mono focus:border-emerald-500 focus:outline-none"
+                    autoFocus
+                  />
+                  <p className="text-[11px] text-slate-400">
+                    💡 Uma nova pasta será criada na sua raiz de músicas do Serato.
+                  </p>
+                </div>
+              )}
+
+              {/* Pré-visualização do destino no HD */}
+              <div className="text-[11px] bg-slate-950 p-2.5 rounded border border-white/5 space-y-1">
+                <div className="text-slate-400 font-medium">Pasta de Destino no HD:</div>
+                <div className="text-emerald-400 font-mono text-[11px] truncate" title={previewTargetDestination}>
+                  {previewTargetDestination}
+                </div>
+              </div>
+
+              {integrateModal.error && (
+                <div className="text-xs text-rose-400 bg-rose-950/50 border border-rose-800 p-2 rounded">
+                  {integrateModal.error}
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setIntegrateModal(prev => ({ ...prev, isOpen: false }))}
+                disabled={integrateModal.isSaving}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmIntegrate}
+                disabled={integrateModal.isSaving}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition cursor-pointer shadow-lg shadow-emerald-950/40"
+              >
+                {integrateModal.isSaving ? 'Copiando Faixas...' : `Copiar e Integrar (${integrateModal.itemsToIntegrate.length} faixas)`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Substituição de Upgrades */}
+      {upgradeModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-slate-900 border border-serato-gold/40 rounded-xl p-5 max-w-lg w-full shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-white/10 pb-3">
+              <div className="flex items-center gap-2">
+                <Zap className="w-5 h-5 text-serato-gold" />
+                <h4 className="text-sm font-bold text-white">Substituir com Upgrade de Qualidade</h4>
+              </div>
+              <button
+                onClick={() => setUpgradeModal({ isOpen: false, itemsToUpgrade: [], isProcessing: false })}
+                className="text-slate-400 hover:text-white p-1 rounded cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-2.5 text-xs text-slate-300">
+              <p>
+                Deseja sobrescrever as <b className="text-serato-gold font-mono">{upgradeModal.itemsToUpgrade.length}</b> faixas antigas de menor qualidade pelas novas versões de alta fidelidade?
+              </p>
+              
+              <div className="bg-slate-950 p-3 rounded-lg border border-slate-800 space-y-1.5 text-[11px]">
+                <div className="text-emerald-400 font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Substituição no próprio local do HD</span>
+                </div>
+                <p className="text-slate-400">
+                  Os arquivos serão sobrescritos exatamente onde já moram na sua biblioteca. Nenhuma pasta será movimentada.
+                </p>
+                <div className="text-serato-cyan font-bold flex items-center gap-1.5 pt-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Preservação de Hot Cues e Beatgrid</span>
+                </div>
+                <p className="text-slate-400">
+                  Todas as tags e marcadores do Serato DJ serão clonados para a nova faixa, e os áudios antigos serão guardados com segurança na quarentena.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-white/10">
+              <button
+                type="button"
+                onClick={() => setUpgradeModal({ isOpen: false, itemsToUpgrade: [], isProcessing: false })}
+                disabled={upgradeModal.isProcessing}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 text-slate-300 hover:bg-slate-700 transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmReplaceUpgrades}
+                disabled={upgradeModal.isProcessing}
+                className="px-4 py-1.5 rounded-lg text-xs font-bold bg-serato-gold hover:opacity-90 text-black transition cursor-pointer shadow-lg shadow-amber-950/40"
+              >
+                {upgradeModal.isProcessing ? 'Substituindo...' : `Substituir ${upgradeModal.itemsToUpgrade.length} Faixas no Local`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
