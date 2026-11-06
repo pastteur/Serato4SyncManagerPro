@@ -169,26 +169,7 @@ def inspect_track_health(filepath: Path, max_duration_suspicious: float = 60.0):
             "sample_rate": sample_rate
         }
 
-    # 4. Frequência de amostragem
-    if sample_rate > 0 and sample_rate != 44100:
-        is_48k = (sample_rate == 48000)
-        detalhes_msg = (
-            "Frequência de estúdio/broadcast: 48.000 Hz. Compatível e 100% segura no Serato DJ Pro / macOS (resampling transparente sem alteração de pitch). Normalização para 44.1 kHz recomendada apenas se for usar CDJs Pioneer antigas via USB."
-            if is_48k
-            else f"Taxa de amostragem reduzida: {sample_rate} Hz (corta frequências agudas acima de {sample_rate // 2} Hz). Recomendado upgrade para 44.100 Hz."
-        )
-        return {
-            "status": "informativo" if is_48k else "atencao",
-            "categoria": "sample_rate",
-            "tipo_problema": "sample_rate_estudio" if is_48k else "sample_rate_reduzido",
-            "severidade": "baixa" if is_48k else "alta",
-            "detalhes": detalhes_msg,
-            "duracao": round(duration, 1),
-            "bitrate": round(bitrate / 1000) if bitrate else 0,
-            "sample_rate": sample_rate
-        }
-
-    # 5. Saudável
+    # 4. Saudável (44.1k, 48k, 88.2k, 96k rodam perfeitamente nos softwares modernos de DJ)
     return {
         "status": "saudavel",
         "categoria": "saudavel",
@@ -233,7 +214,7 @@ def scan_audio_health(
             "sucesso": True,
             "total_analisadas": 0,
             "total_problemas": 0,
-            "categorias_contagem": {"truncada": 0, "curta": 0, "baixa_qualidade": 0, "sample_rate": 0, "corrompida": 0},
+            "categorias_contagem": {"truncada": 0, "curta": 0, "baixa_qualidade": 0, "corrompida": 0},
             "items": []
         }
         if stream_progress:
@@ -258,7 +239,6 @@ def scan_audio_health(
         "truncada": 0,
         "curta": 0,
         "baixa_qualidade": 0,
-        "sample_rate": 0,
         "corrompida": 0
     }
 
@@ -595,7 +575,7 @@ def main():
     parser.add_argument("--subcrate", type=str, default="", help="Subcrate")
     parser.add_argument("--no-subcrates", action="store_true", help="Não incluir subcrates")
     parser.add_argument("--max-duration", type=float, default=60.0, help="Duração máxima suspeita (segundos)")
-    parser.add_argument("--categoria", type=str, default="todas", choices=["todas", "truncada", "curta", "baixa_qualidade", "sample_rate", "corrompida"], help="Categoria em destaque")
+    parser.add_argument("--categoria", type=str, default="todas", choices=["todas", "truncada", "curta", "baixa_qualidade", "corrompida"], help="Categoria em destaque")
     parser.add_argument("--limit", type=int, default=250, help="Limite de faixas na listagem")
     parser.add_argument("--offset", type=int, default=0, help="Offset de paginação")
     parser.add_argument("--repair-online", type=str, default="", help="Caminho do arquivo a reparar online")

@@ -553,24 +553,12 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <button
             type="button"
             onClick={handleRepairBatchOnline}
-            disabled={isLoading || isRepairingOnline || isResamplingLocal || selectedIds.size === 0}
+            disabled={isLoading || isRepairingOnline || selectedIds.size === 0}
             className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-cyan to-blue-500 hover:opacity-90 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-30 cursor-pointer"
-            title="Busca e baixa versões completas em 320kbps (44.1kHz) substituindo as faixas selecionadas"
+            title="Busca e baixa versões completas em 320kbps substituindo as faixas com problemas selecionadas"
           >
             <DownloadCloud className={`w-3.5 h-3.5 ${isRepairingOnline ? 'animate-bounce' : ''}`} />
             <span>{isRepairingOnline ? 'Baixando em 320k...' : `🌐 Corrigir Online 320k (${selectedIds.size})`}</span>
-          </button>
-
-          {/* Botão de Normalização 44.1k FFmpeg */}
-          <button
-            type="button"
-            onClick={handleBatchResample}
-            disabled={isLoading || isRepairingOnline || isResamplingLocal || selectedIds.size === 0}
-            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-purple-900/80 hover:bg-purple-800 text-purple-200 border border-purple-600/50 shadow-lg shadow-purple-950/40 transition disabled:opacity-30 cursor-pointer"
-            title="Converte e normaliza arquivos para 44.100 Hz (320kbps CBR) localmente via FFmpeg"
-          >
-            <Zap className={`w-3.5 h-3.5 ${isResamplingLocal ? 'animate-bounce text-purple-300' : 'text-purple-400'}`} />
-            <span>{isResamplingLocal ? 'Normalizando...' : `⚡ Normalizar 44.1k (${selectedIds.size})`}</span>
           </button>
 
           {/* Botão de Auditoria */}
@@ -723,24 +711,6 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           <span>📉 Baixa Qualidade (&lt; 192k)</span>
           <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-indigo-950 font-mono text-indigo-300">
             {categoryCounts.baixa_qualidade}
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => {
-            setSelectedCategory('sample_rate');
-            loadHealthScan('sample_rate', maxDuration);
-          }}
-          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
-            selectedCategory === 'sample_rate'
-              ? 'bg-purple-950 text-purple-200 border-purple-500 shadow'
-              : 'bg-serato-card text-purple-400/80 border-serato-cardBorder hover:text-purple-200'
-          }`}
-        >
-          <span>📻 Frequência Não-DJ (≠ 44.1k)</span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-purple-950 font-mono text-purple-300">
-            {categoryCounts.sample_rate || 0}
           </span>
         </button>
 
@@ -921,8 +891,6 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       ? 'bg-amber-950/20 border-amber-900/50 hover:bg-amber-950/30'
                       : item.categoria === 'corrompida'
                       ? 'bg-red-950/20 border-red-900/50 hover:bg-red-950/30'
-                      : item.categoria === 'sample_rate'
-                      ? 'bg-purple-950/20 border-purple-900/50 hover:bg-purple-950/30'
                       : 'bg-indigo-950/20 border-indigo-900/50 hover:bg-indigo-950/30'
                   } ${isSelected ? 'ring-1 ring-serato-cyan' : ''}`}
                 >
@@ -943,8 +911,6 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                           ? 'bg-amber-950 text-amber-300 border border-amber-800'
                           : item.categoria === 'corrompida'
                           ? 'bg-red-950 text-red-300 border border-red-800'
-                          : item.categoria === 'sample_rate'
-                          ? 'bg-purple-950 text-purple-300 border border-purple-800'
                           : 'bg-indigo-950 text-indigo-300 border border-indigo-800'
                       }`}
                     >
@@ -954,8 +920,6 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                         ? '✂️ MUITO CURTA'
                         : item.categoria === 'corrompida'
                         ? '❌ CORROMPIDA'
-                        : item.categoria === 'sample_rate'
-                        ? '📻 NÃO-44.1k'
                         : '📉 BAIXA QUALIDADE'}
                     </span>
 
@@ -974,37 +938,10 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                     {item.bitrate_kbps > 0 && (
                       <span className="text-serato-cyan">{item.bitrate_kbps} kbps</span>
                     )}
-                    {item.sample_rate > 0 && item.sample_rate !== 44100 && (
-                      <span className="text-purple-300 text-[10px] bg-purple-950/80 px-1 py-0.2 rounded border border-purple-700/50">
+                    {item.sample_rate > 0 && (
+                      <span className="text-slate-500 text-[10px] bg-slate-900 px-1 py-0.2 rounded border border-white/5">
                         {item.sample_rate} Hz
                       </span>
-                    )}
-
-                    {/* Botão Normalizar Frequência Local */}
-                    {item.categoria === 'sample_rate' && (
-                      <button
-                        type="button"
-                        onClick={() => handleResampleSingle(item)}
-                        disabled={isResamplingLocal || isRepairingOnline}
-                        className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold transition cursor-pointer border ${
-                          processingSingleId === item.id && processingSingleAction === 'resample'
-                            ? 'bg-purple-900 text-purple-200 border-purple-400 animate-pulse'
-                            : 'bg-purple-950/60 hover:bg-purple-900 text-purple-300 border-purple-700/50 disabled:opacity-40'
-                        }`}
-                        title="Normaliza frequência para 44.100 Hz (320kbps CBR) localmente via FFmpeg"
-                      >
-                        {processingSingleId === item.id && processingSingleAction === 'resample' ? (
-                          <>
-                            <RefreshCw className="w-3 h-3 text-purple-300 animate-spin" />
-                            <span>Convertendo...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Zap className="w-3 h-3 text-purple-400" />
-                            <span>44.1k</span>
-                          </>
-                        )}
-                      </button>
                     )}
 
                     {/* Botão Baixar Online */}
