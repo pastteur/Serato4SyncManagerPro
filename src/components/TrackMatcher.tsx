@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { StatusBar } from './StatusBar';
 import {
   Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle,
   ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap,
@@ -25,6 +26,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
   const [isMatching, setIsMatching] = useState<boolean>(false);
   const [matchResult, setMatchResult] = useState<any>(null);
   const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
+  const [matchProgress, setMatchProgress] = useState<{ processados: number; total: number; percentual: number; faixa: string } | null>(null);
 
   // Filtros de busca e status para os resultados
   const [searchTerm, setSearchTerm] = useState<string>('');
@@ -77,6 +79,31 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
   });
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+
+  // Progresso do cruzamento vem por evento emitido pelo backend
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<string>('match-progress', (event) => {
+        try {
+          const data = JSON.parse(event.payload);
+          if (data.tipo === 'progresso') {
+            setMatchProgress({
+              processados: data.processados,
+              total: data.total,
+              percentual: data.percentual,
+              faixa: data.faixa,
+            });
+          }
+        } catch {
+          /* linha inválida: ignorar */
+        }
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
+  }, [isTauri]);
 
   // Helper para abrir no Finder nativo com fallback
   const revealPath = async (filePath?: string) => {
@@ -493,6 +520,19 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           </button>
         </div>
       </div>
+
+      <StatusBar
+        phase={isMatching ? 'running' : matchResult ? 'done' : 'idle'}
+        label={
+          isMatching
+            ? (matchProgress ? `${Math.round(matchProgress.percentual)}% · ${matchProgress.faixa}` : 'Preparando índice da biblioteca...')
+            : matchResult
+              ? `${matchResult.total_encontradas ?? 0} no HD · ${matchResult.total_faltantes ?? 0} faltantes · ${matchResult.total_divergentes ?? 0} divergentes`
+              : 'Selecione a origem e clique em Cruzar Playlist / Pasta'
+        }
+        percent={isMatching ? matchProgress?.percentual ?? null : matchResult ? 100 : null}
+        detail={isMatching && matchProgress ? `${matchProgress.processados}/${matchProgress.total}` : undefined}
+      />
 
       {/* Input Controls */}
       <div className="bg-serato-card p-3 rounded-lg border border-serato-cardBorder space-y-2.5 shrink-0">

@@ -51,6 +51,18 @@ VERSION_KEYWORDS = {
 }
 
 
+def _ensure_seal(req: dict) -> str:
+    """Calcula o selo de áudio apenas uma vez, sob demanda, para uma faixa de origem."""
+    if req.get("audio_seal"):
+        return req["audio_seal"]
+    caminho = req.get("filepath")
+    if not caminho:
+        return ""
+    seal = compute_audio_seal(caminho)
+    req["audio_seal"] = seal
+    return seal
+
+
 def compute_audio_seal(filepath_str: str) -> str:
     """Calcula a impressão digital SHA-256 do fluxo de áudio puro ignorando tags ID3."""
     try:
@@ -215,7 +227,10 @@ def parse_incoming_folder(folder_path_str: str):
 
                 raw_str = f"{artist} - {title}" if artist else stem
                 version_tags = list(extract_version_descriptors(f"{stem} {title}"))
-                seal = compute_audio_seal(str(full_p))
+                # O selo de áudio (SHA-256 do arquivo inteiro) é caro e só é
+                # necessário quando há upgrade a confirmar. Calculado sob demanda
+                # em _ensure_seal(); antes, ler milhares de arquivos travava o início.
+                seal = ""
 
                 tracks.append({
                     "raw": raw_str,
@@ -405,7 +420,40 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
     matched = []
     missing = []
 
-    for req in tracks_to_match:
+    # Índice invertido por token: reduz o cruzamento de (novidades x biblioteca)
+    # para apenas candidatos que compartilham tokens. Sem isso, 2.6 mil novidades
+    # contra 16 mil faixas geravam ~44 milhões de comparações com difflib.
+    token_index = {}
+    norm_index = {}
+    for idx, lib in enumerate(library):
+        norm_index.setdefault(lib["full_norm"], []).append(idx)
+        norm_index.setdefault(lib["norm"], []).append(idx)
+        for tok in set(lib["full_norm"].split()) | set(lib["norm"].split()):
+            if len(tok) > 2 and tok not in STOP_WORDS:
+                token_index.setdefault(tok, []).append(idx)
+
+    def candidate_indices(target_norm, target_full):
+        """Retorna índices candidatos: casamento exato + tokens em comum, por raridade."""
+        candidatos = set(norm_index.get(target_full, ()))
+        candidatos.update(norm_index.get(target_norm, ()))
+        tokens = [t for t in set(target_full.split()) | set(target_norm.split())
+                  if len(t) > 2 and t not in STOP_WORDS]
+        # Ordena tokens do mais raro ao mais comum e limita a busca
+        tokens.sort(key=lambda t: len(token_index.get(t, ())))
+        for tok in tokens[:6]:
+            candidatos.update(token_index.get(tok, ()))
+        return candidatos
+
+    total_reqs = max(1, len(tracks_to_match))
+    for req_idx, req in enumerate(tracks_to_match, 1):
+        if req_idx % 25 == 0 or req_idx == total_reqs:
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": req_idx,
+                "total": total_reqs,
+                "percentual": round(req_idx * 100.0 / total_reqs, 1),
+                "faixa": req.get("filename") or req.get("raw", ""),
+            }, ensure_ascii=False), flush=True)
         target_norm = req["clean_title"]
         target_art = req["clean_artist"]
         target_full = req.get("full_norm", normalize_full_str(req["raw"]))
@@ -416,7 +464,9 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
         best_match = None
         best_score = 0
 
-        for lib in library:
+        # Percorre apenas os candidatos do índice (não a biblioteca inteira)
+        for lib_idx in candidate_indices(target_norm, target_full):
+            lib = library[lib_idx]
             lib_versions = lib["version_tags"]
             has_remix_lib = any('remix' in v or 'mix' in v for v in lib_versions)
             has_live_lib = any('live' in v or 'ao vivo' in v for v in lib_versions)
@@ -495,7 +545,7 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
                 item_match["novo_formato"] = req.get("ext", "").replace(".", "").upper()
                 item_match["novo_tamanho"] = req.get("filesize", 0)
                 item_match["novo_duracao"] = req.get("duration", 0.0)
-                item_match["audio_seal_novo"] = req.get("audio_seal", "")
+                item_match["audio_seal_novo"] = _ensure_seal(req)
 
                 # Avalia qualidade e duração física da biblioteca existente
                 lib_bitrate = 0
@@ -588,7 +638,7 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
                 missing_item["novo_formato"] = req.get("ext", "").replace(".", "").upper()
                 missing_item["novo_tamanho"] = req.get("filesize", 0)
                 missing_item["novo_duracao"] = req.get("duration", 0.0)
-                missing_item["audio_seal_novo"] = req.get("audio_seal", "")
+                missing_item["audio_seal_novo"] = _ensure_seal(req)
                 missing_item["status_comparacao"] = "FAIXA_NOVA"
 
             missing.append(missing_item)

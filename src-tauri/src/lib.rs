@@ -1316,6 +1316,91 @@ mod commands {
         Err(format!("Erro em {}: {}", script, msg))
     }
 
+    /// Duplicados multi-pasta, com progresso emitido em "duplicates-progress".
+    #[tauri::command]
+    pub async fn scan_duplicates_multi(
+        app: AppHandle,
+        window: Window,
+        roots: Vec<String>,
+        include_serato_path: Option<String>,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "duplicates_tool.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script).arg("--roots");
+        for r in &roots {
+            cmd.arg(r);
+        }
+        if let Some(s) = include_serato_path {
+            if !s.trim().is_empty() {
+                cmd.arg("--include-serato").arg(s);
+            }
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar análise de duplicados: {}", e))?;
+        let mut final_json = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            for line_res in BufReader::new(stdout).lines() {
+                if let Ok(line) = line_res {
+                    let t = line.trim().to_string();
+                    if t.starts_with('{') {
+                        if t.contains("\"tipo\": \"progresso\"") {
+                            let _ = window.emit("duplicates-progress", t);
+                        } else {
+                            final_json = t;
+                        }
+                    }
+                }
+            }
+        }
+        let status = child.wait().map_err(|e| format!("Falha ao aguardar duplicados: {}", e))?;
+        if !status.success() && final_json.is_empty() {
+            return Err("Erro na execução da análise de duplicados".into());
+        }
+        Ok(final_json)
+    }
+
+    #[tauri::command]
+    pub async fn duplicates_move_paths(
+        app: AppHandle,
+        paths: Vec<String>,
+        destination: String,
+    ) -> Result<String, String> {
+        bloqueio_serato("mover arquivos da biblioteca")?;
+        let mut args: Vec<String> = vec!["--move".into()];
+        args.extend(paths);
+        args.push("--destination".into());
+        args.push(destination);
+        run_py_json(&app, "duplicates_tool.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn duplicates_trash_paths(
+        app: AppHandle,
+        paths: Vec<String>,
+    ) -> Result<String, String> {
+        let mut args: Vec<String> = vec!["--trash".into()];
+        args.extend(paths);
+        run_py_json(&app, "duplicates_tool.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn crate_add_paths(
+        app: AppHandle,
+        serato_path: String,
+        crate_name: String,
+        paths: Vec<String>,
+    ) -> Result<String, String> {
+        bloqueio_serato("gravar em uma crate")?;
+        let mut args: Vec<String> = vec![
+            "--serato".into(), serato_path,
+            "--crate".into(), crate_name,
+            "--paths".into(),
+        ];
+        args.extend(paths);
+        run_py_json(&app, "crate_ops.py", &args)
+    }
+
     fn bloqueio_serato(acao: &str) -> Result<(), String> {
         if is_serato_running() {
             return Err(format!(
@@ -1747,6 +1832,7 @@ mod commands {
     #[tauri::command]
     pub async fn match_tracks(
         app: AppHandle,
+        window: Window,
         input_type: String,
         input_data: String,
         mp3_path: String,
@@ -1782,9 +1868,28 @@ mod commands {
             }
         }
 
-        let output = cmd.output().map_err(|e| format!("Falha no Track Matcher: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| format!("Falha no Track Matcher: {}", e))?;
+
+        let mut final_json = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            for line_res in BufReader::new(stdout).lines() {
+                if let Ok(line) = line_res {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.starts_with('{') {
+                        continue;
+                    }
+                    // Progresso é repassado à interface; a última linha é o resultado
+                    let _ = window.emit("match-progress", &trimmed);
+                    final_json = trimmed;
+                }
+            }
+        }
+        let _ = child.wait();
+        if final_json.is_empty() {
+            return Err("Track Matcher não retornou resultado".into());
+        }
+        Ok(final_json)
     }
 
     #[tauri::command]
