@@ -2,13 +2,15 @@ import React, { useState, useMemo } from 'react';
 import { 
   FolderTree, Music, Search, Disc, Folder, Eye, CheckCircle2, Sparkles, 
   ChevronRight, ChevronDown, Layers, AlertTriangle, Copy, Check, Filter, 
-  FolderPlus, ChevronsDown, ChevronsUp, FileText
+  FolderPlus, ChevronsDown, ChevronsUp, FileText, Play
 } from 'lucide-react';
 import { SyncSummary, CrateTreeItem, CrateTrack } from '../types';
+import { PlayingTrackInfo } from './AudioPlayerBar';
 
 interface CrateTreePreviewProps {
   summary: SyncSummary | null;
   onOpenFileInFinder?: (filePath: string) => void;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
 }
 
 export interface EnrichedCrateTrack extends CrateTrack {
@@ -17,7 +19,7 @@ export interface EnrichedCrateTrack extends CrateTrack {
   crate_master: string;
 }
 
-export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onOpenFileInFinder }) => {
+export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onOpenFileInFinder, onPlayTrack }) => {
   // Estado de seleção: '__ALL__' seleciona a biblioteca geral com todas as músicas alocadas
   const [selectedCrateKey, setSelectedCrateKey] = useState<string>('__ALL__');
   const [trackSearch, setTrackSearch] = useState<string>('');
@@ -577,16 +579,32 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onO
                         </td>
 
                         <td className="py-1.5 px-2 text-center">
-                          {onOpenFileInFinder && (
-                            <button
-                              type="button"
-                              onClick={() => onOpenFileInFinder(track.caminho_abs || track.caminho_rel)}
-                              className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
-                              title="Revelar no Finder"
-                            >
-                              <Eye className="w-3.5 h-3.5 text-serato-cyan hover:scale-110 transition-transform" />
-                            </button>
-                          )}
+                          <div className="flex items-center justify-center gap-1">
+                            {onPlayTrack && (
+                              <button
+                                type="button"
+                                onClick={() => onPlayTrack({
+                                  caminho: track.caminho_abs || track.caminho_rel,
+                                  nome: track.nome
+                                })}
+                                className="p-1 rounded hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer"
+                                title="Tocar no Player nativo"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current hover:scale-110 transition-transform" />
+                              </button>
+                            )}
+
+                            {onOpenFileInFinder && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenFileInFinder(track.caminho_abs || track.caminho_rel)}
+                                className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+                                title="Revelar no Finder"
+                              >
+                                <Eye className="w-3.5 h-3.5 text-serato-cyan hover:scale-110 transition-transform" />
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );

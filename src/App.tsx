@@ -726,6 +726,7 @@ export const App: React.FC = () => {
               <CrateTreePreview
                 summary={summary}
                 onOpenFileInFinder={handleOpenFileInFinder}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 
