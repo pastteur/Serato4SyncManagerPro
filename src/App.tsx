@@ -744,6 +744,7 @@ export const App: React.FC = () => {
                 onAddLog={addLog}
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onMoveToTrash={handleMoveToTrash}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 

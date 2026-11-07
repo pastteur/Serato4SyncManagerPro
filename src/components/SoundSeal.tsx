@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Shield, ShieldCheck, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw, XCircle } from 'lucide-react';
+import { Shield, ShieldCheck, Sparkles, RefreshCw, AlertCircle, CheckCircle2, Search, ArrowRight, Music, Disc3, Folder, Trash2, Eye, CheckSquare, Square, Zap, RotateCcw, XCircle, Play } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
+import { PlayingTrackInfo } from './AudioPlayerBar';
 
 interface SoundSealProps {
   mp3Path: string;
@@ -8,6 +9,7 @@ interface SoundSealProps {
   onAddLog: (message: string) => void;
   onOpenFileInFinder?: (filePath: string) => void;
   onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
 }
 
 export const SoundSeal: React.FC<SoundSealProps> = ({
@@ -15,7 +17,8 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
   seratoPath,
   onAddLog,
   onOpenFileInFinder,
-  onMoveToTrash
+  onMoveToTrash,
+  onPlayTrack
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<'seal' | 'relocate'>('seal');
   const [status, setStatus] = useState<any>(null);
@@ -1574,6 +1577,21 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                                 {f.bpm && <span className="text-slate-400">{Math.round(parseFloat(f.bpm))} BPM</span>}
                                 {f.key && <span className="text-serato-cyan font-bold">{f.key}</span>}
 
+                                {onPlayTrack && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onPlayTrack({
+                                      caminho: f.caminho,
+                                      nome: f.nome,
+                                      bpm: f.bpm ? parseFloat(f.bpm) : undefined
+                                    })}
+                                    className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white cursor-pointer transition shrink-0"
+                                    title="Tocar no Player nativo"
+                                  >
+                                    <Play className="w-3.5 h-3.5 fill-current" />
+                                  </button>
+                                )}
+
                                 {onOpenFileInFinder && (
                                   <button
                                     type="button"
@@ -1861,6 +1879,20 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                               <div className="flex items-center gap-2">
                                 {cand.bpm && <span className="text-[10px] font-mono text-slate-400">{Math.round(parseFloat(cand.bpm))} BPM</span>}
                                 {cand.key && <span className="text-[10px] font-mono text-serato-cyan">{cand.key}</span>}
+                                {onPlayTrack && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onPlayTrack({
+                                      caminho: cand.caminho,
+                                      nome: cand.nome,
+                                      bpm: cand.bpm ? parseFloat(cand.bpm) : undefined
+                                    })}
+                                    className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white cursor-pointer transition shrink-0"
+                                    title="Tocar no Player nativo"
+                                  >
+                                    <Play className="w-3.5 h-3.5 fill-current" />
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => handleRelinkSingle(item.faixa_perdida, cand.caminho, item.nome)}
