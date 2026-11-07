@@ -2587,7 +2587,11 @@ pub fn run() {
             commands::smart_crate_refresh,
             commands::smart_crate_list,
             commands::smart_crate_delete,
-            commands::scan_new_tracks
+            commands::scan_new_tracks,
+            commands::scan_duplicates_multi,
+            commands::duplicates_move_paths,
+            commands::duplicates_trash_paths,
+            commands::crate_add_paths
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");

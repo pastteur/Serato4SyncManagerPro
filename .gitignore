@@ -36,3 +36,4 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+dist_old_root/

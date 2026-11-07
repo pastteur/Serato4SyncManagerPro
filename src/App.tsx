@@ -553,111 +553,92 @@ export const App: React.FC = () => {
             </div>
           </nav>
 
+          {/* Conteúdo persistente das abas: montadas em background com 'hidden' para não interromper atividades */}
           <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col relative">
-          {activeTab === 'logs' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <TerminalLogs
-              logs={logs}
-              onClear={() => setLogs([])}
-              isRunning={isRunning}
-            />
+            <div className={activeTab === 'logs' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <TerminalLogs
+                logs={logs}
+                onClear={() => setLogs([])}
+                isRunning={isRunning}
+              />
             </div>
-          )}
 
-          {activeTab === 'duplicates' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <DuplicatesAudit
-              duplicates={summary?.duplicados || []}
-              csvPath={summary?.csv_duplicados || null}
-              onOpenLogsFolder={handleOpenLogsFolder}
-              onExportCsv={handleOpenLogsFolder}
-              onOpenFileInFinder={handleOpenFileInFinder}
-              onMoveToTrash={handleMoveToTrash}
-            />
+            <div className={activeTab === 'duplicates' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <DuplicatesAudit
+                duplicates={summary?.duplicados || []}
+                csvPath={summary?.csv_duplicados || null}
+                onOpenLogsFolder={handleOpenLogsFolder}
+                onExportCsv={handleOpenLogsFolder}
+                onOpenFileInFinder={handleOpenFileInFinder}
+                onMoveToTrash={handleMoveToTrash}
+              />
             </div>
-          )}
 
-          {activeTab === 'tree' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <CrateTreePreview
-              summary={summary}
-              onOpenFileInFinder={handleOpenFileInFinder}
-            />
+            <div className={activeTab === 'tree' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <CrateTreePreview
+                summary={summary}
+                onOpenFileInFinder={handleOpenFileInFinder}
+              />
             </div>
-          )}
 
-          {activeTab === 'tagDoctor' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <TagDoctor
-              mp3Path={mp3Path}
-              onAddLog={addLog}
-              onOpenFileInFinder={handleOpenFileInFinder}
-            />
+            <div className={activeTab === 'tagDoctor' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <TagDoctor
+                mp3Path={mp3Path}
+                onAddLog={addLog}
+                onOpenFileInFinder={handleOpenFileInFinder}
+              />
             </div>
-          )}
 
-          {activeTab === 'soundSeal' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <SoundSeal
-              mp3Path={mp3Path}
-              seratoPath={seratoPath}
-              onAddLog={addLog}
-              onOpenFileInFinder={handleOpenFileInFinder}
-              onMoveToTrash={handleMoveToTrash}
-            />
+            <div className={activeTab === 'soundSeal' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <SoundSeal
+                mp3Path={mp3Path}
+                seratoPath={seratoPath}
+                onAddLog={addLog}
+                onOpenFileInFinder={handleOpenFileInFinder}
+                onMoveToTrash={handleMoveToTrash}
+              />
             </div>
-          )}
 
-          {activeTab === 'matcher' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <TrackMatcher
-              mp3Path={mp3Path}
-              seratoPath={seratoPath}
-              onAddLog={addLog}
-              onOpenFileInFinder={handleOpenFileInFinder}
-            />
+            <div className={activeTab === 'matcher' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <TrackMatcher
+                mp3Path={mp3Path}
+                seratoPath={seratoPath}
+                onAddLog={addLog}
+                onOpenFileInFinder={handleOpenFileInFinder}
+              />
             </div>
-          )}
 
-          {activeTab === 'health' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <AudioHealth
-              mp3Path={mp3Path}
-              onAddLog={addLog}
-              onOpenFileInFinder={handleOpenFileInFinder}
-              onMoveToTrash={handleMoveToTrash}
-            />
+            <div className={activeTab === 'health' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <AudioHealth
+                mp3Path={mp3Path}
+                onAddLog={addLog}
+                onOpenFileInFinder={handleOpenFileInFinder}
+                onMoveToTrash={handleMoveToTrash}
+              />
             </div>
-          )}
 
-          {activeTab === 'autoCue' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <AutoCueGenerator
-              mp3Path={mp3Path}
-              onAddLog={addLog}
-              onOpenFileInFinder={handleOpenFileInFinder}
-            />
+            <div className={activeTab === 'autoCue' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <AutoCueGenerator
+                mp3Path={mp3Path}
+                onAddLog={addLog}
+                onOpenFileInFinder={handleOpenFileInFinder}
+              />
             </div>
-          )}
 
-          {activeTab === 'library' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <LibraryTools
-              onAddLog={addLog}
-              mp3Path={mp3Path}
-              seratoPath={seratoPath}
-            />
+            <div className={activeTab === 'library' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <LibraryTools
+                onAddLog={addLog}
+                mp3Path={mp3Path}
+                seratoPath={seratoPath}
+              />
             </div>
-          )}
 
-          {activeTab === 'backups' && (
-            <div className="flex-1 min-h-0 flex flex-col h-full">
-            <BackupManager
-              onAddLog={addLog}
-              onOpenLogsFolder={handleOpenLogsFolder}
-            />
+            <div className={activeTab === 'backups' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <BackupManager
+                onAddLog={addLog}
+                onOpenLogsFolder={handleOpenLogsFolder}
+              />
             </div>
-          )}
           </div>
         </div>
       </main>

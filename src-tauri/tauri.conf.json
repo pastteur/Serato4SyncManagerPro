@@ -48,6 +48,8 @@
       "../music_analysis.py": "music_analysis.py",
       "../journal.py": "journal.py",
       "../library_tools.py": "library_tools.py",
+      "../duplicates_tool.py": "duplicates_tool.py",
+      "../crate_ops.py": "crate_ops.py",
       "../run_local_agent.py": "run_local_agent.py",
       "../vendor": "vendor"
     },
