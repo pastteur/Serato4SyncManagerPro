@@ -412,6 +412,137 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
         return {"sucesso": False, "erro": str(e)}
 
 
+def audit_crate_cues_detailed(
+    mp3_base_dir: str,
+    crate_raiz: str = "",
+    subcrate: str = "",
+    include_subcrates: bool = True
+):
+    """
+    Realiza uma auditoria aprofundada de todas as faixas da Crate ou Subcrate,
+    detectando Hot Cues gravados, identificando se são os Auto-Cues padrão ou Hot Cues manuais de DJ,
+    e listando o que já está implantado vs pendente sem qualquer limite de paginação.
+    """
+    base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
+    if not base_path.exists():
+        return {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
+
+    target_dir = base_path
+    if crate_raiz:
+        target_dir = base_path / crate_raiz
+        if subcrate:
+            target_dir = target_dir / subcrate
+
+    if not target_dir.exists():
+        return {
+            "sucesso": True,
+            "total": 0,
+            "gravadas": 0,
+            "pendentes": 0,
+            "personalizadas": 0,
+            "padrao_autocue": 0,
+            "items": []
+        }
+
+    total_tracks = 0
+    total_with_cues = 0
+    total_custom = 0
+    total_padrao = 0
+    items = []
+
+    STANDARD_LABELS = {"INÍCIO", "INTRO", "DROP 1", "BREAK", "OUTRO", "DROP", "1", "2", "3", "4", "5"}
+
+    for root, dirs, files in os.walk(str(target_dir)):
+        if '/.' in root or '\\.' in root:
+            continue
+        if crate_raiz and not include_subcrates and not subcrate:
+            if root != str(target_dir):
+                dirs.clear()
+                continue
+            dirs.clear()
+
+        rel_folder = os.path.relpath(root, str(base_path))
+
+        for f in files:
+            if f.startswith('._') or f.startswith('.'):
+                continue
+            ext = Path(f).suffix.lower()
+            if ext in ('.mp3', '.m4a', '.flac', '.wav', '.aiff'):
+                total_tracks += 1
+                full_p = Path(root) / f
+                has_cues = False
+                cue_list = []
+                dur = 0.0
+                bpm = 0.0
+                tipo_cue = "Sem Cues"
+
+                if mutagen:
+                    try:
+                        audio = mutagen.File(str(full_p))
+                        if audio is not None:
+                            dur = getattr(audio.info, 'length', 0.0)
+                            if 'TBPM' in audio:
+                                try: bpm = float(str(audio['TBPM']).split('.')[0])
+                                except Exception: pass
+                            if 'GEOB:Serato Markers2' in audio:
+                                raw_m2 = audio['GEOB:Serato Markers2'].data
+                                cues_in = extract_cues_from_raw_tag(raw_m2)
+                                if cues_in:
+                                    has_cues = True
+                                    cue_list = cues_in
+                            elif 'GEOB:Serato Markers_' in audio:
+                                has_cues = True
+                    except Exception:
+                        pass
+
+                if has_cues:
+                    total_with_cues += 1
+                    # Verifica se são cues padrão ou personalizados de DJ
+                    is_custom = False
+                    if cue_list:
+                        for c in cue_list:
+                            lbl = (c.get("label") or "").strip().upper()
+                            if lbl and lbl not in STANDARD_LABELS:
+                                is_custom = True
+                                break
+                    if is_custom:
+                        total_custom += 1
+                        tipo_cue = "Personalizado DJ (Protegido)"
+                    else:
+                        total_padrao += 1
+                        tipo_cue = "Auto-Cue Padrão"
+
+                crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
+                c_raiz = crate_parts[0] if crate_parts else "Raiz"
+
+                cue_labels_summary = [f"#{c.get('index', i+1)} {c.get('label', '')}".strip() for i, c in enumerate(cue_list)]
+
+                items.append({
+                    "id": f"audit-cue-{total_tracks}",
+                    "caminho": str(full_p),
+                    "arquivo": f,
+                    "pasta": rel_folder,
+                    "crate": c_raiz,
+                    "duracao_seg": round(dur, 1),
+                    "bpm": round(bpm),
+                    "tem_cues": has_cues,
+                    "tipo_cue": tipo_cue,
+                    "total_cues": len(cue_list),
+                    "cue_labels": cue_labels_summary,
+                    "status": "Gravado" if has_cues else "Pendente"
+                })
+
+    return {
+        "sucesso": True,
+        "total": total_tracks,
+        "gravadas": total_with_cues,
+        "pendentes": total_tracks - total_with_cues,
+        "personalizadas": total_custom,
+        "padrao_autocue": total_padrao,
+        "items": items
+    }
+
+
 def scan_crate_cues(
     mp3_base_dir: str,
     crate_raiz: str = "",
@@ -479,7 +610,7 @@ def scan_crate_cues(
                 if has_cues:
                     total_with_cues += 1
 
-                if total_tracks > offset and len(items) < limit:
+                if total_tracks > offset and (not limit or limit <= 0 or len(items) < limit):
                     crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
                     c_raiz = crate_parts[0] if crate_parts else ""
                     items.append({
@@ -656,6 +787,7 @@ def main():
     parser.add_argument("--repair-batch", action="store_true", help="Repara marcadores de toda a biblioteca/crate")
     parser.add_argument("--apply-batch", type=str, default="", help="JSON de lista de arquivos para aplicar em lote")
     parser.add_argument("--scan-crate", action="store_true", help="Varre Crate/Subcrate para listar faixas e cues")
+    parser.add_argument("--audit-crate", action="store_true", help="Audita detalhadamente todas as faixas da Crate para identificar cues existentes vs pendentes")
     parser.add_argument("--batch-crate", action="store_true", help="Gera Hot Cues para toda a Crate")
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3 base")
     parser.add_argument("--crate-raiz", type=str, default="", help="Crate raiz")
@@ -719,6 +851,16 @@ def main():
         except Exception as e:
             print(json.dumps({"sucesso": False, "erro": str(e)}))
             sys.exit(1)
+
+    if args.audit_crate:
+        res = audit_crate_cues_detailed(
+            mp3_dir,
+            crate_raiz=args.crate_raiz,
+            subcrate=args.subcrate,
+            include_subcrates=not args.no_subcrates
+        )
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0)
 
     if args.scan_crate:
         res = scan_crate_cues(

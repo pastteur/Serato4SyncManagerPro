@@ -2,7 +2,8 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle,
   ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap,
-  CheckSquare, Square, RefreshCw, X, Layers, PlusCircle, Check
+  CheckSquare, Square, RefreshCw, X, Layers, PlusCircle, Check,
+  Clock, ShieldAlert, ShieldCheck, Hash
 } from 'lucide-react';
 
 interface TrackMatcherProps {
@@ -27,7 +28,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
 
   // Filtros de busca e status para os resultados
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'found' | 'upgrades' | 'missing'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'upgrades' | 'conflicts' | 'found' | 'missing'>('all');
 
   // Seleção granular de faixas com Checkboxes
   const [selectedFound, setSelectedFound] = useState<Set<string>>(new Set());
@@ -77,6 +78,29 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
+  // Helper para abrir no Finder nativo com fallback
+  const revealPath = async (filePath?: string) => {
+    if (!filePath) return;
+    if (onOpenFileInFinder) {
+      onOpenFileInFinder(filePath);
+    } else if (isTauri) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('open_file_in_finder', { path: filePath });
+      } catch (err) {
+        console.error('Falha ao abrir no Finder:', err);
+      }
+    }
+  };
+
+  const formatSec = (sec?: number) => {
+    if (!sec || sec <= 0) return '0:00';
+    const s = Math.round(sec);
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${m}:${rem < 10 ? '0' : ''}${rem}`;
+  };
+
   // Carrega a estrutura de crates e subcrates do usuário para a integração
   useEffect(() => {
     const loadCrates = async () => {
@@ -106,14 +130,18 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     if (!matchResult?.encontradas) return [];
     let list = matchResult.encontradas;
     if (statusFilter === 'upgrades') {
-      list = list.filter((it: any) => it.upgrade_disponivel);
+      list = list.filter((it: any) => it.upgrade_seguro && !it.versao_divergente && !it.duracao_incompativel);
+    } else if (statusFilter === 'conflicts') {
+      list = list.filter((it: any) => it.versao_divergente || it.duracao_incompativel);
     }
     if (!searchTerm.trim()) return list;
     const q = searchTerm.toLowerCase();
     return list.filter((it: any) =>
       it.solicitado?.toLowerCase().includes(q) ||
       it.arquivo_local?.toLowerCase().includes(q) ||
-      it.caminho_completo?.toLowerCase().includes(q)
+      it.caminho_completo?.toLowerCase().includes(q) ||
+      it.pasta_origem?.toLowerCase().includes(q) ||
+      it.crate_destino?.toLowerCase().includes(q)
     );
   }, [matchResult, searchTerm, statusFilter]);
 
@@ -123,14 +151,25 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     const q = searchTerm.toLowerCase();
     return matchResult.faltantes.filter((it: any) =>
       it.solicitado?.toLowerCase().includes(q) ||
-      it.caminho_novo?.toLowerCase().includes(q)
+      it.caminho_novo?.toLowerCase().includes(q) ||
+      it.pasta_origem?.toLowerCase().includes(q)
     );
   }, [matchResult, searchTerm]);
 
-  // Contadores selecionados
+  // Contadores analíticos
+  const totalSafeUpgrades = useMemo(() => {
+    if (!matchResult?.encontradas) return 0;
+    return matchResult.encontradas.filter((it: any) => it.upgrade_seguro && !it.versao_divergente && !it.duracao_incompativel).length;
+  }, [matchResult]);
+
+  const totalDivergentes = useMemo(() => {
+    if (!matchResult?.encontradas) return 0;
+    return matchResult.encontradas.filter((it: any) => it.versao_divergente || it.duracao_incompativel).length;
+  }, [matchResult]);
+
   const selectedUpgradesCount = useMemo(() => {
     if (!matchResult?.encontradas) return 0;
-    return matchResult.encontradas.filter((it: any) => it.upgrade_disponivel && selectedFound.has(it.caminho_completo)).length;
+    return matchResult.encontradas.filter((it: any) => it.upgrade_seguro && !it.versao_divergente && !it.duracao_incompativel && selectedFound.has(it.caminho_completo)).length;
   }, [matchResult, selectedFound]);
 
   const handleSelectIncomingFolder = async () => {
@@ -188,10 +227,12 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
         setMatchResult(parsed);
 
         if (parsed.sucesso) {
-          // Seleciona inicialmente todos os upgrades e todas as inéditas
+          // Seleciona inicialmente APENAS os upgrades 100% seguros (nunca remixes divergentes) e todas as inéditas
           const initFound = new Set<string>();
           (parsed.encontradas || []).forEach((it: any) => {
-            if (it.upgrade_disponivel) initFound.add(it.caminho_completo);
+            if (it.upgrade_seguro && !it.versao_divergente && !it.duracao_incompativel) {
+              initFound.add(it.caminho_completo);
+            }
           });
           setSelectedFound(initFound);
 
@@ -202,7 +243,9 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           setSelectedMissing(initMissing);
 
           if (parsed.tipo_origem === 'folder') {
-            onAddLog(`✅ Track Matcher: ${parsed.total_solicitadas} faixas escaneadas na pasta. ${parsed.total_encontradas} já no HD (${parsed.total_upgrades || 0} upgrades de qualidade) e ${parsed.total_faltantes} faixas inéditas.`);
+            const divCount = parsed.total_divergentes || 0;
+            const upCount = parsed.total_upgrades || 0;
+            onAddLog(`✅ Track Matcher: ${parsed.total_solicitadas} faixas escaneadas na pasta. ${parsed.total_encontradas} já no HD (${upCount} upgrades seguros, ${divCount > 0 ? `⚠️ ${divCount} conflitos de remix/versão protegidos, ` : ''}${parsed.total_faltantes} faixas inéditas).`);
           } else {
             onAddLog(`✅ Track Matcher: ${parsed.total_encontradas} faixas encontradas no HD (${parsed.total_faltantes} faltantes).`);
           }
@@ -573,12 +616,17 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
       <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
         <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs flex items-center justify-between text-slate-300">
           <div className="flex items-center gap-3 flex-wrap">
-            <span>Resultados: <b className="text-white">{matchResult?.total_solicitadas || 0}</b> faixas na pasta/lista</span>
+            <span>Resultados: <b className="text-white">{matchResult?.total_solicitadas || 0}</b> faixas analisadas</span>
             <span className="text-emerald-400 font-bold">✅ {matchResult?.total_encontradas || 0} já no HD</span>
-            {matchResult?.total_upgrades > 0 && (
-              <span className="text-serato-gold font-bold">🚀 {matchResult.total_upgrades} Upgrades de Qualidade</span>
+            {totalSafeUpgrades > 0 && (
+              <span className="text-serato-gold font-bold">🚀 {totalSafeUpgrades} Upgrades Seguros</span>
             )}
-            <span className="text-rose-400 font-bold">
+            {totalDivergentes > 0 && (
+              <span className="text-rose-400 font-bold bg-rose-950/60 px-2 py-0.5 rounded border border-rose-800">
+                ⚠️ {totalDivergentes} Conflitos de Remix/Duração (Protegidos)
+              </span>
+            )}
+            <span className="text-cyan-400 font-bold">
               {matchResult?.tipo_origem === 'folder' ? '✨' : '⚠️'} {matchResult?.total_faltantes || 0} {matchResult?.tipo_origem === 'folder' ? 'inéditas / novas' : 'faltantes'}
             </span>
           </div>
@@ -615,12 +663,12 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Filtrar faixas solicitadas ou arquivos locais no HD..."
+                placeholder="Filtrar por nome de faixa, pasta de origem ou crate no HD..."
                 className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-cyan transition font-sans"
               />
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
                 onClick={() => setStatusFilter('all')}
@@ -633,7 +681,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 Todas ({(matchResult.encontradas?.length || 0) + (matchResult.faltantes?.length || 0)})
               </button>
 
-              {matchResult?.total_upgrades > 0 && (
+              {totalSafeUpgrades > 0 && (
                 <button
                   type="button"
                   onClick={() => setStatusFilter('upgrades')}
@@ -643,7 +691,21 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                       : 'bg-serato-dark text-serato-gold/70 border-serato-cardBorder hover:text-serato-gold'
                   }`}
                 >
-                  🚀 Upgrades ({matchResult.total_upgrades})
+                  🚀 Upgrades Seguros ({totalSafeUpgrades})
+                </button>
+              )}
+
+              {totalDivergentes > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('conflicts')}
+                  className={`text-[11px] px-2.5 py-1 rounded-lg font-bold transition cursor-pointer border ${
+                    statusFilter === 'conflicts'
+                      ? 'bg-rose-950/90 text-rose-300 border-rose-600 shadow-sm'
+                      : 'bg-serato-dark text-rose-400/80 border-rose-900/60 hover:text-rose-300'
+                  }`}
+                >
+                  ⚠️ Conflitos / Remixes ({totalDivergentes})
                 </button>
               )}
 
@@ -664,7 +726,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 onClick={() => setStatusFilter('missing')}
                 className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition cursor-pointer border ${
                   statusFilter === 'missing'
-                    ? 'bg-rose-950/60 text-rose-300 border-rose-600/60 shadow-sm'
+                    ? 'bg-cyan-950/60 text-cyan-300 border-cyan-600/60 shadow-sm'
                     : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                 }`}
               >
@@ -675,83 +737,161 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
         )}
 
         {/* Lista de Resultados */}
-        <div className="overflow-y-auto flex-1 p-2 space-y-1.5 text-xs font-mono">
+        <div className="overflow-y-auto flex-1 p-2 space-y-2 text-xs font-mono">
           {!matchResult ? (
             <div className="py-12 text-center text-slate-500 font-sans">
               <Music className="w-8 h-8 opacity-20 text-serato-cyan mx-auto mb-2" />
               <p>Selecione uma pasta com novos áudios ou cole uma playlist acima e clique em "Cruzar Playlist / Pasta".</p>
-              <p className="text-[11px] text-slate-600 mt-1">O sistema buscará as músicas instantaneamente no seu HD Master.</p>
+              <p className="text-[11px] text-slate-600 mt-1">O sistema buscará as músicas instantaneamente no seu HD Master com verificação de versões e impressões digitais de áudio.</p>
             </div>
           ) : (
             <>
               {/* Faixas Encontradas / Upgrades */}
-              {(statusFilter === 'all' || statusFilter === 'found' || statusFilter === 'upgrades') && filteredEncontradas.map((item: any, idx: number) => {
+              {(statusFilter === 'all' || statusFilter === 'found' || statusFilter === 'upgrades' || statusFilter === 'conflicts') && filteredEncontradas.map((item: any, idx: number) => {
                 const isSelected = selectedFound.has(item.caminho_completo);
                 const isReplaced = replacedUpgrades.has(item.caminho_completo);
+                const isDivergent = item.versao_divergente || item.duracao_incompativel;
 
                 return (
                   <div 
                     key={`found-${idx}`} 
-                    className={`border p-2 rounded flex items-center justify-between transition ${
+                    className={`border p-2.5 rounded-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 transition ${
                       isReplaced
                         ? 'bg-emerald-950/30 border-emerald-700/60'
-                        : item.upgrade_disponivel
+                        : isDivergent
+                        ? 'bg-rose-950/20 border-rose-800/60 hover:bg-rose-950/30'
+                        : item.upgrade_seguro
                         ? 'bg-amber-950/20 border-serato-gold/60 hover:bg-amber-950/30'
                         : 'bg-serato-card border-emerald-900/40 hover:bg-emerald-950/20'
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 truncate max-w-2xl">
-                      {/* Checkbox por arquivo */}
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => toggleSelectFound(item.caminho_completo)}
-                        className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0 cursor-pointer shrink-0"
-                      />
+                    <div className="flex flex-col gap-1.5 flex-1 min-w-0 max-w-3xl">
+                      {/* Linha 1: Checkbox, Badges de Status e Nomes */}
+                      <div className="flex items-center gap-2 truncate">
+                        {/* Checkbox: se for divergente (remix vs original), impede seleção para substituição acidental */}
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleSelectFound(item.caminho_completo)}
+                          disabled={isDivergent}
+                          className="rounded border-slate-700 bg-serato-dark text-serato-gold focus:ring-0 cursor-pointer shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+                          title={isDivergent ? 'Substituição bloqueada: versão divergente ou duração incompatível' : 'Selecionar para substituição'}
+                        />
 
-                      {isReplaced ? (
-                        <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-600 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
-                          <Check className="w-3 h-3 text-emerald-400" />
-                          ATUALIZADO NO LOCAL
-                        </span>
-                      ) : item.upgrade_disponivel ? (
-                        <span className="text-[10px] bg-amber-950 text-serato-gold border border-serato-gold/40 px-1.5 py-0.5 rounded font-bold shrink-0 flex items-center gap-1">
-                          <Zap className="w-2.5 h-2.5 text-serato-gold" />
-                          UPGRADE DISPONÍVEL
-                        </span>
-                      ) : (
-                        <span className="text-[10px] bg-emerald-950 text-emerald-400 px-1.5 py-0.2 rounded font-bold shrink-0">
-                          {item.score}% MATCH
-                        </span>
-                      )}
+                        {isReplaced ? (
+                          <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-600 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            ATUALIZADO NO LOCAL
+                          </span>
+                        ) : item.versao_divergente ? (
+                          <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-700 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                            <AlertTriangle className="w-3 h-3 text-rose-400" />
+                            ⚠️ REMIX VS ORIGINAL (BLOQUEADO)
+                          </span>
+                        ) : item.duracao_incompativel ? (
+                          <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-700 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                            <Clock className="w-3 h-3 text-rose-400" />
+                            ⏱️ DURAÇÃO DIFERENTE (Δ {item.delta_duracao}s)
+                          </span>
+                        ) : item.upgrade_seguro ? (
+                          <span className="text-[10px] bg-amber-950 text-serato-gold border border-serato-gold/60 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                            <Zap className="w-3 h-3 text-serato-gold fill-current" />
+                            🚀 UPGRADE SEGURO
+                          </span>
+                        ) : (
+                          <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800/40 px-1.5 py-0.5 rounded font-bold shrink-0 font-mono">
+                            {item.score}% MATCH
+                          </span>
+                        )}
 
-                      <span className="text-white font-sans font-medium truncate">{item.solicitado}</span>
-                      <ArrowRight className="w-3 h-3 text-slate-600 shrink-0" />
-                      <span className="text-slate-400 text-[10px] truncate" title={item.caminho_completo}>{item.arquivo_local}</span>
+                        <span className="text-white font-sans font-medium truncate" title={item.solicitado}>{item.solicitado}</span>
+                        <ArrowRight className="w-3 h-3 text-slate-600 shrink-0" />
+                        <span className="text-slate-400 text-[11px] truncate font-sans" title={item.caminho_completo}>{item.arquivo_local}</span>
+                      </div>
 
-                      {item.novo_bitrate !== undefined && (
-                        <span className="text-[10px] font-mono shrink-0 ml-1">
-                          {item.upgrade_disponivel ? (
-                            <span className="text-emerald-400 font-bold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-700/40">
-                              {item.novo_bitrate}k {item.novo_formato} ➔ {item.lib_bitrate || '?'}k
-                            </span>
-                          ) : (
-                            <span className="text-slate-500">
-                              ({item.lib_bitrate || '?'}k)
-                            </span>
-                          )}
+                      {/* Linha 2: Metadados Técnicos, Duração, Bitrates e Versões */}
+                      <div className="flex items-center gap-2.5 text-[10px] font-mono flex-wrap pl-6">
+                        {/* Bitrate */}
+                        {item.novo_bitrate !== undefined && (
+                          <span className={item.upgrade_seguro ? 'text-emerald-400 font-bold bg-emerald-950/60 px-1.5 py-0.5 rounded border border-emerald-700/40' : 'text-slate-400 bg-slate-900 px-1.5 py-0.5 rounded'}>
+                            Qualidade: {item.novo_bitrate}k {item.novo_formato} ➔ {item.lib_bitrate || '?'}k {item.lib_formato}
+                          </span>
+                        )}
+
+                        {/* Duração e Delta */}
+                        {item.novo_duracao > 0 && item.lib_duracao > 0 && (
+                          <span className={`px-1.5 py-0.5 rounded border flex items-center gap-1 ${
+                            item.duracao_incompativel 
+                              ? 'bg-rose-950/60 text-rose-300 border-rose-800' 
+                              : 'bg-slate-900 text-slate-300 border-slate-800'
+                          }`}>
+                            <Clock className="w-2.5 h-2.5" />
+                            <span>Duração: {formatSec(item.novo_duracao)} vs {formatSec(item.lib_duracao)} (Δ {item.delta_duracao}s)</span>
+                          </span>
+                        )}
+
+                        {/* Versões comparadas */}
+                        {(item.versao_novo !== 'Original / Álbum' || item.versao_lib !== 'Original / Álbum') && (
+                          <span className={`px-1.5 py-0.5 rounded border ${
+                            item.versao_divergente 
+                              ? 'bg-rose-950/70 text-rose-300 border-rose-700 font-bold' 
+                              : 'bg-slate-900 text-slate-400 border-slate-800'
+                          }`}>
+                            Versão: {item.versao_novo} ⟷ {item.versao_lib}
+                          </span>
+                        )}
+
+                        {/* Hash de áudio puro SHA-256 (Audio Seal) */}
+                        {item.audio_seal_novo && (
+                          <span className="text-slate-500 bg-slate-950 px-1.5 py-0.5 rounded border border-white/5 flex items-center gap-1" title={`SHA-256 Audio Seal Novo: ${item.audio_seal_novo}\nSHA-256 Audio Seal HD: ${item.audio_seal_lib || 'Calculado no match'}`}>
+                            <Hash className="w-2.5 h-2.5 text-slate-500" />
+                            <span>Seal: {item.audio_seal_novo.slice(0, 8)}...</span>
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Linha 3: Origem da Pasta ➔ Crate Destino no HD */}
+                      <div className="flex items-center gap-2 text-[10px] font-mono pl-6 pt-0.5">
+                        <span className="bg-slate-800/80 text-slate-300 px-1.5 py-0.5 rounded border border-slate-700/60 truncate max-w-xs" title={item.pasta_origem}>
+                          📁 Origem: {item.pasta_origem ? item.pasta_origem.split('/').pop() : 'Downloads'}
                         </span>
+                        <span className="text-serato-gold font-bold">➔</span>
+                        <span className="bg-serato-cyan/20 text-serato-cyan px-1.5 py-0.5 rounded border border-serato-cyan/40 font-bold truncate max-w-xs" title={item.crate_destino}>
+                          🎯 Serato Crate: {item.crate_destino || 'Raiz'}
+                        </span>
+                      </div>
+
+                      {/* Alerta de Incompatibilidade se houver */}
+                      {item.aviso_incompatibilidade && isDivergent && (
+                        <div className="ml-6 text-[10px] text-rose-300 bg-rose-950/50 border border-rose-800/60 px-2 py-0.5 rounded font-sans flex items-center gap-1.5">
+                          <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                          <span>{item.aviso_incompatibilidade}</span>
+                        </div>
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      {/* Botão de Substituir Upgrade no próprio local */}
-                      {item.upgrade_disponivel && !isReplaced && (
+                    {/* Ações da Faixa: Botoes de Substituir, Integrar como Nova, e Abrir no Finder */}
+                    <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                      {/* Se for divergente (ex: Remix), permite integrar como nova faixa na Crate sem sobrescrever a original! */}
+                      {isDivergent && item.caminho_novo && (
+                        <button
+                          type="button"
+                          onClick={() => handleOpenIntegrateModal([item])}
+                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border border-emerald-600/60 transition cursor-pointer shadow"
+                          title="Salva este Remix como nova faixa na Crate sem sobrescrever a original"
+                        >
+                          <PlusCircle className="w-3 h-3 text-emerald-400" />
+                          <span>Integrar Remix na Crate</span>
+                        </button>
+                      )}
+
+                      {/* Se for Upgrade Seguro, botão de substituir no local */}
+                      {item.upgrade_seguro && !isReplaced && (
                         <button
                           type="button"
                           onClick={() => handleTriggerUpgrades([item])}
                           disabled={isUpgrading}
-                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-amber-950/70 hover:bg-amber-900 text-serato-gold border border-serato-gold/50 transition cursor-pointer shadow"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-serato-gold hover:opacity-90 text-black border border-amber-400 transition cursor-pointer shadow"
                           title="Sobrescreve o arquivo no local exato da biblioteca com a versão de maior bitrate"
                         >
                           <Zap className="w-3 h-3 fill-current" />
@@ -759,14 +899,29 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                         </button>
                       )}
 
-                      {onOpenFileInFinder && (
+                      {/* Abrir Pasta de Origem da Faixa Nova no Finder */}
+                      {item.caminho_novo && (
                         <button
                           type="button"
-                          onClick={() => onOpenFileInFinder(item.caminho_completo)}
-                          className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 cursor-pointer"
-                          title="Revelar no Finder"
+                          onClick={() => revealPath(item.caminho_novo)}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold border border-slate-700 cursor-pointer"
+                          title={`Revelar arquivo novo no Finder:\n${item.caminho_novo}`}
+                        >
+                          <Folder className="w-3 h-3 text-serato-gold" />
+                          <span>Origem</span>
+                        </button>
+                      )}
+
+                      {/* Abrir Pasta da Crate de Destino no Finder */}
+                      {item.caminho_completo && (
+                        <button
+                          type="button"
+                          onClick={() => revealPath(item.caminho_completo)}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold border border-slate-700 cursor-pointer"
+                          title={`Revelar arquivo atual no HD no Finder:\n${item.caminho_completo}`}
                         >
                           <ExternalLink className="w-3 h-3 text-serato-cyan" />
+                          <span>HD Crate</span>
                         </button>
                       )}
                     </div>
@@ -783,49 +938,67 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 return (
                   <div
                     key={`missing-${idx}`}
-                    className={`border p-2 rounded flex items-center justify-between transition ${
+                    className={`border p-2.5 rounded-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 transition ${
                       isIntegrated
                         ? 'bg-emerald-950/30 border-emerald-700/60'
                         : 'bg-serato-card border-rose-950/50 hover:bg-rose-950/10'
                     }`}
                   >
-                    <div className="flex items-center gap-2.5 truncate max-w-xl">
-                      {/* Checkbox por arquivo para mover/integrar */}
-                      {matchResult?.tipo_origem === 'folder' && (
-                        <input
-                          type="checkbox"
-                          checked={isSelected}
-                          onChange={() => toggleSelectMissing(key)}
-                          className="rounded border-slate-700 bg-serato-dark text-emerald-400 focus:ring-0 cursor-pointer shrink-0"
-                        />
-                      )}
+                    <div className="flex flex-col gap-1 flex-1 min-w-0 max-w-3xl">
+                      <div className="flex items-center gap-2 truncate">
+                        {matchResult?.tipo_origem === 'folder' && (
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleSelectMissing(key)}
+                            className="rounded border-slate-700 bg-serato-dark text-emerald-400 focus:ring-0 cursor-pointer shrink-0"
+                          />
+                        )}
 
-                      {isIntegrated ? (
-                        <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-600 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
-                          <Check className="w-3 h-3 text-emerald-400" />
-                          INTEGRADA NA CRATE
-                        </span>
-                      ) : (
-                        <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-800/40 px-1.5 py-0.2 rounded font-bold shrink-0">
-                          {matchResult?.tipo_origem === 'folder' ? 'INÉDITA / NOVA' : 'FALTANDO'}
-                        </span>
-                      )}
+                        {isIntegrated ? (
+                          <span className="text-[10px] bg-emerald-950 text-emerald-300 border border-emerald-600 px-2 py-0.5 rounded font-bold shrink-0 flex items-center gap-1 font-mono">
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            INTEGRADA NA CRATE
+                          </span>
+                        ) : (
+                          <span className="text-[10px] bg-rose-950 text-rose-300 border border-rose-800/40 px-1.5 py-0.5 rounded font-bold shrink-0 font-mono">
+                            {matchResult?.tipo_origem === 'folder' ? '✨ INÉDITA / NOVA' : '⚠️ FALTANDO'}
+                          </span>
+                        )}
 
-                      <span className="text-slate-200 font-sans truncate">{item.solicitado}</span>
-                      {item.novo_bitrate ? (
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          ({item.novo_bitrate}k {item.novo_formato})
-                        </span>
-                      ) : null}
+                        <span className="text-slate-200 font-sans font-medium truncate">{item.solicitado}</span>
+                      </div>
+
+                      {/* Metadados e Pasta de Origem */}
+                      <div className="flex items-center gap-2 text-[10px] font-mono pl-6 text-slate-400 flex-wrap">
+                        {item.novo_bitrate ? (
+                          <span className="bg-slate-900 px-1.5 py-0.5 rounded border border-slate-800">
+                            {item.novo_bitrate}k {item.novo_formato} · {formatSec(item.novo_duracao)}
+                          </span>
+                        ) : null}
+
+                        {item.pasta_origem && (
+                          <span className="bg-slate-800/80 text-slate-300 px-1.5 py-0.5 rounded border border-slate-700/60 truncate max-w-xs" title={item.pasta_origem}>
+                            📁 Pasta Origem: {item.pasta_origem.split('/').pop()}
+                          </span>
+                        )}
+
+                        {item.audio_seal_novo && (
+                          <span className="text-slate-500 bg-slate-950 px-1.5 py-0.5 rounded border border-white/5 flex items-center gap-1" title={item.audio_seal_novo}>
+                            <Hash className="w-2.5 h-2.5 text-slate-500" />
+                            <span>Seal: {item.audio_seal_novo.slice(0, 8)}...</span>
+                          </span>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
                       {/* Botão de Integrar faixa individual na Crate */}
                       {matchResult?.tipo_origem === 'folder' && !isIntegrated && (
                         <button
                           type="button"
                           onClick={() => handleOpenIntegrateModal([item])}
-                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border border-emerald-600/50 transition cursor-pointer"
+                          className="flex items-center gap-1 px-2.5 py-1 rounded text-[11px] font-bold bg-emerald-950/60 hover:bg-emerald-900 text-emerald-300 border border-emerald-600/50 transition cursor-pointer shadow"
                           title="Copia esta música inédita para uma Crate existente ou nova no HD"
                         >
                           <PlusCircle className="w-3 h-3 text-emerald-400" />
@@ -833,9 +1006,18 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                         </button>
                       )}
 
-                      <span className="text-[10px] text-serato-orange shrink-0">
-                        {matchResult?.tipo_origem === 'folder' ? 'Não existe no HD Master' : 'Não encontrada no HD'}
-                      </span>
+                      {/* Abrir Pasta de Origem da Faixa Nova no Finder */}
+                      {item.caminho_novo && (
+                        <button
+                          type="button"
+                          onClick={() => revealPath(item.caminho_novo)}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-semibold border border-slate-700 cursor-pointer"
+                          title={`Revelar arquivo no Finder:\n${item.caminho_novo}`}
+                        >
+                          <Folder className="w-3 h-3 text-serato-gold" />
+                          <span>Origem</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 );

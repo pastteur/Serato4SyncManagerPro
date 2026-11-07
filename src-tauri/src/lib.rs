@@ -1776,6 +1776,41 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn audit_crate_cues(
+        app: AppHandle,
+        mp3_path: String,
+        crate_raiz: Option<String>,
+        subcrate: Option<String>,
+        include_subcrates: Option<bool>,
+    ) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "auto_cue.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--audit-crate");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+        if let Some(cr) = crate_raiz {
+            if !cr.is_empty() {
+                cmd.arg("--crate-raiz");
+                cmd.arg(cr);
+            }
+        }
+        if let Some(sub) = subcrate {
+            if !sub.is_empty() {
+                cmd.arg("--subcrate");
+                cmd.arg(sub);
+            }
+        }
+        if let Some(false) = include_subcrates {
+            cmd.arg("--no-subcrates");
+        }
+
+        let output = cmd.output().map_err(|e| format!("Falha ao auditar cues na crate: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        Ok(stdout)
+    }
+
+    #[tauri::command]
     pub async fn batch_apply_crate_cues(
         app: AppHandle,
         window: Window,
@@ -1983,6 +2018,7 @@ pub fn run() {
             commands::preview_auto_cues,
             commands::apply_auto_cues,
             commands::scan_crate_cues,
+            commands::audit_crate_cues,
             commands::batch_apply_crate_cues,
             commands::repair_crate_cues,
             commands::apply_batch_auto_cues

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Target, Sparkles, CheckCircle2, Play, Music, ArrowRight, RefreshCw, Layers, FolderTree, Zap, Eye, Search } from 'lucide-react';
+import { Target, Sparkles, CheckCircle2, Play, Music, ArrowRight, RefreshCw, Layers, FolderTree, Zap, Eye, Search, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
 
@@ -31,6 +31,17 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
   const [gravadasCount, setGravadasCount] = useState<number>(0);
   const [pendentesCount, setPendentesCount] = useState<number>(0);
   const [selectedTrackIds, setSelectedTrackIds] = useState<Set<string>>(new Set());
+
+  // Auditoria e Detecção Anti-Sobreposição
+  const [isAuditing, setIsAuditing] = useState<boolean>(false);
+  const [auditReport, setAuditReport] = useState<{
+    total: number;
+    gravadas: number;
+    pendentes: number;
+    personalizadas: number;
+    padrao_autocue: number;
+    items: any[];
+  } | null>(null);
 
   // Batch Generation State
   const [isBatchRunning, setIsBatchRunning] = useState<boolean>(false);
@@ -76,7 +87,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
 
   // Filtros de busca e status para Hot Cues
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'hasCues' | 'selected'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'hasCues' | 'custom' | 'selected'>('all');
 
   const filteredTracks = useMemo(() => {
     let result = [...tracks];
@@ -92,6 +103,8 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
       result = result.filter(t => !t.tem_cues);
     } else if (statusFilter === 'hasCues') {
       result = result.filter(t => t.tem_cues);
+    } else if (statusFilter === 'custom') {
+      result = result.filter(t => t.tipo_cue?.includes('Personalizado'));
     } else if (statusFilter === 'selected') {
       result = result.filter(t => selectedTrackIds.has(t.id));
     }
@@ -147,6 +160,46 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
       onAddLog(`❌ Falha: ${e}`);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Executa Auditoria Completa na Crate / Biblioteca sem limites para evitar sobreposição
+  const handleRunAudit = async () => {
+    if (!mp3Path) return;
+    setIsAuditing(true);
+    const scopeLabel = selectedSubcrate
+      ? `Subcrate "${selectedCrate} -> ${selectedSubcrate}"`
+      : selectedCrate
+        ? `Crate "${selectedCrate}"`
+        : 'Toda a Biblioteca';
+
+    onAddLog(`🔍 Auto-Cue: Executando auditoria completa de Hot Cues em ${scopeLabel}...`);
+
+    try {
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('audit_crate_cues', {
+          mp3Path,
+          crateRaiz: selectedCrate || null,
+          subcrate: selectedSubcrate || null,
+          includeSubcrates
+        });
+        const data = JSON.parse(resJson);
+        if (data.sucesso) {
+          setAuditReport(data);
+          setTracks(data.items || []);
+          setTotalTracks(data.total || 0);
+          setGravadasCount(data.gravadas || 0);
+          setPendentesCount(data.pendentes || 0);
+          onAddLog(`✅ Auditoria Concluída: ${data.total} faixas analisadas. ${data.gravadas} já com Hot Cues (${data.personalizadas || 0} manuais de DJ protegidos) e ${data.pendentes} pendentes.`);
+        } else {
+          onAddLog(`❌ Erro na auditoria de cues: ${data.erro}`);
+        }
+      }
+    } catch (e) {
+      onAddLog(`❌ Falha ao auditar: ${e}`);
+    } finally {
+      setIsAuditing(false);
     }
   };
 
@@ -429,16 +482,28 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
             <span>🛡️ Proteger Cues Manuais</span>
           </label>
 
+          {/* Botão Auditar & Analisar Cues Existentes */}
+          <button
+            type="button"
+            onClick={handleRunAudit}
+            disabled={isLoading || isAuditing || isBatchRunning || isRepairRunning}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-950/90 hover:bg-cyan-900 text-cyan-300 border border-cyan-500/50 shadow-lg shadow-cyan-950/50 transition disabled:opacity-40 cursor-pointer"
+            title="Varre todas as faixas sem limite, identifica cues gravados, cues manuais de DJ protegidos e pendentes para evitar sobreposição"
+          >
+            <Search className={`w-3.5 h-3.5 text-cyan-400 ${isAuditing ? 'animate-spin' : ''}`} />
+            <span>{isAuditing ? 'Auditando...' : '🔍 Auditar Cues'}</span>
+          </button>
+
           {/* Botão Reparar Cues no Serato */}
           <button
             type="button"
             onClick={handleBatchRepairCues}
-            disabled={isLoading || isBatchRunning || isRepairRunning || totalTracks === 0}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-500/50 shadow-lg shadow-cyan-950/50 transition disabled:opacity-40 cursor-pointer"
+            disabled={isLoading || isAuditing || isBatchRunning || isRepairRunning || totalTracks === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-600 transition disabled:opacity-40 cursor-pointer"
             title="Repara a formatação binária das tags Serato Markers2 para que o Serato DJ Pro leia e ative os 5 Hot Cues imediatamente nos pads"
           >
             <Sparkles className={`w-3.5 h-3.5 ${isRepairRunning ? 'animate-spin' : ''}`} />
-            <span>{isRepairRunning ? 'Reparando Cues...' : '🛠️ Reparar Cues no Serato'}</span>
+            <span>{isRepairRunning ? 'Reparando Cues...' : '🛠️ Reparar Cues'}</span>
           </button>
 
           {/* Botão Gerar nas Pendentes */}
@@ -546,6 +611,53 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
         </div>
       </div>
 
+      {/* Banner de Resumo da Auditoria Completa Anti-Sobreposição */}
+      {auditReport && (
+        <div className="bg-slate-900/90 border border-serato-gold/40 p-3 rounded-xl shadow-xl flex flex-col sm:flex-row items-center justify-between gap-3 shrink-0">
+          <div className="flex items-center gap-3.5 flex-wrap">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-5 h-5 text-serato-gold shrink-0" />
+              <div>
+                <div className="text-xs font-bold text-white flex items-center gap-1.5">
+                  <span>Auditoria Completa de Cues</span>
+                  <span className="text-[10px] bg-serato-gold/20 text-serato-gold px-1.5 py-0.2 rounded font-mono">
+                    {auditReport.total} faixas analisadas
+                  </span>
+                </div>
+                <div className="text-[11px] text-slate-400">
+                  Mapeamento de cues gravados e proteção de marcadores de DJ para não gerar sobreposição.
+                </div>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-xs font-mono flex-wrap">
+              <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-700/60 px-2 py-0.5 rounded">
+                ✅ Gravadas: <b>{auditReport.gravadas}</b> ({Math.round((auditReport.gravadas / Math.max(auditReport.total, 1)) * 100)}%)
+              </span>
+              <span className="bg-purple-950/70 text-purple-300 border border-purple-700/60 px-2 py-0.5 rounded font-bold">
+                🛡️ Cues Manuais DJ: <b>{auditReport.personalizadas || 0}</b> (Protegidos)
+              </span>
+              <span className="bg-amber-950/70 text-amber-300 border border-amber-700/60 px-2 py-0.5 rounded">
+                ⏳ Pendentes: <b>{auditReport.pendentes}</b> ({Math.round((auditReport.pendentes / Math.max(auditReport.total, 1)) * 100)}%)
+              </span>
+            </div>
+          </div>
+
+          {auditReport.pendentes > 0 && (
+            <button
+              type="button"
+              onClick={() => handleBatchApplyCrate(true)}
+              disabled={isBatchRunning || isRepairRunning}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-serato-gold hover:opacity-90 text-black shadow-lg shadow-amber-950/40 transition cursor-pointer shrink-0"
+              title="Gera os 5 Hot Cues oficiais exclusivamente nas faixas pendentes, garantindo 100% de proteção contra sobreposição"
+            >
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>⚡ Aplicar Somente nas {auditReport.pendentes} Pendentes (Sem Sobrepor)</span>
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Banner de Progresso do Lote */}
       {isBatchRunning && batchProgress && (
         <div className="bg-amber-950/40 border border-serato-gold/50 p-3 rounded-xl shadow-xl flex flex-col gap-1.5 shrink-0 animate-pulse">
@@ -639,7 +751,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
               />
             </div>
 
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5 flex-wrap">
               <button
                 type="button"
                 onClick={() => setStatusFilter('all')}
@@ -660,7 +772,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                     : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                 }`}
               >
-                Pendentes ({pendentesCount})
+                ⏳ Pendentes ({pendentesCount})
               </button>
               <button
                 type="button"
@@ -671,8 +783,21 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                     : 'bg-serato-dark text-slate-400 border-serato-cardBorder hover:text-white'
                 }`}
               >
-                Com Cues ({gravadasCount})
+                ✅ Gravadas ({gravadasCount})
               </button>
+              {auditReport && (auditReport.personalizadas || 0) > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setStatusFilter('custom')}
+                  className={`text-[11px] px-2 py-0.5 rounded-lg font-medium transition cursor-pointer border ${
+                    statusFilter === 'custom'
+                      ? 'bg-purple-950/80 text-purple-300 border-purple-600 shadow-sm'
+                      : 'bg-serato-dark text-purple-400/80 border-purple-900/60 hover:text-purple-300'
+                  }`}
+                >
+                  🛡️ Cues DJ ({auditReport.personalizadas})
+                </button>
+              )}
             </div>
           </div>
 
@@ -687,6 +812,7 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
               filteredTracks.map((t) => {
                 const isCurrent = selectedFile === t.caminho;
                 const isSelected = selectedTrackIds.has(t.id);
+                const isCustom = t.tipo_cue?.includes('Personalizado');
 
                 return (
                   <div
@@ -695,6 +821,8 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                     className={`p-2.5 flex items-center justify-between gap-3 text-xs cursor-pointer transition ${
                       isCurrent
                         ? 'bg-amber-950/30 border-l-2 border-serato-gold'
+                        : isCustom
+                        ? 'bg-purple-950/10 hover:bg-purple-950/20'
                         : 'hover:bg-white/[0.03]'
                     }`}
                   >
@@ -716,6 +844,11 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                         <div className="text-[10px] text-slate-500 truncate font-mono">
                           {t.pasta}
                         </div>
+                        {t.cue_labels && t.cue_labels.length > 0 && (
+                          <div className="text-[9px] text-slate-400 font-mono truncate max-w-xs mt-0.5">
+                            {t.cue_labels.join(' · ')}
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -725,9 +858,14 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                       )}
                       <span className="text-slate-500">{t.duracao_seg}s</span>
 
-                      {t.tem_cues ? (
+                      {isCustom ? (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-950 text-purple-300 border border-purple-700/60 font-bold flex items-center gap-1 font-mono">
+                          <ShieldAlert className="w-2.5 h-2.5 text-purple-400" />
+                          🛡️ Cue DJ
+                        </span>
+                      ) : t.tem_cues ? (
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800/40 font-bold">
-                          🎯 Gravado
+                          🎯 Gravado {t.total_cues ? `(${t.total_cues})` : ''}
                         </span>
                       ) : (
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-800/40 font-bold">

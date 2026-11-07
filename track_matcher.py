@@ -17,6 +17,8 @@ import json
 import shutil
 import sqlite3
 import argparse
+import hashlib
+import unicodedata
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -35,12 +37,97 @@ if hasattr(sys.stderr, 'reconfigure'):
 DB_PATH = Path.home() / ".serato_sound_seals.sqlite"
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
+VERSION_KEYWORDS = {
+    'remix', 'mix', 'extended', 'radio', 'edit', 'club', 'dub',
+    'instrumental', 'acapella', 'acapela', 'ao vivo', 'live',
+    'acustico', 'acoustic', 'mashup', 'bootleg', 'vip', 'rework',
+    'flip', 'cover', 'sped up', 'speed up', 'nightcore', 'slowed',
+    'original mix', 'vocal mix', 'clean', 'dirty'
+}
+
+
+def compute_audio_seal(filepath_str: str) -> str:
+    """Calcula a impressão digital SHA-256 do fluxo de áudio puro ignorando tags ID3."""
+    try:
+        with open(filepath_str, 'rb') as f:
+            header = f.read(10)
+            start_offset = 0
+            if len(header) >= 10 and header[:3] == b'ID3':
+                size = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9]
+                start_offset = 10 + size
+                if header[5] & 0x10:
+                    start_offset += 10
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            end_offset = file_size
+            if file_size > 128:
+                f.seek(file_size - 128)
+                if f.read(3) == b'TAG':
+                    end_offset -= 128
+            f.seek(start_offset)
+            hasher = hashlib.sha256()
+            bytes_to_read = max(0, end_offset - start_offset)
+            chunk_size = 65536
+            while bytes_to_read > 0:
+                chunk = f.read(min(bytes_to_read, chunk_size))
+                if not chunk:
+                    break
+                hasher.update(chunk)
+                bytes_to_read -= len(chunk)
+            return hasher.hexdigest()
+    except Exception:
+        return ""
+
+
+def extract_version_descriptors(text: str) -> set:
+    """Extrai marcadores explícitos de versão/mix contidos no título ou nome do arquivo."""
+    if not text:
+        return set()
+    found = set()
+    lower = unicodedata.normalize('NFC', text.lower())
+    
+    # 1. Busca termos dentro de parênteses ou colchetes
+    parenteses = re.findall(r'[\(\[\{](.*?)[\)\]\}]', lower)
+    for p in parenteses:
+        p_clean = re.sub(r'[^\w\s]', ' ', p).strip()
+        tokens = p_clean.split()
+        for tok in tokens:
+            if tok in VERSION_KEYWORDS:
+                found.add(tok)
+        if 'remix' in p or 'mix' in p:
+            found.add('remix')
+            for w in tokens:
+                if len(w) > 2 and w not in ('remix', 'mix', 'extended', 'radio', 'edit', 'club', 'the', 'version'):
+                    found.add(f"remixer:{w}")
+                    
+    # 2. Busca termos após hífen final (ex: "Faixa - Alok Remix")
+    if ' - ' in lower:
+        parts = lower.split(' - ')
+        last_part = parts[-1]
+        for kw in VERSION_KEYWORDS:
+            if re.search(r'\b' + re.escape(kw) + r'\b', last_part):
+                found.add(kw)
+                
+    return found
+
 
 def normalize_str(s: str) -> str:
-    """Normaliza texto para comparação fonética/fuzzy."""
-    s = s.lower()
+    """Normaliza texto base para comparação fonética/fuzzy removendo parênteses."""
+    if not s:
+        return ""
+    s = unicodedata.normalize('NFC', s.lower())
     s = re.sub(r'[\(\[\{].*?[\)\]\}]', '', s) # remove parenteses
     s = re.sub(r'[^\w\s]', '', s) # remove pontuações
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+
+def normalize_full_str(s: str) -> str:
+    """Normaliza texto completo preservando os termos de versão."""
+    if not s:
+        return ""
+    s = unicodedata.normalize('NFC', s.lower())
+    s = re.sub(r'[^\w\s]', ' ', s)
     s = re.sub(r'\s+', ' ', s).strip()
     return s
 
@@ -95,12 +182,17 @@ def parse_incoming_folder(folder_path_str: str):
                     artist = parts[0].strip()
                     title = parts[1].strip()
 
+                raw_str = f"{artist} - {title}" if artist else stem
+                version_tags = list(extract_version_descriptors(f"{stem} {title}"))
+                seal = compute_audio_seal(str(full_p))
+
                 tracks.append({
-                    "raw": f"{artist} - {title}" if artist else stem,
+                    "raw": raw_str,
                     "artist": artist,
                     "title": title,
                     "filename": f,
                     "filepath": str(full_p),
+                    "pasta_origem": str(full_p.parent),
                     "ext": ext,
                     "filesize": filesize,
                     "duration": round(duration, 1),
@@ -108,6 +200,9 @@ def parse_incoming_folder(folder_path_str: str):
                     "sample_rate": sample_rate,
                     "clean_title": normalize_str(title),
                     "clean_artist": normalize_str(artist),
+                    "full_norm": normalize_full_str(raw_str),
+                    "version_tags": version_tags,
+                    "audio_seal": seal,
                     "is_local_file": True
                 })
     return tracks
@@ -247,17 +342,19 @@ def fetch_spotify_playlist(playlist_url: str):
 def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
     """
     Cruza as faixas solicitadas contra todos os arquivos de áudio do HD.
+    Aplica validação estrita de versão (remix vs original), duração física e hash de áudio.
     """
     base_path = Path(os.path.expanduser(mp3_dir_str)).resolve()
     if not base_path.exists():
         return {"sucesso": False, "erro": "Pasta MP3 não encontrada"}
 
-    # Carrega índice da biblioteca local
+    # Carrega índice da biblioteca local com metadados de Crate e versão
     library = []
     for root, _, files in os.walk(str(base_path)):
         if '/.' in root or '\\.' in root:
             continue
         rel_dir = os.path.relpath(root, str(base_path))
+        crate_label = rel_dir.replace('\\', ' -> ').replace('/', ' -> ') if rel_dir != '.' else "Raiz"
         for f in files:
             if f.startswith('._') or f.startswith('.'):
                 continue
@@ -267,7 +364,10 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
                     "full_path": str(Path(root) / f),
                     "rel_path": str(Path(rel_dir) / f) if rel_dir != '.' else f,
                     "filename": f,
+                    "crate_name": crate_label,
                     "norm": normalize_str(stem),
+                    "full_norm": normalize_full_str(stem),
+                    "version_tags": extract_version_descriptors(stem),
                     "stem": stem
                 })
 
@@ -277,75 +377,149 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
     for req in tracks_to_match:
         target_norm = req["clean_title"]
         target_art = req["clean_artist"]
+        target_full = req.get("full_norm", normalize_full_str(req["raw"]))
+        req_versions = set(req.get("version_tags") or extract_version_descriptors(req["raw"]))
+        has_remix_req = any('remix' in v or 'mix' in v for v in req_versions)
+        has_live_req = any('live' in v or 'ao vivo' in v for v in req_versions)
+
         best_match = None
         best_score = 0
 
         for lib in library:
-            # 1. Match exato
+            lib_versions = lib["version_tags"]
+            has_remix_lib = any('remix' in v or 'mix' in v for v in lib_versions)
+            has_live_lib = any('live' in v or 'ao vivo' in v for v in lib_versions)
+            version_match = (has_remix_req == has_remix_lib) and (has_live_req == has_live_lib)
+
+            # 1. Match perfeito (título base + artista + mesma versão de mix)
             if target_norm in lib["norm"] and (not target_art or target_art in lib["norm"]):
-                best_match = lib
-                best_score = 100
-                break
-            # 2. Match de título
-            elif target_norm and target_norm in lib["norm"]:
-                if best_score < 80:
+                score = 100 if version_match else 70
+                if target_full == lib["full_norm"]:
+                    score = 100
+                if score > best_score:
                     best_match = lib
-                    best_score = 80
+                    best_score = score
+                    if score == 100:
+                        break
+            # 2. Match secundário por título
+            elif target_norm and target_norm in lib["norm"]:
+                score = 80 if version_match else 60
+                if score > best_score:
+                    best_match = lib
+                    best_score = score
 
         if best_match:
+            lib_versions = best_match["version_tags"]
+            has_remix_lib = any('remix' in v or 'mix' in v for v in lib_versions)
+            has_live_lib = any('live' in v or 'ao vivo' in v for v in lib_versions)
+            versao_divergente = (has_remix_req != has_remix_lib) or (has_live_req != has_live_lib)
+
+            # Se ambos forem remixes mas de produtores diferentes
+            remixers_req = {v for v in req_versions if v.startswith('remixer:')}
+            remixers_lib = {v for v in lib_versions if v.startswith('remixer:')}
+            if remixers_req and remixers_lib and remixers_req != remixers_lib:
+                versao_divergente = True
+
             item_match = {
                 "solicitado": req["raw"],
                 "arquivo_local": best_match["filename"],
                 "caminho_completo": best_match["full_path"],
                 "caminho_rel": best_match["rel_path"],
-                "score": best_score
+                "crate_destino": best_match["crate_name"],
+                "score": best_score,
+                "versao_divergente": versao_divergente,
+                "versao_novo": ", ".join(sorted(req_versions)) if req_versions else "Original / Álbum",
+                "versao_lib": ", ".join(sorted(lib_versions)) if lib_versions else "Original / Álbum"
             }
 
             if req.get("is_local_file"):
                 item_match["caminho_novo"] = req.get("filepath")
+                item_match["pasta_origem"] = req.get("pasta_origem", str(Path(req.get("filepath", "")).parent))
                 item_match["novo_bitrate"] = req.get("bitrate", 0)
                 item_match["novo_formato"] = req.get("ext", "").replace(".", "").upper()
                 item_match["novo_tamanho"] = req.get("filesize", 0)
+                item_match["novo_duracao"] = req.get("duration", 0.0)
+                item_match["audio_seal_novo"] = req.get("audio_seal", "")
 
-                # Avalia qualidade da biblioteca existente
+                # Avalia qualidade e duração física da biblioteca existente
                 lib_bitrate = 0
+                lib_duration = 0.0
                 lib_ext = Path(best_match["full_path"]).suffix.upper().replace(".", "")
                 lib_size = 0
+                lib_seal = ""
+
                 try:
                     lib_size = Path(best_match["full_path"]).stat().st_size
                     if mutagen:
                         la = mutagen.File(best_match["full_path"])
                         if la and getattr(la, "info", None):
                             lib_bitrate = round(getattr(la.info, "bitrate", 0) / 1000)
+                            lib_duration = round(getattr(la.info, "length", 0.0), 1)
                 except Exception:
                     pass
 
                 item_match["lib_bitrate"] = lib_bitrate
                 item_match["lib_formato"] = lib_ext
                 item_match["lib_tamanho"] = lib_size
+                item_match["lib_duracao"] = lib_duration
 
-                # Upgrade se novo bitrate for superior em pelo menos 32k ou formato superior
-                is_upgrade = False
+                # Compara duração física das faixas
+                dur_novo = req.get("duration", 0.0)
+                delta_dur = abs(dur_novo - lib_duration) if (dur_novo > 0 and lib_duration > 0) else 0.0
+                item_match["delta_duracao"] = round(delta_dur, 1)
+
+                duracao_incompativel = (dur_novo > 15 and lib_duration > 15 and delta_dur > 5.0)
+                item_match["duracao_incompativel"] = duracao_incompativel
+
+                # Avalia se a faixa nova tem qualidade técnica superior
+                bitrate_superior = False
                 if req.get("bitrate", 0) > (lib_bitrate + 32):
-                    is_upgrade = True
+                    bitrate_superior = True
                 elif req.get("ext") in ('.flac', '.wav', '.aif') and lib_ext in ('MP3', 'AAC', 'M4A') and lib_bitrate < 320:
-                    is_upgrade = True
+                    bitrate_superior = True
 
-                item_match["upgrade_disponivel"] = is_upgrade
-                item_match["status_comparacao"] = "UPGRADE_DISPONIVEL" if is_upgrade else "JA_POSSUI_QUALIDADE"
+                # TRAVA DE SEGURANÇA CONTRA SUBSTITUIÇÃO INDEVIDA (REMIX VS ORIGINAL)
+                is_safe_upgrade = False
+                aviso_motivo = None
+
+                if versao_divergente:
+                    status_comp = "VERSAO_DIVERGENTE"
+                    aviso_motivo = f"⚠️ Conflito de Versão: '{item_match['versao_novo']}' vs '{item_match['versao_lib']}'. Não sobrescrever a original!"
+                elif duracao_incompativel:
+                    status_comp = "DURACAO_INCOMPATIVEL"
+                    aviso_motivo = f"⚠️ Duração Incompatível: difere em {round(delta_dur, 1)}s. Provável versão estendida ou remix."
+                elif bitrate_superior:
+                    # Calcula hash de áudio do arquivo original para confirmar
+                    lib_seal = compute_audio_seal(best_match["full_path"])
+                    item_match["audio_seal_lib"] = lib_seal
+                    is_safe_upgrade = True
+                    status_comp = "UPGRADE_SEGURO"
+                    aviso_motivo = f"✅ Upgrade Seguro: Mesma versão ({round(delta_dur, 1)}s de diferença), qualidade {req.get('bitrate', 0)}k vs {lib_bitrate}k."
+                else:
+                    status_comp = "JA_POSSUI_QUALIDADE"
+                    aviso_motivo = f"Qualidade atual no HD ({lib_bitrate}k) já é satisfatória."
+
+                item_match["upgrade_disponivel"] = is_safe_upgrade
+                item_match["upgrade_seguro"] = is_safe_upgrade
+                item_match["status_comparacao"] = status_comp
+                item_match["aviso_incompatibilidade"] = aviso_motivo
 
             matched.append(item_match)
         else:
             missing_item = {
                 "solicitado": req["raw"],
                 "artista": req.get("artist", ""),
-                "titulo": req.get("title", req["raw"])
+                "titulo": req.get("title", req["raw"]),
+                "versao": ", ".join(sorted(req_versions)) if req_versions else "Original"
             }
             if req.get("is_local_file"):
                 missing_item["caminho_novo"] = req.get("filepath")
+                missing_item["pasta_origem"] = req.get("pasta_origem", str(Path(req.get("filepath", "")).parent))
                 missing_item["novo_bitrate"] = req.get("bitrate", 0)
                 missing_item["novo_formato"] = req.get("ext", "").replace(".", "").upper()
                 missing_item["novo_tamanho"] = req.get("filesize", 0)
+                missing_item["novo_duracao"] = req.get("duration", 0.0)
+                missing_item["audio_seal_novo"] = req.get("audio_seal", "")
                 missing_item["status_comparacao"] = "FAIXA_NOVA"
 
             missing.append(missing_item)
@@ -357,6 +531,7 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
         "total_encontradas": len(matched),
         "total_faltantes": len(missing),
         "total_upgrades": sum(1 for m in matched if m.get("upgrade_disponivel")),
+        "total_divergentes": sum(1 for m in matched if m.get("versao_divergente") or m.get("duracao_incompativel")),
         "encontradas": matched,
         "faltantes": missing
     }
@@ -407,10 +582,11 @@ def export_matched_to_serato_crate(crate_name: str, matched_items: list, serato_
     }
 
 
-def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str) -> dict:
+def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str, force: bool = False) -> dict:
     """
     Substitui a faixa antiga de menor qualidade pela nova faixa diretamente no mesmo local físico.
     Move a antiga para quarentena e clona tags Serato Markers (Hot Cues / Beatgrid).
+    Possui trava de segurança estrita contra sobreposição de remixes e durações incompatíveis.
     """
     inc_p = Path(os.path.expanduser(incoming_path_str)).resolve()
     dest_p = Path(os.path.expanduser(destination_path_str)).resolve()
@@ -419,6 +595,41 @@ def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str
         return {"sucesso": False, "erro": "Arquivo novo da pasta de novidades não encontrado."}
     if not dest_p.exists():
         return {"sucesso": False, "erro": "Arquivo original da biblioteca não encontrado no disco."}
+
+    # 1. TRAVA DE SEGURANÇA CONTRA SUBSTITUIÇÃO INDEVIDA (REMIX VS ORIGINAL / DURAÇÃO INCOMPATÍVEL)
+    if not force:
+        # Verifica descritores de versão nos nomes dos arquivos
+        inc_versions = extract_version_descriptors(inc_p.stem)
+        dest_versions = extract_version_descriptors(dest_p.stem)
+        has_remix_inc = any('remix' in v or 'mix' in v for v in inc_versions)
+        has_remix_dest = any('remix' in v or 'mix' in v for v in dest_versions)
+        has_live_inc = any('live' in v or 'ao vivo' in v for v in inc_versions)
+        has_live_dest = any('live' in v or 'ao vivo' in v for v in dest_versions)
+
+        if (has_remix_inc != has_remix_dest) or (has_live_inc != has_live_dest):
+            return {
+                "sucesso": False,
+                "bloqueado_seguranca": True,
+                "erro": f"Substituição bloqueada por segurança: Versões incompatíveis ('{inc_p.name}' vs '{dest_p.name}'). Faixa de remix não pode sobrescrever a versão original!"
+            }
+
+        # Verifica diferença de duração física do áudio
+        if mutagen:
+            try:
+                inc_audio = mutagen.File(str(inc_p))
+                dest_audio = mutagen.File(str(dest_p))
+                if inc_audio and dest_audio and inc_audio.info and dest_audio.info:
+                    inc_dur = getattr(inc_audio.info, "length", 0.0)
+                    dest_dur = getattr(dest_audio.info, "length", 0.0)
+                    delta_dur = abs(inc_dur - dest_dur)
+                    if inc_dur > 15 and dest_dur > 15 and delta_dur > 5.0:
+                        return {
+                            "sucesso": False,
+                            "bloqueado_seguranca": True,
+                            "erro": f"Substituição bloqueada por segurança: Duração difere em {round(delta_dur, 1)}s ({round(inc_dur, 1)}s vs {round(dest_dur, 1)}s). Provável remix ou edição estendida."
+                        }
+            except Exception:
+                pass
 
     quarantine_dir = Path.home() / ".serato_quarentena_audio"
     quarantine_dir.mkdir(parents=True, exist_ok=True)
@@ -462,7 +673,7 @@ def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str
         return {"sucesso": False, "erro": str(e)}
 
 
-def batch_replace_upgrades(upgrades_list: list) -> dict:
+def batch_replace_upgrades(upgrades_list: list, force: bool = False) -> dict:
     """Executa substituição de faixas em lote para upgrades de qualidade."""
     total = len(upgrades_list)
     updated = 0
@@ -471,8 +682,9 @@ def batch_replace_upgrades(upgrades_list: list) -> dict:
     for item in upgrades_list:
         inc = item.get("caminho_novo")
         dest = item.get("caminho_completo")
+        item_force = item.get("force", force)
         if inc and dest:
-            res = replace_track_with_upgrade(inc, dest)
+            res = replace_track_with_upgrade(inc, dest, force=item_force)
             if res.get("sucesso"):
                 updated += 1
             else:
