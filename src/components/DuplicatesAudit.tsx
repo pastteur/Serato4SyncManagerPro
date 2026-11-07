@@ -1,7 +1,14 @@
-import React, { useState, useMemo } from 'react';
-import { Copy, Search, FileSpreadsheet, FolderOpen, BarChart3, Database, Eye, Trash2, CheckCircle2, CheckSquare, Square, AlertTriangle } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import {
+  Copy, Search, FileSpreadsheet, FolderOpen, BarChart3, Database,
+  Eye, Trash2, CheckCircle2, CheckSquare, Square, AlertTriangle,
+  FolderPlus, Layers, Play, RefreshCw, X, ChevronDown, ChevronUp,
+  HardDrive, Laptop, Sparkles, ShieldCheck
+} from 'lucide-react';
 import { DuplicateItem } from '../types';
 import { ConfirmModal } from './ConfirmModal';
+
+const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
 interface DuplicatesAuditProps {
   duplicates: DuplicateItem[];
@@ -10,6 +17,8 @@ interface DuplicatesAuditProps {
   onExportCsv?: () => void;
   onOpenFileInFinder?: (filePath: string) => void;
   onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
+  mp3Path?: string;
+  seratoPath?: string;
 }
 
 export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
@@ -18,7 +27,9 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   onOpenLogsFolder,
   onExportCsv,
   onOpenFileInFinder,
-  onMoveToTrash
+  onMoveToTrash,
+  mp3Path,
+  seratoPath
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedFolderFilter, setSelectedFolderFilter] = useState<string>('all');
@@ -27,6 +38,27 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(new Set());
   const [isBatchDeleting, setIsBatchDeleting] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
+
+  // Estados da Varredura Lateral Multi-Pastas
+  const [showMultiScanner, setShowMultiScanner] = useState<boolean>(() => duplicates.length === 0);
+  const [customRoots, setCustomRoots] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('serato_duplicates_custom_roots');
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [includeSerato, setIncludeSerato] = useState<boolean>(true);
+  const [isScanningMulti, setIsScanningMulti] = useState<boolean>(false);
+  const [multiProgress, setMultiProgress] = useState<{ fase: string; detalhe: string } | null>(null);
+  const [customDuplicates, setCustomDuplicates] = useState<DuplicateItem[] | null>(null);
+  const [multiScanStats, setMultiScanStats] = useState<{
+    totalArquivos: number;
+    grupos: number;
+    copiasRedundantes: number;
+    bytesRecuperaveis: number;
+  } | null>(null);
 
   // Modal de Confirmação em Tela
   const [modalConfig, setModalConfig] = useState<{
@@ -45,20 +77,23 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
 
   const [statusQuickFilter, setStatusQuickFilter] = useState<'all' | 'suffix' | 'selected'>('all');
 
+  // Fonte de dados ativa: customizada (multi-pastas) ou a sincronização padrão
+  const currentDuplicates = customDuplicates !== null ? customDuplicates : duplicates;
+
   // Filtra itens deletados
   const activeDuplicates = useMemo(() => {
-    return duplicates.filter(d => !deletedIds.has(d.id));
-  }, [duplicates, deletedIds]);
+    return currentDuplicates.filter(d => !deletedIds.has(d.id));
+  }, [currentDuplicates, deletedIds]);
 
   // Lista de pastas únicas
   const uniqueFolders = useMemo(() => {
     const folders = new Set<string>();
-    duplicates.forEach(d => {
+    activeDuplicates.forEach(d => {
       const folderName = d.copia.split('/').pop() || 'Desconhecida';
       folders.add(folderName);
     });
     return Array.from(folders).sort();
-  }, [duplicates]);
+  }, [activeDuplicates]);
 
   const filteredDuplicates = useMemo(() => {
     return activeDuplicates.filter(d => {
@@ -102,6 +137,174 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     const mb = bytes / (1024 * 1024);
     if (mb > 1024) return `${(mb / 1024).toFixed(2)} GB`;
     return `${mb.toFixed(1)} MB`;
+  };
+
+  // Gerenciamento de pastas da varredura lateral
+  const handleAddFolders = async () => {
+    if (!isTauri) return;
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const selected = await open({
+        directory: true,
+        multiple: true,
+        title: 'Selecione uma ou mais pastas para cruzar'
+      });
+      if (selected) {
+        const pathsToAdd = Array.isArray(selected) ? selected : [selected];
+        setCustomRoots(prev => {
+          const next = Array.from(new Set([...prev, ...pathsToAdd]));
+          localStorage.setItem('serato_duplicates_custom_roots', JSON.stringify(next));
+          return next;
+        });
+      }
+    } catch (err) {
+      console.error('Falha ao abrir seletor de pastas:', err);
+    }
+  };
+
+  const handleRemoveFolder = (pathToRemove: string) => {
+    setCustomRoots(prev => {
+      const next = prev.filter(p => p !== pathToRemove);
+      localStorage.setItem('serato_duplicates_custom_roots', JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const handleClearFolders = () => {
+    setCustomRoots([]);
+    localStorage.removeItem('serato_duplicates_custom_roots');
+  };
+
+  // Executar a análise lateral multi-pastas
+  const handleRunMultiScan = async () => {
+    if (!isTauri) return;
+    const effectiveRoots = [...customRoots];
+    const hasSerato = includeSerato && Boolean(mp3Path);
+
+    if (effectiveRoots.length === 0 && !hasSerato) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Pasta Informada',
+        message: 'Por favor, adicione ao menos uma pasta ou ative a opção de cruzar com a biblioteca Serato para iniciar a análise lateral.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
+      return;
+    }
+
+    if (effectiveRoots.length === 1 && !hasSerato) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Apenas 1 Pasta Informada',
+        message: 'A análise lateral compara arquivos entre diferentes pastas ou contra a biblioteca Serato. Adicione uma segunda pasta ou marque a opção de cruzar com o Serato.',
+        confirmText: 'Entendido',
+        variant: 'warning',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
+      return;
+    }
+
+    setIsScanningMulti(true);
+    setMultiProgress({
+      fase: 'Iniciando Análise Lateral Cruzada...',
+      detalhe: `Preparando ${effectiveRoots.length} pasta(s) para catalogação e cruzamento...`
+    });
+
+    let unlisten: (() => void) | undefined;
+    try {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<string>('duplicates-progress', (event) => {
+        try {
+          const payload = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
+          if (payload.tipo === 'progresso') {
+            if (payload.fase === 'varredura') {
+              setMultiProgress({
+                fase: `Varredura de Pastas (${payload.raiz_indice}/${payload.total_raizes})`,
+                detalhe: `${payload.raiz} — ${payload.arquivos} arquivos catalogados...`
+              });
+            } else if (payload.fase === 'comparacao') {
+              setMultiProgress({
+                fase: 'Comparação Lateral Cruzada',
+                detalhe: `Cruzando ${payload.total_arquivos} faixas entre todas as pastas informadas...`
+              });
+            } else if (payload.fase === 'hash') {
+              setMultiProgress({
+                fase: `Validação Sound Seal SHA-256 (${payload.grupo}/${payload.total_grupos})`,
+                detalhe: `Calculando hash acústico puro: ${payload.arquivo}`
+              });
+            }
+          }
+        } catch (_) {}
+      });
+
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resStr = await invoke<string>('scan_duplicates_multi', {
+        roots: effectiveRoots,
+        includeSeratoPath: hasSerato ? mp3Path : null
+      });
+
+      if (!resStr || !resStr.trim()) {
+        throw new Error('O analisador não retornou dados.');
+      }
+
+      const data = JSON.parse(resStr);
+      if (data && data.itens) {
+        const mapped: DuplicateItem[] = [];
+        data.itens.forEach((g: any, gIdx: number) => {
+          const keeper = (g.arquivos && g.arquivos.find((a: any) => a.sugerido_manter)) || (g.arquivos && g.arquivos[0]);
+          if (keeper && g.arquivos) {
+            g.arquivos.forEach((a: any, aIdx: number) => {
+              if (a.caminho !== keeper.caminho) {
+                mapped.push({
+                  id: `${g.id || gIdx}-${aIdx}`,
+                  nome: g.nome,
+                  copia: a.raiz,
+                  original: keeper.raiz,
+                  caminho_copia: a.caminho,
+                  caminho_original: keeper.caminho,
+                  tamanho: a.tamanho,
+                  grau_certeza: g.grau_certeza,
+                  motivo: `${g.motivo || 'Duplicata lateral identificada'} (Bitrate: ${a.bitrate_kbps || '?'} kbps vs Original: ${keeper.bitrate_kbps || '?'} kbps)`,
+                  hash_audio: g.hash_audio,
+                });
+              }
+            });
+          }
+        });
+
+        setCustomDuplicates(mapped);
+        setDeletedIds(new Set());
+        setSelectedBatchIds(new Set());
+        setMultiScanStats({
+          totalArquivos: data.total_arquivos || 0,
+          grupos: data.grupos || 0,
+          copiasRedundantes: data.copias_redundantes || 0,
+          bytesRecuperaveis: data.bytes_recuperaveis || 0
+        });
+      }
+    } catch (err: any) {
+      console.error('Falha na análise lateral multi-pastas:', err);
+      setModalConfig({
+        isOpen: true,
+        title: 'Erro na Análise Lateral',
+        message: `Não foi possível concluir o cruzamento de pastas:\n\n${err?.message || err}`,
+        confirmText: 'Fechar',
+        variant: 'danger',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
+    } finally {
+      if (unlisten) unlisten();
+      setIsScanningMulti(false);
+      setMultiProgress(null);
+    }
+  };
+
+  const handleRestoreDefaultSync = () => {
+    setCustomDuplicates(null);
+    setDeletedIds(new Set());
+    setSelectedBatchIds(new Set());
+    setMultiScanStats(null);
   };
 
   // Toggle de seleção individual
@@ -149,7 +352,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     setModalConfig({
       isOpen: true,
       title: 'Mover Duplicada para Lixeira',
-      message: `Deseja mover a cópia redundante para a Lixeira do macOS?\n\nFaixa: ${item.nome}\nPasta: ${item.copia}\n\nNota: A faixa original permanecerá 100% segura e intacta.`,
+      message: `Deseja mover a cópia redundante para a Lixeira do macOS?\n\nFaixa: ${item.nome}\nPasta da cópia: ${item.copia}\n\nNota: A faixa original permanecerá 100% segura e intacta.`,
       confirmText: 'Mover para Lixeira',
       variant: 'danger',
       onConfirm: async () => {
@@ -189,7 +392,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     setModalConfig({
       isOpen: true,
       title: 'Mover Lote para a Lixeira',
-      message: `⚠️ Deseja mover as ${toDelete.length} faixas duplicadas selecionadas para a Lixeira?\n\n🔒 As faixas originais serão preservadas 100% intactas.\nEsta ação liberará espaço no disco com segurança.`,
+      message: `⚠️ Deseja mover as ${toDelete.length} faixas duplicadas selecionadas para a Lixeira?\n\n🔒 As faixas originais serão preservadas 100% intactas.\nEsta ação liberará espaço no disco com segurança e respeita a trava do Serato.`,
       confirmText: `Mover ${toDelete.length} Faixas`,
       variant: 'danger',
       onConfirm: async () => {
@@ -238,6 +441,12 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
             <span className="text-xs bg-serato-orange/15 text-serato-orange px-2 py-0.5 rounded-full border border-serato-orange/30 font-mono">
               {activeDuplicates.length} cópias redundantes
             </span>
+            {customDuplicates !== null && (
+              <span className="text-xs bg-purple-950/60 text-purple-300 px-2 py-0.5 rounded-full border border-purple-700/50 font-mono flex items-center gap-1">
+                <Layers className="w-3 h-3 text-purple-400" />
+                Modo Lateral Multi-Pastas
+              </span>
+            )}
             {deletedIds.size > 0 && (
               <span className="text-xs bg-emerald-950/60 text-emerald-400 px-2 py-0.5 rounded-full border border-emerald-700/40 font-mono flex items-center gap-1">
                 <CheckCircle2 className="w-3 h-3" />
@@ -246,11 +455,42 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
             )}
           </h3>
           <p className="text-[11px] text-serato-muted">
-            Revise as faixas repetidas e exclua apenas as cópias para economizar espaço sem perder metadados do Serato.
+            {customDuplicates !== null
+              ? 'Resultado da análise lateral cruzada entre múltiplas pastas e discos externos com proteção de metadados.'
+              : 'Revise as faixas repetidas e exclua apenas as cópias para economizar espaço sem perder metadados do Serato.'}
           </p>
         </div>
 
         <div className="flex items-center space-x-2">
+          {/* Botão de alternar o painel multi-pastas */}
+          <button
+            type="button"
+            onClick={() => setShowMultiScanner(prev => !prev)}
+            className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border transition flex items-center gap-1.5 cursor-pointer ${
+              showMultiScanner
+                ? 'bg-purple-950/60 text-purple-200 border-purple-700/60 shadow-sm'
+                : 'bg-serato-card hover:bg-slate-700 text-slate-200 border-serato-cardBorder'
+            }`}
+            title="Configurar múltiplas pastas para varredura lateral cruzada"
+          >
+            <Layers className="w-3.5 h-3.5 text-purple-400" />
+            <span>Varredura Multi-Pastas</span>
+            {showMultiScanner ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+
+          {/* Botão Voltar para Sincronização Padrão */}
+          {customDuplicates !== null && (
+            <button
+              type="button"
+              onClick={handleRestoreDefaultSync}
+              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-serato-card hover:bg-slate-700 text-slate-300 border border-serato-cardBorder transition flex items-center gap-1.5 cursor-pointer"
+              title="Voltar para os resultados da sincronização inicial"
+            >
+              <RefreshCw className="w-3.5 h-3.5 text-serato-cyan" />
+              <span>Restaurar Original</span>
+            </button>
+          )}
+
           {/* Botão de Exclusão em Lote */}
           {selectedBatchIds.size > 0 && (
             <button
@@ -290,11 +530,189 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
         </div>
       </div>
 
+      {/* PAINEL DE VARREDURA LATERAL MULTI-PASTAS */}
+      {showMultiScanner && (
+        <div className="bg-purple-950/20 border border-purple-800/40 rounded-xl p-3.5 space-y-3 shrink-0 shadow-inner">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-2 border-b border-purple-800/30">
+            <div className="flex items-center gap-2">
+              <Layers className="w-4 h-4 text-purple-400" />
+              <h4 className="text-xs font-bold text-white uppercase tracking-wider">
+                Análise Lateral Cruzada Multi-Pastas (Cross-Folders)
+              </h4>
+              <span className="text-[10px] bg-emerald-950/80 text-emerald-300 px-2 py-0.5 rounded border border-emerald-700/60 font-mono flex items-center gap-1">
+                <ShieldCheck className="w-3 h-3" />
+                Sound Seal SHA-256 Puro
+              </span>
+            </div>
+            <p className="text-[11px] text-purple-300/80">
+              Adicione pastas de qualquer local (Mac, Pen-drive, HD Externo). O motor cruza todas as faixas entre si.
+            </p>
+          </div>
+
+          {/* Pastas Selecionadas */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {customRoots.length === 0 ? (
+                <div className="text-xs text-slate-400 italic py-1">
+                  Nenhuma pasta avulsa adicionada. Clique abaixo para escolher pastas locais ou externas.
+                </div>
+              ) : (
+                customRoots.map((rootPath) => {
+                  const isExternal = rootPath.startsWith('/Volumes/');
+                  return (
+                    <div
+                      key={rootPath}
+                      className="bg-serato-card/90 border border-purple-600/40 rounded-lg px-2.5 py-1.5 flex items-center gap-2 text-xs shadow-sm max-w-full"
+                    >
+                      {isExternal ? (
+                        <HardDrive className="w-3.5 h-3.5 text-serato-gold shrink-0" />
+                      ) : (
+                        <Laptop className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+                      )}
+                      <span className="font-mono text-slate-200 truncate max-w-[280px] md:max-w-md select-all" title={rootPath}>
+                        {rootPath}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveFolder(rootPath)}
+                        className="text-slate-400 hover:text-rose-400 p-0.5 transition cursor-pointer"
+                        title="Remover pasta da lista"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Controles de Configuração e Disparo */}
+            <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleAddFolders}
+                  disabled={isScanningMulti}
+                  className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-purple-700/40 hover:bg-purple-700/60 text-purple-200 border border-purple-500/50 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                >
+                  <FolderPlus className="w-3.5 h-3.5" />
+                  <span>Adicionar Pasta...</span>
+                </button>
+
+                {customRoots.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClearFolders}
+                    disabled={isScanningMulti}
+                    className="text-xs text-slate-400 hover:text-rose-300 px-2 py-1 transition cursor-pointer disabled:opacity-50"
+                  >
+                    Limpar Pastas
+                  </button>
+                )}
+
+                {mp3Path && (
+                  <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none bg-black/20 px-2.5 py-1 rounded border border-white/5 hover:border-white/10">
+                    <input
+                      type="checkbox"
+                      checked={includeSerato}
+                      onChange={(e) => setIncludeSerato(e.target.checked)}
+                      disabled={isScanningMulti}
+                      className="rounded border-slate-700 bg-serato-dark text-purple-500 focus:ring-0 cursor-pointer"
+                    />
+                    <span>Cruzar também com Master Serato:</span>
+                    <span className="font-mono text-serato-cyan truncate max-w-[180px]" title={mp3Path}>
+                      {mp3Path.split('/').pop()}
+                    </span>
+                  </label>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={handleRunMultiScan}
+                disabled={isScanningMulti || (customRoots.length === 0 && (!includeSerato || !mp3Path))}
+                className="text-xs font-bold px-4 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg shadow-purple-900/40 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isScanningMulti ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Analisando Lateralmente...</span>
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Iniciar Análise Lateral</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Progresso da Varredura Lateral */}
+          {isScanningMulti && multiProgress && (
+            <div className="bg-black/40 border border-purple-500/40 rounded-lg p-2.5 space-y-1.5 animate-pulse">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-purple-300 flex items-center gap-1.5">
+                  <RefreshCw className="w-3 h-3 animate-spin text-purple-400" />
+                  {multiProgress.fase}
+                </span>
+                <span className="text-[10px] text-serato-muted font-mono">Modo Seguro Ativo</span>
+              </div>
+              <p className="text-[11px] text-slate-300 truncate font-mono">
+                {multiProgress.detalhe}
+              </p>
+            </div>
+          )}
+
+          {/* Estatísticas da Varredura Lateral */}
+          {multiScanStats && !isScanningMulti && (
+            <div className="bg-emerald-950/30 border border-emerald-700/50 rounded-lg p-2.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-emerald-300 font-medium">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span>
+                  Varredura Lateral Concluída: <strong>{multiScanStats.totalArquivos}</strong> faixas cruzadas entre as pastas.
+                </span>
+              </div>
+              <div className="flex items-center gap-3 font-mono text-[11px]">
+                <span className="text-purple-300">
+                  Grupos: <strong>{multiScanStats.grupos}</strong>
+                </span>
+                <span className="text-amber-300">
+                  Cópias: <strong>{multiScanStats.copiasRedundantes}</strong>
+                </span>
+                <span className="text-serato-gold font-bold">
+                  Espaço recuperável: {formatSize(multiScanStats.bytesRecuperaveis)}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* LISTAGEM DE DUPLICADAS */}
       {activeDuplicates.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-slate-500 space-y-2 select-none py-10">
           <Database className="w-10 h-10 mx-auto text-serato-muted/40" />
-          <p className="text-sm font-medium text-slate-400">Nenhuma faixa duplicada na biblioteca.</p>
-          <p className="text-xs text-slate-600">Sua coleção está limpa e organizada sem arquivos repetidos.</p>
+          <p className="text-sm font-medium text-slate-400">
+            {customDuplicates !== null
+              ? 'Nenhuma duplicata encontrada entre as pastas analisadas.'
+              : 'Nenhuma faixa duplicada na biblioteca.'}
+          </p>
+          <p className="text-xs text-slate-600">
+            {customDuplicates !== null
+              ? 'Todas as faixas das pastas selecionadas possuem conteúdos acústicos únicos.'
+              : 'Sua coleção está limpa e organizada sem arquivos repetidos.'}
+          </p>
+          {!showMultiScanner && (
+            <button
+              type="button"
+              onClick={() => setShowMultiScanner(true)}
+              className="mt-2 text-xs font-semibold px-3 py-1.5 rounded-lg bg-purple-900/30 hover:bg-purple-900/50 text-purple-300 border border-purple-700/40 transition flex items-center gap-1.5 cursor-pointer"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Abrir Analisador Multi-Pastas</span>
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -412,7 +830,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
             </div>
           </div>
 
-          {/* Duplicates Full Table with Individual and Batch Actions */}
+          {/* Tabela Completa de Duplicadas com Ações Individuais e em Lote */}
           <div className="flex-1 border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col min-h-0 bg-serato-card/20">
             <div className="overflow-y-auto flex-1">
               <table className="w-full text-left text-xs">
@@ -427,9 +845,9 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                         title="Selecionar todos os visíveis"
                       />
                     </th>
-                    <th className="py-2 px-3">Faixa e Metadados</th>
+                    <th className="py-2 px-3">Faixa e Detalhes</th>
                     <th className="py-2 px-3">Localização da Cópia (Redundante)</th>
-                    <th className="py-2 px-3">Localização da Original (Preservar)</th>
+                    <th className="py-2 px-3">Localização da Original (Preservada)</th>
                     <th className="py-2 px-3 text-right">Tamanho</th>
                     <th className="py-2 px-3 text-center">Ações</th>
                   </tr>
@@ -437,6 +855,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                 <tbody className="divide-y divide-serato-cardBorder/50 font-mono text-[11px]">
                   {filteredDuplicates.map((item) => {
                     const copyPath = item.caminho_copia || `${item.copia}/${item.nome}`;
+                    const originalPath = item.caminho_original || `${item.original}/${item.nome}`;
                     const isSelected = selectedBatchIds.has(item.id);
 
                     return (
@@ -454,7 +873,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                           />
                         </td>
 
-                        {/* Track Name */}
+                        {/* Nome da Faixa e Tags */}
                         <td className="py-2 px-3 text-white font-sans font-medium">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="w-2 h-2 rounded-full bg-serato-orange shrink-0" />
@@ -469,42 +888,47 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                                   ? 'bg-yellow-950/70 text-yellow-300 border-yellow-700/60'
                                   : 'bg-orange-950/70 text-orange-300 border-orange-700/60'
                               }`} title={item.motivo || ''}>
-                                {item.grau_certeza === 'IDENTICO_COMPROVADO' ? '✅ 100% IDÊNTICO' : item.grau_certeza === 'POSSIVEL_DUPLICADO' ? '⚠️ POSSÍVEL' : 'ℹ️ SEMELHANTE'}
+                                {item.grau_certeza === 'IDENTICO_COMPROVADO' ? '✅ SHA-256 IDÊNTICO' : item.grau_certeza === 'POSSIVEL_DUPLICADO' ? '⚠️ POSSÍVEL' : 'ℹ️ SEMELHANTE'}
                               </span>
                             )}
                           </div>
+                          {item.motivo && (
+                            <div className="text-[10px] text-serato-muted mt-0.5 truncate max-w-sm" title={item.motivo}>
+                              {item.motivo}
+                            </div>
+                          )}
                         </td>
 
-                        {/* Copy Location */}
+                        {/* Localização da Cópia */}
                         <td className="py-2 px-3">
                           <div className="flex items-center space-x-1.5">
                             <span className="text-[10px] bg-amber-950/50 text-amber-300 px-1.5 py-0.2 rounded border border-amber-800/40 shrink-0 font-sans">
                               Cópia
                             </span>
-                            <span className="text-slate-300 truncate max-w-[190px]" title={item.copia}>
-                              {item.copia.split('/').slice(-2).join('/')}
+                            <span className="text-slate-300 truncate max-w-[190px]" title={copyPath}>
+                              {copyPath.split('/').slice(-2).join('/')}
                             </span>
                           </div>
                         </td>
 
-                        {/* Original Location */}
+                        {/* Localização da Original */}
                         <td className="py-2 px-3">
                           <div className="flex items-center space-x-1.5">
                             <span className="text-[10px] bg-emerald-950/50 text-emerald-300 px-1.5 py-0.2 rounded border border-emerald-800/40 shrink-0 font-sans">
                               Original
                             </span>
-                            <span className="text-slate-400 truncate max-w-[190px]" title={item.original}>
-                              {item.original.split('/').slice(-2).join('/')}
+                            <span className="text-slate-400 truncate max-w-[190px]" title={originalPath}>
+                              {originalPath.split('/').slice(-2).join('/')}
                             </span>
                           </div>
                         </td>
 
-                        {/* Size */}
+                        {/* Tamanho */}
                         <td className="py-2 px-3 text-right text-serato-muted">
                           {formatSize(item.tamanho)}
                         </td>
 
-                        {/* Actions */}
+                        {/* Ações */}
                         <td className="py-2 px-3">
                           <div className="flex items-center justify-center space-x-1.5">
                             {onOpenFileInFinder && (
@@ -538,7 +962,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
               </table>
             </div>
 
-            {/* Table Footer with Summary */}
+            {/* Rodapé da Tabela com Resumo */}
             <div className="bg-serato-header px-3 py-1.5 border-t border-serato-cardBorder text-[11px] text-serato-muted flex items-center justify-between shrink-0">
               <div className="flex items-center gap-3">
                 <span>Exibindo {filteredDuplicates.length} de {activeDuplicates.length} duplicatas</span>
@@ -548,7 +972,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                   </span>
                 )}
               </div>
-              {csvPath && (
+              {csvPath && customDuplicates === null && (
                 <span className="truncate max-w-[400px]">CSV: <code className="text-slate-300">{csvPath}</code></span>
               )}
             </div>

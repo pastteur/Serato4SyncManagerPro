@@ -1292,8 +1292,9 @@ mod commands {
 
     /// Executa um script Python e devolve a última linha JSON da saída.
     fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
-        let path = find_python_script(Some(app), script);
-        let mut cmd = Command::new("/usr/bin/python3");
+        let path = find_canonical_python_script(Some(app), script)?;
+        let python_bin = find_python_binary()?;
+        let mut cmd = Command::new(&python_bin);
         cmd.arg(&path);
         for a in args {
             cmd.arg(a);
@@ -1324,8 +1325,9 @@ mod commands {
         roots: Vec<String>,
         include_serato_path: Option<String>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "duplicates_tool.py");
-        let mut cmd = Command::new("/usr/bin/python3");
+        let script = find_canonical_python_script(Some(&app), "duplicates_tool.py")?;
+        let python_bin = find_python_binary()?;
+        let mut cmd = Command::new(&python_bin);
         cmd.arg(&script).arg("--roots");
         for r in &roots {
             cmd.arg(r);
@@ -1338,24 +1340,55 @@ mod commands {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar análise de duplicados: {}", e))?;
-        let mut final_json = String::new();
-        if let Some(stdout) = child.stdout.take() {
-            for line_res in BufReader::new(stdout).lines() {
-                if let Ok(line) = line_res {
-                    let t = line.trim().to_string();
-                    if t.starts_with('{') {
-                        if t.contains("\"tipo\": \"progresso\"") {
-                            let _ = window.emit("duplicates-progress", t);
-                        } else {
-                            final_json = t;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let window_clone = window.clone();
+        let stdout_thread = std::thread::spawn(move || {
+            let mut final_json = String::new();
+            if let Some(out) = stdout {
+                for line_res in BufReader::new(out).lines() {
+                    if let Ok(line) = line_res {
+                        let t = line.trim().to_string();
+                        if t.starts_with('{') {
+                            if t.contains("\"tipo\": \"progresso\"") {
+                                let _ = window_clone.emit("duplicates-progress", &t);
+                            } else {
+                                final_json = t;
+                            }
                         }
                     }
                 }
             }
-        }
+            final_json
+        });
+
+        let stderr_thread = std::thread::spawn(move || {
+            let mut err_str = String::new();
+            if let Some(err) = stderr {
+                for line_res in BufReader::new(err).lines() {
+                    if let Ok(line) = line_res {
+                        if !err_str.is_empty() {
+                            err_str.push('\n');
+                        }
+                        err_str.push_str(&line);
+                    }
+                }
+            }
+            err_str
+        });
+
+        let final_json = stdout_thread.join().unwrap_or_default();
+        let err_output = stderr_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar duplicados: {}", e))?;
+
         if !status.success() && final_json.is_empty() {
-            return Err("Erro na execução da análise de duplicados".into());
+            let msg = if err_output.trim().is_empty() {
+                "Erro na execução da análise de duplicados".to_string()
+            } else {
+                err_output
+            };
+            return Err(msg);
         }
         Ok(final_json)
     }
@@ -1379,6 +1412,7 @@ mod commands {
         app: AppHandle,
         paths: Vec<String>,
     ) -> Result<String, String> {
+        bloqueio_serato("mover arquivos para a lixeira")?;
         let mut args: Vec<String> = vec!["--trash".into()];
         args.extend(paths);
         run_py_json(&app, "duplicates_tool.py", &args)
