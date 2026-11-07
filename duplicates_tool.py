@@ -196,12 +196,25 @@ def scan_roots(roots, serato_root=None, include_serato=None, progress=True):
     if progress:
         _emit({"tipo": "progresso", "fase": "comparacao", "total_arquivos": len(entradas)})
 
-    # 1. Agrupa por (nome normalizado, tamanho)
+    # 1. Agrupa por (nome normalizado, tamanho) e por tamanho exato (captura nomes divergentes)
     por_chave = {}
+    por_tam = {}
     for e in entradas:
         por_chave.setdefault((e["nome_norm"], e["tamanho"]), []).append(e)
+        if e["tamanho"] > 50 * 1024:
+            por_tam.setdefault(e["tamanho"], []).append(e)
 
-    candidatos = {k: v for k, v in por_chave.items() if len(v) > 1}
+    candidatos = {}
+    for k, v in por_chave.items():
+        if len(v) > 1:
+            candidatos[k] = v
+
+    for tam, v in por_tam.items():
+        if len(v) > 1:
+            caminhos_v = set(item["caminho"] for item in v)
+            ja_coberto = any(caminhos_v.issubset(set(ci["caminho"] for ci in g)) for g in candidatos.values())
+            if not ja_coberto:
+                candidatos[(f"match_tamanho_{tam}", tam)] = v
 
     # 2. Hash por grupo
     grupos = []
