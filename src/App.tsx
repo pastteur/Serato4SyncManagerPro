@@ -226,6 +226,7 @@ export const App: React.FC = () => {
   useEffect(() => {
     let unlistenLog: (() => void) | undefined;
     let unlistenFinish: (() => void) | undefined;
+    let unlistenWarning: (() => void) | undefined;
 
     if (isTauri) {
       import('@tauri-apps/api/event').then(({ listen }) => {
@@ -251,14 +252,38 @@ export const App: React.FC = () => {
           }
           addLog('🎯 Processo de sincronização encerrado pelo sistema.');
         }).then(unlisten => { unlistenFinish = unlisten; });
+
+        listen<string>('operation-in-progress-warning', (event) => {
+          alert(event.payload || '⚠️ Uma atividade crítica de sincronização está em andamento. Aguarde a finalização antes de fechar o aplicativo.');
+        }).then(unlisten => { unlistenWarning = unlisten; });
       });
     }
 
     return () => {
       if (unlistenLog) unlistenLog();
       if (unlistenFinish) unlistenFinish();
+      if (unlistenWarning) unlistenWarning();
     };
   }, [addLog]);
+
+  // Trava de segurança contra interrupção ou fechamento acidental da atividade em andamento
+  useEffect(() => {
+    if (isTauri) {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke('set_operation_active', { active: isRunning }).catch(() => {});
+      });
+    }
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isRunning) {
+        e.preventDefault();
+        e.returnValue = 'Uma atividade de sincronização está em andamento. Fechar o aplicativo agora pode corromper sua biblioteca.';
+        return e.returnValue;
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isRunning]);
 
   // Folder Selectors via @tauri-apps/plugin-dialog
   const handleSelectMp3 = async () => {

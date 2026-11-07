@@ -2,11 +2,25 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::channel;
 use std::time::Duration;
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter, Manager, Window};
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone)]
+pub struct AppSecurityState {
+    pub is_operation_active: Arc<AtomicBool>,
+}
+
+impl AppSecurityState {
+    pub fn new() -> Self {
+        Self {
+            is_operation_active: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct DetectedPaths {
@@ -814,6 +828,7 @@ mod commands {
     pub async fn start_sync(
         app: AppHandle,
         window: Window,
+        security_state: tauri::State<'_, AppSecurityState>,
         mp3_path: String,
         serato_path: String,
         export_csv: bool,
@@ -838,6 +853,8 @@ mod commands {
         let script_path = find_canonical_python_script(Some(&app), "serato_macos_app.py")?;
         let python_bin = find_python_binary()?;
         let window_clone = window.clone();
+        let is_op_active = security_state.is_operation_active.clone();
+        is_op_active.store(true, Ordering::SeqCst);
 
         std::thread::spawn(move || {
             let _ = window_clone.emit("sync-log", format!("🐍 Motor Python: {}", script_path.display()));
@@ -863,6 +880,7 @@ mod commands {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
+                    is_op_active.store(false, Ordering::SeqCst);
                     let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
                     let _ = window_clone.emit("sync-log", &err_msg);
                     let _ = window_clone.emit(
@@ -942,6 +960,7 @@ mod commands {
                     message,
                 },
             );
+            is_op_active.store(false, Ordering::SeqCst);
         });
 
         Ok(())
@@ -2834,13 +2853,35 @@ mod commands {
 
         Ok(true)
     }
+
+    #[tauri::command]
+    pub fn set_operation_active(state: tauri::State<'_, AppSecurityState>, active: bool) {
+        state.is_operation_active.store(active, Ordering::SeqCst);
+    }
+
+    #[tauri::command]
+    pub fn is_operation_active(state: tauri::State<'_, AppSecurityState>) -> bool {
+        state.is_operation_active.load(Ordering::SeqCst)
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let security_state = AppSecurityState::new();
+    let is_op_active_clone = security_state.is_operation_active.clone();
+
     tauri::Builder::default()
         .manage(FsWatcherState::new())
+        .manage(security_state)
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(move |window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if is_op_active_clone.load(Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = window.emit("operation-in-progress-warning", "⚠️ Uma atividade de sincronização ou gravação na biblioteca está em andamento. Aguarde a finalização antes de fechar o aplicativo para evitar corrupção de dados.");
+                }
+            }
+        })
         .setup(|app| {
             let app_handle = app.handle().clone();
 
@@ -2939,7 +2980,9 @@ pub fn run() {
             commands::crate_add_paths,
             commands::watch_music_folder,
             commands::stop_watching_folder,
-            commands::detect_dj_volumes
+            commands::detect_dj_volumes,
+            commands::set_operation_active,
+            commands::is_operation_active
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");
