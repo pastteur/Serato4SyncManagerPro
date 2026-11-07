@@ -146,17 +146,86 @@ fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> R
 fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
     find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name))
 }
-fn make_python_cmd(script: &Path, bin: &Path) -> Command {
+fn make_python_cmd_with_app(app: Option<&AppHandle>, script: &Path, bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+
+    // Localização canônica dos módulos embutidos (vendor)
+    let mut vendor_paths: Vec<PathBuf> = Vec::new();
+
+    // 1. Recursos do bundle .app (.app/Contents/Resources/vendor)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents_dir) = macos_dir.parent() {
+                let res_vendor = contents_dir.join("Resources").join("vendor");
+                if res_vendor.is_dir() {
+                    vendor_paths.push(res_vendor);
+                }
+            }
+        }
+    }
+
+    // 2. Recursos via Tauri handle
+    if let Some(handle) = app {
+        if let Ok(res_dir) = handle.path().resource_dir() {
+            let res_vendor = res_dir.join("vendor");
+            if res_vendor.is_dir() {
+                vendor_paths.push(res_vendor);
+            }
+        }
+    }
+
+    // 3. Fallback ao lado do próprio script ou workspace raiz
+    if let Some(parent) = script.parent() {
+        let script_vendor = parent.join("vendor");
+        if script_vendor.is_dir() {
+            vendor_paths.push(script_vendor);
+        }
+    }
+
+    // Se encontramos diretórios vendor, injetamos explicitamente no PYTHONPATH
+    if !vendor_paths.is_empty() {
+        let mut py_path_parts: Vec<String> = vendor_paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+
+        if let Ok(existing) = std::env::var("PYTHONPATH") {
+            if !existing.is_empty() {
+                py_path_parts.push(existing);
+            }
+        }
+
+        cmd.env("PYTHONPATH", py_path_parts.join(":"));
+    }
+
+    // Garante que /opt/homebrew/bin e /usr/local/bin estão no PATH para descoberta de ffmpeg
+    if let Ok(current_path) = std::env::var("PATH") {
+        let parts: Vec<&str> = current_path.split(':').collect();
+        let mut new_parts = Vec::new();
+        for p in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+            if !parts.contains(p) {
+                new_parts.push(*p);
+            }
+        }
+        if !new_parts.is_empty() {
+            let full_path = format!("{}:{}", new_parts.join(":"), current_path);
+            cmd.env("PATH", full_path);
+        }
+    }
+
     cmd.arg(script);
     cmd
+}
+
+fn make_python_cmd(script: &Path, bin: &Path) -> Command {
+    make_python_cmd_with_app(None, script, bin)
 }
 
 fn find_python_cmd(app: Option<&AppHandle>, script_name: &str) -> Command {
     let script = find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name));
     let bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
-    make_python_cmd(&script, &bin)
+    make_python_cmd_with_app(app, &script, &bin)
 }
 
 
