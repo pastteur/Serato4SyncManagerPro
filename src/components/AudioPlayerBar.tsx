@@ -158,6 +158,21 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({ track, onClose, 
         return;
       }
 
+      // Atalhos de busca rápida (Setas Esquerda/Direita)
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        const step = e.shiftKey ? 15 : 5;
+        jumpToTime((audioRef.current?.currentTime || currentTime) - step);
+        return;
+      }
+
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        const step = e.shiftKey ? 15 : 5;
+        jumpToTime((audioRef.current?.currentTime || currentTime) + step);
+        return;
+      }
+
       // Atalhos numéricos 1 a 5 para Hot Cues se existirem
       if (['1', '2', '3', '4', '5'].includes(e.key) && track.cues && track.cues.length > 0) {
         const cueIndex = parseInt(e.key, 10) - 1;
