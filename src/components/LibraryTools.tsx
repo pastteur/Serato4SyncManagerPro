@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Library, Gauge, FileDown, FileUp, Undo2, Radar, Layers, Sparkles, RefreshCw, Trash2, Play, Eye } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
+import { PlayingTrackInfo } from './AudioPlayerBar';
 
 interface LibraryToolsProps {
   onAddLog: (message: string) => void;
   mp3Path: string;
   seratoPath: string;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
 }
 
 const isTauriEnv = () => typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
@@ -60,7 +62,7 @@ const EmptyState: React.FC<{ text: string }> = ({ text }) => (
   <div className="py-4 text-center text-[11px] text-serato-muted border border-dashed border-serato-cardBorder rounded-lg">{text}</div>
 );
 
-export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, seratoPath }) => {
+export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, seratoPath, onPlayTrack }) => {
   const isTauri = isTauriEnv();
   const ready = Boolean(mp3Path && seratoPath);
 
@@ -374,7 +376,22 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
             <div className="max-h-40 overflow-y-auto space-y-1">
               <p className="text-[11px] text-serato-muted">{newFiles.total_novos} nova(s) · removidas: {newFiles.removidos}</p>
               {newFiles.novos.map((n: any) => (
-                <div key={n.arquivo} className="text-[11px] font-mono text-slate-300 truncate" title={n.arquivo}>{n.nome}</div>
+                <div key={n.arquivo} className="text-[11px] font-mono text-slate-300 truncate flex items-center gap-1.5" title={n.arquivo}>
+                  {onPlayTrack && (
+                    <button
+                      type="button"
+                      onClick={() => onPlayTrack({
+                        caminho: n.arquivo,
+                        nome: n.nome
+                      })}
+                      className="p-0.5 rounded hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer shrink-0"
+                      title="Tocar no Player nativo"
+                    >
+                      <Play className="w-2.5 h-2.5 fill-current" />
+                    </button>
+                  )}
+                  <span className="truncate">{n.nome}</span>
+                </div>
               ))}
             </div>
           )}
@@ -429,7 +446,25 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
               <tbody>
                 {analysisRows.map((r, i) => (
                   <tr key={`${r.arquivo}-${i}`} className="border-t border-serato-cardBorder">
-                    <td className="px-2 py-1 text-slate-200 truncate max-w-[220px]" title={r.arquivo}>{r.nome}</td>
+                    <td className="px-2 py-1 text-slate-200 truncate max-w-[220px]" title={r.arquivo}>
+                      <div className="flex items-center gap-1.5 truncate">
+                        {onPlayTrack && (
+                          <button
+                            type="button"
+                            onClick={() => onPlayTrack({
+                              caminho: r.arquivo,
+                              nome: r.nome,
+                              bpm: r.bpm ? parseFloat(r.bpm) : undefined
+                            })}
+                            className="p-1 rounded hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer shrink-0"
+                            title="Tocar no Player nativo"
+                          >
+                            <Play className="w-3 h-3 fill-current" />
+                          </button>
+                        )}
+                        <span className="truncate">{r.nome}</span>
+                      </div>
+                    </td>
                     <td className="px-2 py-1 text-right font-mono text-white">{r.bpm ?? '—'}</td>
                     <td className={`px-2 py-1 text-right font-mono ${r.bpm_confianca < 0.5 ? 'text-serato-orange' : 'text-serato-neonGreen'}`}>
                       {r.bpm_confianca !== undefined ? Math.round(r.bpm_confianca * 100) + '%' : '—'}

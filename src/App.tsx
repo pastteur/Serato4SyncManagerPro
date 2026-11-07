@@ -783,6 +783,7 @@ export const App: React.FC = () => {
                 onAddLog={addLog}
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 
