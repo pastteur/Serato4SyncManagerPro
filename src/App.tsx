@@ -474,15 +474,53 @@ export const App: React.FC = () => {
     }
   };
 
+  // Atalhos de Teclado macOS Power-User (⌘+1..9 para abas, ⌘+R para Pré-avaliação / Dry Run)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Fecha modal de ajuda com ESC
       if (e.key === 'Escape' && isGuideOpen) {
         setIsGuideOpen(false);
+        return;
+      }
+
+      // Atalhos combinados com tecla Command (Mac) ou Control
+      const isCmd = e.metaKey || e.ctrlKey;
+      if (!isCmd) return;
+
+      // ⌘+R: Dispara Pré-avaliação (Dry Run) segura
+      if (e.key.toLowerCase() === 'r') {
+        e.preventDefault();
+        if (!isRunning && mp3Path && seratoPath) {
+          setActiveTab('logs');
+          handleStartSync(true);
+        }
+        return;
+      }
+
+      // ⌘+1 a ⌘+9: Alterna abas rapidamente
+      const num = parseInt(e.key, 10);
+      if (!isNaN(num) && num >= 1 && num <= 9) {
+        e.preventDefault();
+        const tabKeys: TabId[] = [
+          'logs',
+          'duplicates',
+          'tree',
+          'library',
+          'matcher',
+          'soundSeal',
+          'tagDoctor',
+          'health',
+          'autoCue'
+        ];
+        if (num <= tabKeys.length) {
+          setActiveTab(tabKeys[num - 1]);
+        }
       }
     };
+
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isGuideOpen]);
+  }, [isGuideOpen, isRunning, mp3Path, seratoPath, handleStartSync]);
 
   return (
     <div className="flex flex-col h-screen bg-serato-dark text-slate-100 overflow-hidden font-sans select-none">
@@ -498,6 +536,11 @@ export const App: React.FC = () => {
             onSelectMp3={handleSelectMp3}
             onSelectSerato={handleSelectSerato}
             onAutoDetect={() => handleAutoDetect(true)}
+            onApplyVolume={(volMp3, volSerato) => {
+              setMp3Path(volMp3);
+              setSeratoPath(volSerato);
+              addLog(`💽 Unidade selecionada: ${volMp3.split('/')[2] || 'Volume'}`);
+            }}
             disabled={isRunning}
           />
         </div>

@@ -15,6 +15,14 @@ pub struct DetectedPaths {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DetectedDjVolume {
+    pub name: String,
+    pub mount_point: String,
+    pub mp3_path: Option<String>,
+    pub serato_path: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct SystemTelemetry {
     pub cpu_percent: f32,
     pub ram_used_gb: f32,
@@ -533,6 +541,87 @@ mod commands {
             mp3: final_mp3,
             serato: final_serato,
         }
+    }
+
+    #[tauri::command]
+    pub async fn detect_dj_volumes() -> Result<Vec<DetectedDjVolume>, String> {
+        let mut volumes = Vec::new();
+
+        // 1. Armazenamento interno (Macintosh HD / Home)
+        if let Some(home) = dirs_home() {
+            let mp3_sub = home.join("Music").join("MP3");
+            let mp3_main = home.join("Music");
+            let serato_appsup = home.join("Library").join("Application Support").join("Serato");
+            let serato_music = home.join("Music").join("_Serato_");
+
+            let found_mp3 = if mp3_sub.exists() && mp3_sub.is_dir() {
+                Some(mp3_sub.to_string_lossy().to_string())
+            } else if mp3_main.exists() && mp3_main.is_dir() {
+                Some(mp3_main.to_string_lossy().to_string())
+            } else {
+                None
+            };
+
+            let found_serato = if serato_appsup.exists() && serato_appsup.is_dir() {
+                Some(serato_appsup.to_string_lossy().to_string())
+            } else if serato_music.exists() && serato_music.is_dir() {
+                Some(serato_music.to_string_lossy().to_string())
+            } else {
+                None
+            };
+
+            if found_mp3.is_some() || found_serato.is_some() {
+                volumes.push(DetectedDjVolume {
+                    name: "Macintosh HD (Interno)".into(),
+                    mount_point: home.to_string_lossy().to_string(),
+                    mp3_path: found_mp3,
+                    serato_path: found_serato,
+                });
+            }
+        }
+
+        // 2. Volumes externos montados em /Volumes
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.starts_with('.') && !name.starts_with("Macintosh") {
+                        let serato_moderno = path.join("Serato");
+                        let serato_legado = path.join("_Serato_");
+                        let mp3_sub = path.join("Music").join("MP3");
+                        let mp3_main = path.join("Music");
+
+                        let found_serato = if serato_moderno.exists() && serato_moderno.is_dir() {
+                            Some(serato_moderno.to_string_lossy().to_string())
+                        } else if serato_legado.exists() && serato_legado.is_dir() {
+                            Some(serato_legado.to_string_lossy().to_string())
+                        } else {
+                            None
+                        };
+
+                        let found_mp3 = if mp3_sub.exists() && mp3_sub.is_dir() {
+                            Some(mp3_sub.to_string_lossy().to_string())
+                        } else if mp3_main.exists() && mp3_main.is_dir() {
+                            Some(mp3_main.to_string_lossy().to_string())
+                        } else {
+                            None
+                        };
+
+                        if found_serato.is_some() || found_mp3.is_some() {
+                            volumes.push(DetectedDjVolume {
+                                name: format!("Volume: {}", name),
+                                mount_point: path.to_string_lossy().to_string(),
+                                mp3_path: found_mp3,
+                                serato_path: found_serato,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(volumes)
     }
 
     #[tauri::command]
@@ -2795,7 +2884,8 @@ pub fn run() {
             commands::duplicates_trash_paths,
             commands::crate_add_paths,
             commands::watch_music_folder,
-            commands::stop_watching_folder
+            commands::stop_watching_folder,
+            commands::detect_dj_volumes
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");

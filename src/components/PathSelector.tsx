@@ -1,5 +1,12 @@
-import React, { useState } from 'react';
-import { Folder, HardDrive, Laptop, Sparkles, AlertCircle, ChevronDown, ChevronUp } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Folder, HardDrive, Laptop, Sparkles, AlertCircle, ChevronDown, ChevronUp, CheckCircle2 } from 'lucide-react';
+
+export interface DjVolumeInfo {
+  name: string;
+  mount_point: string;
+  mp3_path?: string | null;
+  serato_path?: string | null;
+}
 
 interface PathSelectorProps {
   mp3Path: string;
@@ -7,6 +14,7 @@ interface PathSelectorProps {
   onSelectMp3: () => void;
   onSelectSerato: () => void;
   onAutoDetect: () => void;
+  onApplyVolume?: (mp3: string, serato: string) => void;
   disabled: boolean;
 }
 
@@ -16,12 +24,33 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
   onSelectMp3,
   onSelectSerato,
   onAutoDetect,
+  onApplyVolume,
   disabled
 }) => {
   const [isExpanded, setIsExpanded] = useState<boolean>(false);
+  const [detectedVolumes, setDetectedVolumes] = useState<DjVolumeInfo[]>([]);
   const isMp3External = mp3Path.startsWith('/Volumes/');
   const isSeratoExternal = seratoPath.startsWith('/Volumes/');
   const hasBothPaths = Boolean(mp3Path && seratoPath);
+
+  const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+
+  // Varredura de volumes de DJ montados no Mac
+  useEffect(() => {
+    if (!isTauri) return;
+    const fetchVolumes = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const vols = await invoke<DjVolumeInfo[]>('detect_dj_volumes');
+        if (vols && Array.isArray(vols)) {
+          setDetectedVolumes(vols);
+        }
+      } catch (e) {
+        // Silencioso
+      }
+    };
+    fetchVolumes();
+  }, [isTauri]);
 
   // Modo Compacto (quando pastas já estão detectadas e não foi solicitado expandir)
   if (hasBothPaths && !isExpanded) {
@@ -62,7 +91,7 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
             className="text-[11px] flex items-center gap-1 text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded border border-slate-600 transition cursor-pointer"
             title="Alterar pastas MP3 ou Serato"
           >
-            <span>Pastas</span>
+            <span>Pastas & Discos</span>
             <ChevronDown className="w-3 h-3" />
           </button>
         </div>
@@ -71,8 +100,8 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
   }
 
   return (
-    <div className="bg-serato-card border border-serato-cardBorder rounded-xl p-3 shadow-lg">
-      <div className="flex items-center justify-between mb-2">
+    <div className="bg-serato-card border border-serato-cardBorder rounded-xl p-3 shadow-lg space-y-3">
+      <div className="flex items-center justify-between">
         <h2 className="text-xs font-semibold uppercase tracking-wider text-serato-muted flex items-center gap-1.5">
           <Folder className="w-3.5 h-3.5 text-serato-gold" />
           Mapeamento Dinâmico de Dispositivos & Diretórios
@@ -101,6 +130,46 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
           )}
         </div>
       </div>
+
+      {/* Discos / Volumes de DJ Detectados no macOS */}
+      {detectedVolumes.length > 0 && (
+        <div className="bg-slate-900/60 border border-slate-800 rounded-lg p-2 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-[11px] font-bold text-slate-400 flex items-center gap-1">
+            <HardDrive className="w-3 h-3 text-serato-cyan" />
+            Unidades DJ Detectadas:
+          </span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {detectedVolumes.map((vol) => {
+              const isSelected = Boolean(
+                vol.mp3_path && vol.mp3_path === mp3Path &&
+                vol.serato_path && vol.serato_path === seratoPath
+              );
+
+              return (
+                <button
+                  key={vol.mount_point}
+                  type="button"
+                  onClick={() => {
+                    if (onApplyVolume && vol.mp3_path && vol.serato_path) {
+                      onApplyVolume(vol.mp3_path, vol.serato_path);
+                    }
+                  }}
+                  disabled={disabled || !vol.mp3_path || !vol.serato_path}
+                  className={`text-[11px] px-2.5 py-1 rounded-md border transition flex items-center gap-1.5 cursor-pointer ${
+                    isSelected
+                      ? 'bg-serato-cyan/20 border-serato-cyan text-serato-cyan font-bold shadow-sm'
+                      : 'bg-slate-800/80 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white'
+                  }`}
+                  title={`Alternar para ${vol.name}\nMP3: ${vol.mp3_path || 'Não detectado'}\nSerato: ${vol.serato_path || 'Não detectado'}`}
+                >
+                  {isSelected && <CheckCircle2 className="w-3 h-3 text-serato-cyan" />}
+                  <span>{vol.name}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {/* Selector 1: MP3 Master */}
@@ -181,7 +250,7 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
       </div>
 
       {(!mp3Path || !seratoPath) && (
-        <div className="mt-2.5 flex items-center gap-1.5 text-xs text-amber-400/90 bg-amber-950/30 border border-amber-800/30 px-3 py-1.5 rounded-lg">
+        <div className="mt-2 flex items-center gap-1.5 text-xs text-amber-400/90 bg-amber-950/30 border border-amber-800/30 px-3 py-1.5 rounded-lg">
           <AlertCircle className="w-3.5 h-3.5 shrink-0" />
           <span>Selecione a pasta de músicas e a pasta Serato antes de iniciar a sincronização.</span>
         </div>

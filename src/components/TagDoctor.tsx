@@ -1275,7 +1275,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                         <ArrowRight className="w-3.5 h-3.5 mx-auto opacity-70" />
                       </td>
 
-                      {/* Como Vai Ficar */}
+                      {/* Como Vai Ficar (Com Visualizador Diff Antes vs Depois) */}
                       <td className="py-2 px-3">
                         <div className="font-sans font-semibold text-white flex items-center gap-1.5 truncate max-w-[340px]">
                           {item.sha_verified && (
@@ -1296,7 +1296,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                               (Sem Artista)
                             </span>
                           )}
-                          <span className="text-white">{item.titulo_sugerido}</span>
+                          <span className="text-emerald-300 font-semibold">{item.titulo_sugerido}</span>
                           {item.album_sugerido && (
                             <>
                               <span className="text-slate-500">-</span>
@@ -1304,8 +1304,14 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                             </>
                           )}
                         </div>
-                        <div className="text-[10px] text-serato-gold truncate max-w-[340px]">
-                          Novo Nome: {suggestedFileName}
+                        <div className="text-[10px] text-serato-gold truncate max-w-[340px] flex items-center gap-1.5">
+                          <span className="text-slate-400 font-sans">Novo:</span>
+                          <span className="font-mono text-emerald-300 font-semibold truncate">{suggestedFileName}</span>
+                          {item.precisa_limpeza && (
+                            <span className="text-[9px] px-1 py-0.1 bg-emerald-950/80 text-emerald-400 border border-emerald-700/60 rounded font-sans font-bold shrink-0">
+                              Diff Limpo
+                            </span>
+                          )}
                         </div>
                       </td>
 
