@@ -77,6 +77,44 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabId>('logs');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [seratoRunning, setSeratoRunning] = useState<boolean>(false);
+  const [fsNotification, setFsNotification] = useState<{ count: number; extensions: string[] } | null>(null);
+
+  // Monitoramento FSEvents em tempo real da pasta de músicas
+  useEffect(() => {
+    if (!isTauri || !mp3Path || !mp3Path.trim()) return;
+
+    let unlisten: (() => void) | undefined;
+
+    const setupWatcher = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const { listen } = await import('@tauri-apps/api/event');
+
+        // Ativa o watcher no backend Rust para a pasta selecionada
+        await invoke('watch_music_folder', { folderPath: mp3Path });
+
+        unlisten = await listen<{ folder: string; count: number; extensions: string[] }>(
+          'fs-changes-detected',
+          (event) => {
+            if (event.payload && event.payload.count > 0) {
+              setFsNotification({
+                count: event.payload.count,
+                extensions: event.payload.extensions,
+              });
+            }
+          }
+        );
+      } catch (e) {
+        // Silencioso em caso de inicialização
+      }
+    };
+
+    setupWatcher();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [mp3Path]);
 
   useEffect(() => {
     if (!isTauri) return;
@@ -476,6 +514,39 @@ export const App: React.FC = () => {
               summary={summary}
               seratoRunning={seratoRunning}
             />
+          </div>
+        )}
+
+        {/* Notificação FSEvents em Tempo Real: Modificações na Pasta de Música */}
+        {fsNotification && !isRunning && (
+          <div className="bg-amber-950/40 border border-amber-500/60 px-3 py-2 rounded-lg flex items-center justify-between text-xs shrink-0 animate-in fade-in slide-in-from-top-1 shadow-md">
+            <div className="flex items-center gap-2 text-amber-300">
+              <Sparkles className="w-4 h-4 text-amber-400 shrink-0 animate-pulse" />
+              <span>
+                <strong>{fsNotification.count}</strong> nova(s) alteração(ões) de áudio detectada(s) ({fsNotification.extensions.join(', ') || 'MP3'}). Deseja reavaliar os Crates?
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setFsNotification(null);
+                  setActiveTab('logs');
+                  handleStartSync(true); // Dispara pré-avaliação (Dry Run) segura
+                }}
+                className="text-[11px] bg-amber-400 text-black font-bold px-3 py-1 rounded hover:bg-amber-300 transition cursor-pointer shadow-sm"
+              >
+                Pré-avaliar Agora (Dry Run)
+              </button>
+              <button
+                type="button"
+                onClick={() => setFsNotification(null)}
+                className="text-slate-400 hover:text-white p-1 rounded transition cursor-pointer"
+                title="Ignorar aviso"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
 

@@ -1,6 +1,10 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::channel;
+use std::time::Duration;
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use tauri::{AppHandle, Emitter, Manager, Window};
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +32,27 @@ pub struct SyncFinishedPayload {
     pub success: bool,
     pub exit_code: Option<i32>,
     pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FsChangeEvent {
+    pub folder: String,
+    pub count: usize,
+    pub extensions: Vec<String>,
+}
+
+pub struct FsWatcherState {
+    pub active_path: Arc<Mutex<Option<String>>>,
+    pub watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
+}
+
+impl FsWatcherState {
+    pub fn new() -> Self {
+        Self {
+            active_path: Arc::new(Mutex::new(None)),
+            watcher: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 fn dirs_home() -> Option<PathBuf> {
@@ -2588,11 +2613,123 @@ mod commands {
         }
         Ok(stdout)
     }
+
+    #[tauri::command]
+    pub async fn watch_music_folder(
+        app: AppHandle,
+        folder_path: String,
+        state: tauri::State<'_, FsWatcherState>,
+    ) -> Result<bool, String> {
+        let path = PathBuf::from(&folder_path);
+        if !path.exists() || !path.is_dir() {
+            return Err("Diretório especificado para monitoramento não existe ou é inválido.".into());
+        }
+
+        // Se já está monitorando exatamente esta pasta, não precisa recriar
+        {
+            let current = state.active_path.lock().map_err(|e| e.to_string())?;
+            if let Some(ref p) = *current {
+                if p == &folder_path {
+                    return Ok(true);
+                }
+            }
+        }
+
+        let app_handle = app.clone();
+        let folder_for_event = folder_path.clone();
+
+        // Canal de eventos do notify
+        let (tx, rx) = channel();
+
+        let mut watcher = RecommendedWatcher::new(
+            move |res| {
+                let _ = tx.send(res);
+            },
+            Config::default().with_poll_interval(Duration::from_secs(2)),
+        ).map_err(|e| format!("Falha ao instanciar watcher FSEvents: {}", e))?;
+
+        watcher
+            .watch(&path, RecursiveMode::Recursive)
+            .map_err(|e| format!("Falha ao iniciar escuta na pasta: {}", e))?;
+
+        // Atualiza estado do watcher
+        {
+            let mut w_lock = state.watcher.lock().map_err(|e| e.to_string())?;
+            *w_lock = Some(watcher);
+
+            let mut p_lock = state.active_path.lock().map_err(|e| e.to_string())?;
+            *p_lock = Some(folder_path);
+        }
+
+        // Thread desacoplada com debounce para processar alterações em segundo plano
+        std::thread::spawn(move || {
+            let valid_exts = ["mp3", "wav", "aiff", "aif", "flac", "m4a", "aac"];
+            let mut pending_files: Vec<String> = Vec::new();
+            let mut last_event_time = std::time::Instant::now();
+
+            loop {
+                match rx.recv_timeout(Duration::from_millis(500)) {
+                    Ok(Ok(event)) => {
+                        for path in event.paths {
+                            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                                let ext_lower = ext.to_lowercase();
+                                if valid_exts.contains(&ext_lower.as_str()) {
+                                    pending_files.push(path.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                        last_event_time = std::time::Instant::now();
+                    }
+                    Ok(Err(_)) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // Se acumulou arquivos e passou pelo menos 1.5s de silêncio, emite o debounce para o front
+                        if !pending_files.is_empty() && last_event_time.elapsed() >= Duration::from_millis(1500) {
+                            let mut unique_exts: Vec<String> = Vec::new();
+                            for f in &pending_files {
+                                if let Some(ext) = Path::new(f).extension().and_then(|e| e.to_str()) {
+                                    let ext_upper = ext.to_uppercase();
+                                    if !unique_exts.contains(&ext_upper) {
+                                        unique_exts.push(ext_upper);
+                                    }
+                                }
+                            }
+
+                            let payload = FsChangeEvent {
+                                folder: folder_for_event.clone(),
+                                count: pending_files.len(),
+                                extensions: unique_exts,
+                            };
+
+                            let _ = app_handle.emit("fs-changes-detected", payload);
+                            pending_files.clear();
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(true)
+    }
+
+    #[tauri::command]
+    pub async fn stop_watching_folder(state: tauri::State<'_, FsWatcherState>) -> Result<bool, String> {
+        let mut w_lock = state.watcher.lock().map_err(|e| e.to_string())?;
+        *w_lock = None;
+
+        let mut p_lock = state.active_path.lock().map_err(|e| e.to_string())?;
+        *p_lock = None;
+
+        Ok(true)
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(FsWatcherState::new())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_system_telemetry,
@@ -2656,7 +2793,9 @@ pub fn run() {
             commands::scan_duplicates_multi,
             commands::duplicates_move_paths,
             commands::duplicates_trash_paths,
-            commands::crate_add_paths
+            commands::crate_add_paths,
+            commands::watch_music_folder,
+            commands::stop_watching_folder
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");
