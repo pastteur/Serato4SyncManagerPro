@@ -68,8 +68,114 @@ def get_backup_db():
             created_at TEXT
         );
     """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_backup_created ON cues_backup(created_at);")
     conn.commit()
     return conn
+
+
+def list_cue_backups(limit: int = 300, search: str = ""):
+    """
+    Lista os backups de cues disponíveis para restauração, do mais recente ao mais antigo.
+    Cada linha traz também se o arquivo original ainda existe no disco.
+    """
+    if not BACKUP_DB_PATH.exists():
+        return {"sucesso": True, "total": 0, "items": []}
+    try:
+        conn = get_backup_db()
+        conn.row_factory = sqlite3.Row
+        query = "SELECT filepath, filename, cues_json, created_at FROM cues_backup"
+        params = []
+        if search.strip():
+            query += " WHERE filename LIKE ? OR filepath LIKE ?"
+            termo = f"%{search.strip()}%"
+            params = [termo, termo]
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+
+        items = []
+        for row in conn.execute(query, params).fetchall():
+            try:
+                qtd_cues = len(json.loads(row["cues_json"] or "[]"))
+            except Exception:
+                qtd_cues = 0
+            items.append({
+                "filepath": row["filepath"],
+                "filename": row["filename"],
+                "quantidade_cues": qtd_cues,
+                "created_at": row["created_at"],
+                "arquivo_existe": Path(row["filepath"]).exists(),
+            })
+        conn.close()
+        return {"sucesso": True, "total": len(items), "items": items}
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e), "total": 0, "items": []}
+
+
+def restore_track_cues(filepath_str: str):
+    """
+    Restaura o payload de cues exatamente como estava antes da primeira alteração.
+    Se não existia cue algum antes, remove as tags GEOB:Serato Markers2/Markers_ que
+    tenham sido gravadas, devolvendo a faixa ao estado original.
+    """
+    if not mutagen:
+        return {"sucesso": False, "erro": "Mutagen não instalado"}
+    if not BACKUP_DB_PATH.exists():
+        return {"sucesso": False, "erro": "Nenhum backup de cues disponível"}
+
+    file_p = Path(filepath_str)
+    if not file_p.exists():
+        return {"sucesso": False, "erro": "Arquivo não encontrado no disco"}
+
+    try:
+        conn = get_backup_db()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT markers2_blob, markers1_blob FROM cues_backup WHERE filepath = ?",
+            (str(file_p),)
+        ).fetchone()
+        conn.close()
+
+        if row is None:
+            return {"sucesso": False, "erro": "Esta faixa não possui backup de cues registrado"}
+
+        audio = mutagen.File(str(file_p))
+        if audio is None:
+            return {"sucesso": False, "erro": "Formato de áudio não suportado"}
+        if audio.tags is None:
+            audio.add_tags()
+
+        m2_bytes = row["markers2_blob"]
+        m1_bytes = row["markers1_blob"]
+
+        if m2_bytes:
+            audio.tags['GEOB:Serato Markers2'] = GEOB(
+                encoding=0,
+                mime='application/octet-stream',
+                desc='Serato Markers2',
+                data=bytes(m2_bytes)
+            )
+        else:
+            audio.tags.delall('GEOB:Serato Markers2')
+
+        if m1_bytes:
+            audio.tags['GEOB:Serato Markers_'] = GEOB(
+                encoding=0,
+                mime='application/octet-stream',
+                desc='Serato Markers_',
+                data=bytes(m1_bytes)
+            )
+        else:
+            audio.tags.delall('GEOB:Serato Markers_')
+
+        audio.save(v2_version=3)
+
+        return {
+            "sucesso": True,
+            "arquivo": file_p.name,
+            "mensagem": "Cues restaurados ao estado anterior às alterações.",
+        }
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
 
 
 def backup_track_cues(filepath: str, audio) -> bool:
@@ -82,16 +188,15 @@ def backup_track_cues(filepath: str, audio) -> bool:
         m2_bytes = m2.data if m2 else None
         m1_bytes = m1.data if m1 else None
 
-        if not m2_bytes and not m1_bytes:
-            return False
-
+        # Registra também o estado "sem cues": sem isso, a faixa mais comum (a que ainda
+        # não tem nenhum cue) ficaria sem qualquer possibilidade de desfazer a gravação.
         cues = extract_cues_from_raw_tag(m2_bytes) if m2_bytes else []
         cues_json = json.dumps(cues, ensure_ascii=False)
 
         conn = get_backup_db()
         with conn:
             conn.execute("""
-                INSERT OR REPLACE INTO cues_backup 
+                INSERT OR REPLACE INTO cues_backup
                 (filepath, filename, markers2_blob, markers1_blob, cues_json, created_at)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
@@ -480,6 +585,12 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
                 desc='Serato Markers2',
                 data=serato_data
             )
+            # Registra o estado anterior no journal unificado (undo) antes de gravar
+            try:
+                from journal import record_id3_before_change
+                record_id3_before_change(str(file_p), action="auto_cue")
+            except Exception as e:
+                return {"sucesso": False, "erro": "Journal indisponível; gravação cancelada: %s" % e}
             # CRÍTICO: Serato DJ Pro requer ID3v2.3, NÃO v2.4
             audio.save(v2_version=3)
 
@@ -897,6 +1008,9 @@ def main():
     parser.add_argument("--scan-crate", action="store_true", help="Varre Crate/Subcrate para listar faixas e cues")
     parser.add_argument("--audit-crate", action="store_true", help="Audita detalhadamente todas as faixas da Crate para identificar cues existentes vs pendentes")
     parser.add_argument("--batch-crate", action="store_true", help="Gera Hot Cues para toda a Crate")
+    parser.add_argument("--list-backups", action="store_true", help="Lista os backups de cues disponíveis para restauração")
+    parser.add_argument("--list-backups-search", type=str, default="", help="Filtra a lista de backups por nome ou caminho")
+    parser.add_argument("--restore", type=str, default="", help="Restaura os cues de um arquivo a partir do backup")
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3 base")
     parser.add_argument("--crate-raiz", type=str, default="", help="Crate raiz")
     parser.add_argument("--subcrate", type=str, default="", help="Subcrate")
@@ -992,6 +1106,16 @@ def main():
             overwrite_existing=args.overwrite_existing
         )
         sys.exit(0)
+
+    if args.list_backups:
+        res = list_cue_backups(search=args.list_backups_search)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.restore:
+        res = restore_track_cues(args.restore)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
 
     parser.print_help()
 

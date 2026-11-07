@@ -55,6 +55,17 @@ FFMPEG_CANDIDATES = [
     shutil.which("ffmpeg") or ""
 ]
 
+# Limiares da auditoria espectral de falsos 320 kbps.
+# MP3 de 128 kbps aplica um lowpass em torno de 16 kHz; a partir de ~17.5 kHz quase não
+# sobra energia. Comparamos a faixa de referência (12 kHz) com uma passagem dupla em
+# FAKE320_HIGHPASS_HZ: se a referência tem sinal e os agudos não, o arquivo foi superado.
+FAKE320_REFERENCE_HZ = 12000
+FAKE320_REFERENCE_WIDTH_HZ = 4000
+FAKE320_HIGHPASS_HZ = 17500
+FAKE320_REF_MAX_DB = -38.0
+FAKE320_HIGH_MAX_DB = -53.0
+FAKE320_HIGH_MEAN_DB = -82.0
+
 
 def get_ffmpeg_bin():
     for p in FFMPEG_CANDIDATES:
@@ -66,8 +77,9 @@ def get_ffmpeg_bin():
 def detect_fake_320k_cutoff(filepath: Path, duration: float, bitrate: int) -> tuple:
     """
     Realiza auditoria espectral rápida de altas frequências via ffmpeg para detectar falso 320 kbps.
-    Faixas 128 kbps possuem um filtro brickwall lowpass estrito cortando frequências em torno de 16 kHz.
-    Faixas genuínas 320 kbps ou lossless mantêm energia expressiva entre 17.5 kHz e 22 kHz.
+    MP3 de 128 kbps costuma ter um brickwall lowpass que corta o áudio a partir de ~16 kHz.
+    Faixas genuínas de 320 kbps ou lossless mantêm energia expressiva entre 17.5 kHz e 22 kHz.
+    A classificação usa apenas os limiares declarados no topo do módulo (FAKE320_*).
     """
     ffmpeg_bin = get_ffmpeg_bin()
     if not ffmpeg_bin or duration < 12.0 or bitrate < 240000:
@@ -86,8 +98,8 @@ def detect_fake_320k_cutoff(filepath: Path, duration: float, bitrate: int) -> tu
             "-i", str(filepath),
             "-filter_complex",
             "[0:a]asplit=2[a1][a2];"
-            "[a1]bandpass=f=12000:width_type=h:w=4000,volumedetect[out1];"
-            "[a2]highpass=f=17500,highpass=f=17500,volumedetect[out2]",
+            f"[a1]bandpass=f={FAKE320_REFERENCE_HZ}:width_type=h:w={FAKE320_REFERENCE_WIDTH_HZ},volumedetect[out1];"
+            f"[a2]highpass=f={FAKE320_HIGHPASS_HZ},highpass=f={FAKE320_HIGHPASS_HZ},volumedetect[out2]",
             "-map", "[out1]", "-f", "null", "-",
             "-map", "[out2]", "-f", "null", "-"
         ]
@@ -118,8 +130,15 @@ def detect_fake_320k_cutoff(filepath: Path, duration: float, bitrate: int) -> tu
                     pass
 
         if out1_max is not None and out2_max is not None:
-            if out1_max > -38.0 and (out2_max < -53.0 or (out2_mean is not None and out2_mean < -82.0)):
-                reason = f"Nível de agudos acima de 17.5kHz é de apenas {out2_max} dB (mid-highs: {out1_max} dB)."
+            ref_has_signal = out1_max > FAKE320_REF_MAX_DB
+            highs_cut = out2_max < FAKE320_HIGH_MAX_DB or (
+                out2_mean is not None and out2_mean < FAKE320_HIGH_MEAN_DB
+            )
+            if ref_has_signal and highs_cut:
+                reason = (
+                    f"Nível de agudos acima de {FAKE320_HIGHPASS_HZ / 1000:.1f}kHz é de apenas "
+                    f"{out2_max} dB (mid-highs: {out1_max} dB)."
+                )
                 return True, reason
 
     except Exception:

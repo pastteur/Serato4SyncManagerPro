@@ -45,6 +45,9 @@
       "../auto_cue.py": "auto_cue.py",
       "../audio_health.py": "audio_health.py",
       "../track_matcher.py": "track_matcher.py",
+      "../music_analysis.py": "music_analysis.py",
+      "../journal.py": "journal.py",
+      "../library_tools.py": "library_tools.py",
       "../run_local_agent.py": "run_local_agent.py",
       "../vendor": "vendor"
     },

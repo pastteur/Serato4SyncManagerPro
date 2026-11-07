@@ -37,6 +37,7 @@ import serato_macos_app
 import auto_cue
 import track_matcher
 import audio_health
+import journal
 
 
 class TestSeratoSyncProAuditFixes(unittest.TestCase):
@@ -473,6 +474,121 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
             # Faixa tem 3 segundos de som (não deve quebrar ou lançar exceção)
             self.assertIn("status", diag)
             self.assertIn("categoria", diag)
+
+
+    # --------------------------------------------------------------------------
+    # CORREÇÕES DE AUDITORIA: HASH, FAKE 320K E ROLLBACK DE CUES
+    # --------------------------------------------------------------------------
+    def _create_long_dummy_mp3(self, filepath: Path, duration_sec: float = 180.0):
+        """
+        Cria um MP3 sintético com duração real suficiente para o Auto-Cue.
+        Frames MPEG1 Layer3 128 kbps / 44.1 kHz ocupam 417 bytes e duram ~26,1 ms cada.
+        """
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        tag_data = b'TIT2\x00\x00\x00\x0a\x00\x00\x00Test Track'
+        tag_len = len(tag_data)
+        synch_len = bytes([
+            (tag_len >> 21) & 0x7F,
+            (tag_len >> 14) & 0x7F,
+            (tag_len >> 7) & 0x7F,
+            tag_len & 0x7F
+        ])
+        header = b'ID3\x03\x00\x00' + synch_len + tag_data
+        frame = b'\xff\xfb\x90\x00' + b'\x00' * 413
+        total_frames = max(1, int(duration_sec / 0.0261))
+        with open(filepath, 'wb') as f:
+            f.write(header)
+            for _ in range(total_frames):
+                f.write(frame)
+
+    def test_audio_hash_ignores_id3v2_and_id3v1(self):
+        """O hash de duplicatas deve ignorar tags ID3v2 (início) e ID3v1 (fim do arquivo)."""
+        audio_payload = b'\xff\xfb\x90\x00' + b'\x11' * 413
+        audio_payload = audio_payload * 20
+
+        base = self.mp3_dir / "hash_base.mp3"
+        base.write_bytes(b'ID3\x03\x00\x00\x00\x00\x00\x0a' + b'\x00' * 10 + audio_payload)
+
+        com_tags_diferentes = self.mp3_dir / "hash_tags.mp3"
+        com_tags_diferentes.write_bytes(
+            b'ID3\x03\x00\x00\x00\x00\x00\x1e' + b'\x42' * 30 + audio_payload + b'TAG' + b'\x00' * 125
+        )
+
+        h_base = serato_macos_app.compute_quick_audio_hash(base)
+        h_tags = serato_macos_app.compute_quick_audio_hash(com_tags_diferentes)
+        self.assertTrue(h_base)
+        self.assertEqual(h_base, h_tags)
+
+        outra_copia = self.mp3_dir / "hash_diferente.mp3"
+        outra_copia.write_bytes(b'ID3\x03\x00\x00\x00\x00\x00\x0a' + b'\x00' * 10 + audio_payload[::-1])
+        self.assertNotEqual(h_base, serato_macos_app.compute_quick_audio_hash(outra_copia))
+
+    def test_fake_320k_thresholds_come_from_module_constants(self):
+        """Garante que o filtro espectral usa os limiares declarados no módulo."""
+        self.assertEqual(audio_health.FAKE320_HIGHPASS_HZ, 17500)
+        self.assertEqual(audio_health.FAKE320_REFERENCE_HZ, 12000)
+        # Bitrate abaixo do limiar nunca é auditado como fake 320k
+        ok, motivo = audio_health.detect_fake_320k_cutoff(Path("/tmp/inexistente.mp3"), 200.0, 128000)
+        self.assertFalse(ok)
+        self.assertEqual(motivo, "")
+
+    def test_cue_backup_and_restore_roundtrip(self):
+        """Backup de cues deve registrar até o estado 'sem cues' e permitir restaurá-lo."""
+        if not auto_cue.mutagen:
+            self.skipTest("mutagen não disponível")
+
+        arquivo = self.mp3_dir / "cues.mp3"
+        self._create_long_dummy_mp3(arquivo, duration_sec=180.0)
+
+        home_original = auto_cue.BACKUP_DB_PATH
+        auto_cue.BACKUP_DB_PATH = self.root_path / "cues_backup.sqlite"
+        journal_original = journal.JOURNAL_PATH
+        journal.JOURNAL_PATH = self.root_path / "journal.sqlite"
+        try:
+            aplicado = auto_cue.generate_and_save_serato_cues(str(arquivo))
+            self.assertTrue(aplicado.get("sucesso"), aplicado)
+
+            lista = auto_cue.list_cue_backups()
+            self.assertTrue(lista["sucesso"])
+            self.assertEqual(lista["total"], 1)
+            self.assertEqual(lista["items"][0]["filename"], "cues.mp3")
+            self.assertEqual(lista["items"][0]["quantidade_cues"], 0)
+            self.assertTrue(lista["items"][0]["arquivo_existe"])
+
+            restaurado = auto_cue.restore_track_cues(str(arquivo))
+            self.assertTrue(restaurado.get("sucesso"), restaurado)
+
+            audio = auto_cue.mutagen.File(str(arquivo))
+            self.assertIsNone(
+                audio.tags.get('GEOB:Serato Markers2') if audio.tags else None,
+                "Faixa que não tinha cues deve voltar sem GEOB:Serato Markers2"
+            )
+        finally:
+            auto_cue.BACKUP_DB_PATH = home_original
+            journal.JOURNAL_PATH = journal_original
+
+    def test_cue_backup_search_filters_by_filename(self):
+        """A busca da tela de backup deve filtrar por nome do arquivo."""
+        if not auto_cue.mutagen:
+            self.skipTest("mutagen não disponível")
+
+        home_original = auto_cue.BACKUP_DB_PATH
+        auto_cue.BACKUP_DB_PATH = self.root_path / "cues_backup.sqlite"
+        journal_original = journal.JOURNAL_PATH
+        journal.JOURNAL_PATH = self.root_path / "journal.sqlite"
+        try:
+            for nome in ("Alvo.mp3", "Outro.mp3"):
+                arquivo = self.mp3_dir / nome
+                self._create_long_dummy_mp3(arquivo, duration_sec=180.0)
+                auto_cue.generate_and_save_serato_cues(str(arquivo))
+
+            filtrado = auto_cue.list_cue_backups(search="Alvo")
+            self.assertEqual(filtrado["total"], 1)
+            self.assertEqual(filtrado["items"][0]["filename"], "Alvo.mp3")
+            self.assertEqual(auto_cue.list_cue_backups(search="Nada")["total"], 0)
+        finally:
+            auto_cue.BACKUP_DB_PATH = home_original
+            journal.JOURNAL_PATH = journal_original
 
 
 if __name__ == "__main__":

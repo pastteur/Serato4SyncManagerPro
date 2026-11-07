@@ -28,3 +28,63 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #394766;
 }
+
+/* ------------------------------------------------------------------
+   Tema claro
+   As telas usam classes de cor fixas (slate-*, serato-*). Em vez de
+   reescrever cada componente, sobrescrevemos essas classes quando
+   data-theme="light" está no <html>. Botões com fundo colorido e
+   texto branco mantêm o texto claro: revisar contraste nessas telas.
+   ------------------------------------------------------------------ */
+[data-theme="light"] {
+  color-scheme: light;
+}
+[data-theme="light"] body {
+  background: #f4f6fa;
+  color: #0f172a;
+}
+[data-theme="light"] ::-webkit-scrollbar-track {
+  background: #e9edf5;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb {
+  background: #c3cddb;
+}
+[data-theme="light"] ::-webkit-scrollbar-thumb:hover {
+  background: #9aa8be;
+}
+
+[data-theme="light"] .bg-serato-dark { background-color: #f4f6fa; }
+[data-theme="light"] .bg-serato-card { background-color: #ffffff; }
+[data-theme="light"] .bg-serato-header { background-color: #e9edf5; }
+[data-theme="light"] .bg-serato-hover,
+[data-theme="light"] .hover\:bg-serato-hover:hover { background-color: #e4e9f2; }
+[data-theme="light"] .border-serato-cardBorder { border-color: #d5dce8; }
+[data-theme="light"] .divide-serato-cardBorder > * + * { border-color: #d5dce8; }
+
+[data-theme="light"] .bg-slate-900,
+[data-theme="light"] .bg-slate-800 { background-color: #f1f5f9; }
+[data-theme="light"] .bg-slate-700 { background-color: #e2e8f0; }
+[data-theme="light"] .border-slate-700,
+[data-theme="light"] .border-slate-800 { border-color: #cbd5e1; }
+
+[data-theme="light"] .text-white { color: #0f172a; }
+[data-theme="light"] .text-slate-100,
+[data-theme="light"] .text-slate-200 { color: #1e293b; }
+[data-theme="light"] .text-slate-300 { color: #334155; }
+[data-theme="light"] .text-slate-400,
+[data-theme="light"] .text-serato-muted { color: #5b6780; }
+[data-theme="light"] .text-slate-500 { color: #7b8699; }
+[data-theme="light"] .text-slate-600 { color: #94a3b8; }
+
+[data-theme="light"] .text-serato-cyan { color: #00708a; }
+[data-theme="light"] .text-serato-neonGreen { color: #047857; }
+[data-theme="light"] .text-serato-gold { color: #a16207; }
+[data-theme="light"] .text-serato-orange { color: #c2410c; }
+
+[data-theme="light"] .placeholder-serato-muted::placeholder { color: #7b8699; }
+[data-theme="light"] .hover\:text-white:hover { color: #0f172a; }
+
+/* Tipografia: leitura mais confortável em tabelas densas */
+body {
+  line-height: 1.45;
+}

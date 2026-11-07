@@ -1244,6 +1244,229 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn list_cue_backups(app: AppHandle, search: Option<String>) -> Result<String, String> {
+        let script = find_python_script(Some(&app), "auto_cue.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--list-backups");
+        if let Some(s) = search {
+            if !s.trim().is_empty() {
+                cmd.arg("--list-backups-search");
+                cmd.arg(s);
+            }
+        }
+
+        let output = cmd.output().map_err(|e| format!("Falha ao listar backups de cues: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        if !output.status.success() || result.is_empty() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+            return Err(format!("Erro ao listar backups de cues: {}", msg));
+        }
+        Ok(result)
+    }
+
+    #[tauri::command]
+    pub async fn restore_auto_cues(app: AppHandle, filepath: String) -> Result<String, String> {
+        if is_serato_running() {
+            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de restaurar Hot Cues.".into());
+        }
+        let script = find_python_script(Some(&app), "auto_cue.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script);
+        cmd.arg("--restore");
+        cmd.arg(&filepath);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao restaurar Hot Cues: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            return Err(stdout);
+        }
+        Ok(stdout)
+    }
+
+    // ------------------------------------------------------------------
+    // Ferramentas de biblioteca: BPM/tom, journal de desfazer, crates
+    // ------------------------------------------------------------------
+
+    /// Executa um script Python e devolve a última linha JSON da saída.
+    fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
+        let path = find_python_script(Some(app), script);
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&path);
+        for a in args {
+            cmd.arg(a);
+        }
+        let output = cmd
+            .output()
+            .map_err(|e| format!("Falha ao executar {}: {}", script, e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result = stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .unwrap_or("")
+            .to_string();
+        if result.starts_with('{') {
+            return Ok(result);
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
+        Err(format!("Erro em {}: {}", script, msg))
+    }
+
+    fn bloqueio_serato(acao: &str) -> Result<(), String> {
+        if is_serato_running() {
+            return Err(format!(
+                "Bloqueio de segurança: o Serato DJ Pro está em execução. Feche o Serato antes de {}.",
+                acao
+            ));
+        }
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn analyze_track_file(app: AppHandle, filepath: String) -> Result<String, String> {
+        run_py_json(&app, "music_analysis.py", &["--analyze".into(), filepath])
+    }
+
+    /// Lote de BPM/tom com progresso transmitido por evento "analysis-progress".
+    #[tauri::command]
+    pub async fn analyze_tracks_batch(
+        app: AppHandle,
+        window: Window,
+        mp3_path: String,
+        limit: usize,
+        write: bool,
+        include_filled: bool,
+    ) -> Result<String, String> {
+        if write {
+            bloqueio_serato("gravar BPM e tom nas tags")?;
+        }
+        let script = find_python_script(Some(&app), "music_analysis.py");
+        let mut cmd = Command::new("/usr/bin/python3");
+        cmd.arg(&script).arg("--analyze-batch").arg(&mp3_path);
+        cmd.arg("--limit").arg(limit.to_string());
+        if write {
+            cmd.arg("--write");
+        }
+        if include_filled {
+            cmd.arg("--include-filled");
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar análise: {}", e))?;
+        let mut final_json = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            for line_res in BufReader::new(stdout).lines() {
+                if let Ok(line) = line_res {
+                    let trimmed = line.trim().to_string();
+                    if trimmed.starts_with('{') {
+                        let _ = window.emit("analysis-progress", trimmed.clone());
+                        final_json = trimmed;
+                    }
+                }
+            }
+        }
+        let status = child.wait().map_err(|e| format!("Falha ao aguardar análise: {}", e))?;
+        if !status.success() && final_json.is_empty() {
+            return Err("Erro na execução da análise de BPM/tom".into());
+        }
+        Ok(final_json)
+    }
+
+    #[tauri::command]
+    pub async fn list_journal(app: AppHandle, limit: usize) -> Result<String, String> {
+        run_py_json(&app, "journal.py", &["--list".into(), "--limit".into(), limit.to_string()])
+    }
+
+    #[tauri::command]
+    pub async fn undo_journal(app: AppHandle, op_id: Option<i64>) -> Result<String, String> {
+        bloqueio_serato("desfazer alterações de tags")?;
+        let mut args: Vec<String> = vec!["--undo".into()];
+        if let Some(id) = op_id {
+            args.push(id.to_string());
+        }
+        run_py_json(&app, "journal.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn check_crate_references(app: AppHandle, serato_path: String) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &["--check-refs".into(), "--serato".into(), serato_path])
+    }
+
+    #[tauri::command]
+    pub async fn library_health(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &[
+            "--health".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn export_crate_m3u(app: AppHandle, serato_path: String, crate_file: String) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &[
+            "--export-m3u".into(), crate_file, "--serato".into(), serato_path,
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn import_m3u_crate(
+        app: AppHandle,
+        serato_path: String,
+        m3u_path: String,
+        crate_name: String,
+    ) -> Result<String, String> {
+        bloqueio_serato("criar uma crate")?;
+        run_py_json(&app, "library_tools.py", &[
+            "--import-m3u".into(), m3u_path, "--crate-name".into(), crate_name, "--serato".into(), serato_path,
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn smart_crate_create(
+        app: AppHandle,
+        mp3_path: String,
+        serato_path: String,
+        config_json: String,
+        dry_run: bool,
+    ) -> Result<String, String> {
+        if !dry_run {
+            bloqueio_serato("criar uma crate inteligente")?;
+        }
+        let mut args: Vec<String> = vec![
+            "--smart-create".into(), config_json, "--mp3".into(), mp3_path, "--serato".into(), serato_path,
+        ];
+        if dry_run {
+            args.push("--smart-dry-run".into());
+        }
+        run_py_json(&app, "library_tools.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn smart_crate_refresh(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
+        bloqueio_serato("regenerar crates inteligentes")?;
+        run_py_json(&app, "library_tools.py", &[
+            "--smart-refresh".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn smart_crate_list(app: AppHandle) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &["--smart-list".into()])
+    }
+
+    #[tauri::command]
+    pub async fn smart_crate_delete(app: AppHandle, nome: String) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &["--smart-delete".into(), nome])
+    }
+
+    #[tauri::command]
+    pub async fn scan_new_tracks(app: AppHandle, mp3_path: String) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &["--scan-new".into(), "--mp3".into(), mp3_path])
+    }
+
+    #[tauri::command]
     pub async fn get_sound_seal_status(app: AppHandle) -> Result<String, String> {
         let script = find_python_script(Some(&app), "sound_seal.py");
         let mut cmd = Command::new("/usr/bin/python3");
@@ -2244,7 +2467,22 @@ pub fn run() {
             commands::audit_crate_cues,
             commands::batch_apply_crate_cues,
             commands::repair_crate_cues,
-            commands::apply_batch_auto_cues
+            commands::apply_batch_auto_cues,
+            commands::list_cue_backups,
+            commands::restore_auto_cues,
+            commands::analyze_track_file,
+            commands::analyze_tracks_batch,
+            commands::list_journal,
+            commands::undo_journal,
+            commands::check_crate_references,
+            commands::library_health,
+            commands::export_crate_m3u,
+            commands::import_m3u_crate,
+            commands::smart_crate_create,
+            commands::smart_crate_refresh,
+            commands::smart_crate_list,
+            commands::smart_crate_delete,
+            commands::scan_new_tracks
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");

@@ -15,6 +15,9 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isRestoring, setIsRestoring] = useState<boolean>(false);
   const [searchTerm, setSearchTerm] = useState<string>('');
+  const [cueBackups, setCueBackups] = useState<any[]>([]);
+  const [isLoadingCues, setIsLoadingCues] = useState<boolean>(false);
+  const [cueSearchTerm, setCueSearchTerm] = useState<string>('');
 
   const filteredBackups = useMemo(() => {
     if (!searchTerm.trim()) return backups;
@@ -60,7 +63,60 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
 
   useEffect(() => {
     loadBackups();
+    loadCueBackups();
   }, []);
+
+  const loadCueBackups = async () => {
+    if (!isTauri) return;
+    setIsLoadingCues(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const res = await invoke<string>('list_cue_backups', {
+        search: cueSearchTerm.trim() || null
+      });
+      const data = JSON.parse(res);
+      setCueBackups(Array.isArray(data.items) ? data.items : []);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsLoadingCues(false);
+    }
+  };
+
+  const handleRestoreCue = (item: any) => {
+    setModalConfig({
+      isOpen: true,
+      title: 'Restaurar Hot Cues da Faixa',
+      message: `Devolver os cues de "${item.filename}" ao estado anterior?`,
+      detail: `Backup de: ${item.data}\nCues registrados no backup: ${item.quantidade_cues}\nCaminho: ${item.filepath}\n\nAs posições de cues gravadas depois desse backup serão substituídas. A faixa continua intacta; apenas as tags Serato são reescritas.`,
+      confirmText: 'Restaurar Cues',
+      variant: 'warning',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsRestoring(true);
+        onAddLog(`⏪ Restaurando cues de ${item.filename}...`);
+        try {
+          if (isTauri) {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const res = await invoke<string>('restore_auto_cues', {
+              filepath: item.filepath
+            });
+            const data = JSON.parse(res);
+            if (data.sucesso) {
+              onAddLog(`🎯 ${data.mensagem}`);
+              loadCueBackups();
+            } else {
+              onAddLog(`❌ Erro ao restaurar cues: ${data.erro}`);
+            }
+          }
+        } catch (e) {
+          onAddLog(`❌ Falha: ${e}`);
+        } finally {
+          setIsRestoring(false);
+        }
+      }
+    });
+  };
 
   const handleCreateBackup = async () => {
     if (!isTauri) return;
@@ -129,6 +185,7 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
           </h3>
           <p className="text-[11px] text-serato-muted">
             Antes de qualquer alteração, o sistema gera backups automáticos e versionados em ~/pasync/backups/.
+            A segunda lista recupera os Hot Cues gravados pelo Auto-Cue faixa por faixa.
           </p>
         </div>
 
@@ -206,6 +263,75 @@ export const BackupManager: React.FC<BackupManagerProps> = ({
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   <span>Restaurar Esta Versão</span>
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Lista de Backups de Hot Cues (Auto-Cue) */}
+      <div className="border border-serato-cardBorder rounded-lg overflow-hidden flex flex-col shrink-0 max-h-[38%] bg-serato-card/20">
+        <div className="bg-serato-header px-3 py-2 border-b border-serato-cardBorder text-xs text-serato-muted font-mono flex items-center justify-between">
+          <span>{cueBackups.length} Faixas com Backup de Hot Cues</span>
+          <span>Local: ~/.serato_sync_cues_backup.sqlite</span>
+        </div>
+
+        <div className="bg-serato-dark/60 p-2 border-b border-serato-cardBorder flex items-center gap-2 shrink-0">
+          <div className="relative flex-1">
+            <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
+            <input
+              type="text"
+              value={cueSearchTerm}
+              onChange={(e) => setCueSearchTerm(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') loadCueBackups(); }}
+              placeholder="Filtrar por nome da faixa ou caminho e pressione Enter..."
+              className="w-full pl-8 pr-3 py-1.5 text-xs bg-serato-dark border border-serato-cardBorder rounded-lg text-slate-200 placeholder-serato-muted focus:outline-none focus:border-serato-neonGreen transition font-sans"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={loadCueBackups}
+            disabled={isLoadingCues}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-serato-card hover:bg-slate-700 text-slate-200 border border-serato-cardBorder transition cursor-pointer disabled:opacity-50"
+          >
+            {isLoadingCues ? 'Buscando...' : 'Buscar'}
+          </button>
+        </div>
+
+        <div className="overflow-y-auto flex-1 p-2 space-y-2">
+          {cueBackups.length === 0 ? (
+            <div className="py-6 text-center text-slate-500 text-xs">
+              <History className="w-7 h-7 opacity-20 text-serato-cyan mx-auto mb-2" />
+              <p>Nenhum backup de Hot Cues registrado.</p>
+              <p className="text-slate-600 mt-1">Os backups aparecem aqui depois que o Auto-Cue grava cues em alguma faixa.</p>
+            </div>
+          ) : (
+            cueBackups.map((item, idx) => (
+              <div key={`${item.filepath}-${idx}`} className="bg-serato-card border border-serato-cardBorder p-2.5 rounded-lg flex items-center justify-between gap-3 hover:bg-white/[0.02]">
+                <div className="min-w-0">
+                  <div className="font-semibold text-white text-xs truncate">{item.filename}</div>
+                  <div className="text-[10px] text-serato-muted font-mono flex items-center gap-2 mt-0.5 flex-wrap">
+                    <span>Backup: {item.created_at}</span>
+                    <span>•</span>
+                    <span>Cues: <b className="text-slate-300">{item.quantidade_cues}</b></span>
+                    <span>•</span>
+                    {item.arquivo_existe ? (
+                      <span className="text-serato-neonGreen">arquivo presente</span>
+                    ) : (
+                      <span className="text-amber-400">arquivo ausente no disco</span>
+                    )}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => handleRestoreCue(item)}
+                  disabled={isRestoring || !item.arquivo_existe}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-serato-dark hover:bg-cyan-950/40 text-slate-300 hover:text-cyan-300 border border-serato-cardBorder hover:border-cyan-800/40 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Restaurar Cues</span>
                 </button>
               </div>
             ))

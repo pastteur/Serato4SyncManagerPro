@@ -619,8 +619,10 @@ def export_matched_to_serato_crate(crate_name: str, matched_items: list, serato_
 
     crate_path = subcrates_dir / safe_name
 
-    # Header oficial do Serato
-    header = b'vrsn\x00\x00\x00\x081.0/Serato ScratchLive Crate'
+    # Cabeçalho vrsn idêntico ao usado pelo motor de sincronização (serato_macos_app.py):
+    # 'vrsn' + tamanho (8) + "1.0" em UTF-16BE. A versão anterior declarava 8 bytes
+    # mas gravava 28 bytes de texto ASCII, deixando o cabeçalho malformado.
+    header = b'vrsn\x00\x00\x00\x08\x001\x00.\x000\x000'
     track_entries = bytearray()
 
     for item in matched_items:

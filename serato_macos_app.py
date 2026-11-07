@@ -79,18 +79,43 @@ def calcular_assinatura_pasta(arquivos_meta: list) -> str:
 
 
 def compute_quick_audio_hash(filepath: Path) -> str:
-    """Calcula hash SHA-256 do fluxo de áudio para comprovação forense de duplicatas."""
+    """
+    Calcula hash SHA-256 do conteúdo do arquivo para comprovação de duplicatas.
+    Ignora cabeçalho ID3v2 (início) e rodapé ID3v1 (últimos 128 bytes), de modo que
+    duas cópias do mesmo áudio com tags diferentes continuem batendo.
+    ATENÇÃO: o áudio não é decodificado, apenas os bytes são somados.
+    """
     try:
-        h = hashlib.sha256()
         with open(filepath, 'rb') as f:
             header = f.read(10)
-            if header.startswith(b'ID3') and len(header) == 10:
+            start_offset = 0
+            if len(header) == 10 and header[:3] == b'ID3':
                 tag_size = ((header[6] & 0x7F) << 21) | ((header[7] & 0x7F) << 14) | ((header[8] & 0x7F) << 7) | (header[9] & 0x7F)
-                f.seek(10 + tag_size)
-            else:
-                f.seek(0)
-            while chunk := f.read(65536):
+                start_offset = 10 + tag_size
+                # Rodapé ID3v2 (flag 0x10) ocupa mais 10 bytes
+                if header[5] & 0x10:
+                    start_offset += 10
+
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            end_offset = file_size
+            if file_size > 128:
+                f.seek(file_size - 128)
+                if f.read(3) == b'TAG':
+                    end_offset -= 128
+
+            if end_offset <= start_offset:
+                return ""
+
+            h = hashlib.sha256()
+            f.seek(start_offset)
+            bytes_left = end_offset - start_offset
+            while bytes_left > 0:
+                chunk = f.read(min(bytes_left, 65536))
+                if not chunk:
+                    break
                 h.update(chunk)
+                bytes_left -= len(chunk)
         return h.hexdigest()
     except Exception:
         return ""

@@ -1321,6 +1321,8 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                     audio.tags['TCON'] = TCON(encoding=3, text=crate_raiz)
 
                 # Salva preservando tags Serato Markers (ID3v2.3 obrigatório para Serato DJ)
+                from journal import record_id3_before_change
+                record_id3_before_change(audio.filename, action="tag_doctor")
                 audio.save(v2_version=3)
             else:
                 if novo_titulo:
@@ -1557,6 +1559,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                     if clean_res['crate_raiz']:
                         audio.tags['TCON'] = TCON(encoding=3, text=clean_res['crate_raiz'])
                     # CRÍTICO: ID3v2.3 obrigatório para Serato DJ Pro (v2.4 não é lido)
+                    from journal import record_id3_before_change
+                    record_id3_before_change(audio.filename, action="tag_doctor_lote")
                     audio.save(v2_version=3)
                 else:
                     if clean_res['title']: audio['title'] = [clean_res['title']]
