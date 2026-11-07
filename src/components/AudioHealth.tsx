@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2,
   Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree, Search,
-  Play, Pause, Volume2, X, Edit3, ShieldCheck, AlertCircle
+  Play, Pause, Volume2, X, Edit3, ShieldCheck, AlertCircle, FileSpreadsheet
 } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
@@ -794,6 +794,33 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     }
   };
 
+  const handleExportCsv = () => {
+    if (filteredItems.length === 0) return;
+    const headers = ["Nome", "Categoria", "Bitrate_kbps", "SampleRate_Hz", "Duracao_Segundos", "Problema", "Caminho"];
+    const rows = filteredItems.map(item => [
+      `"${(item.arquivo || item.nome || '').replace(/"/g, '""')}"`,
+      `"${(item.categoria || '').replace(/"/g, '""')}"`,
+      item.bitrate || 0,
+      item.sample_rate || 0,
+      (item.duracao || 0).toFixed(1),
+      `"${(item.motivo || item.detalhe || '').replace(/"/g, '""')}"`,
+      `"${(item.caminho || '').replace(/"/g, '""')}"`
+    ]);
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '') + '_' + now.toTimeString().slice(0, 8).replace(/:/g, '');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `diagnostico_audio_health_${dateStr}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    onAddLog(`📊 Relatório CSV de saúde de áudio exportado (${filteredItems.length} faixas).`);
+  };
+
   return (
     <div className="bg-serato-dark border border-serato-cardBorder rounded-xl p-4 shadow-2xl flex flex-col h-full flex-1 overflow-hidden min-h-0 space-y-3 relative">
       
@@ -858,6 +885,18 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
             <span>{isLoading ? 'Analisando...' : '🩺 Auditar Saúde'}</span>
+          </button>
+
+          {/* Exportar Diagnóstico CSV */}
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={isLoading || filteredItems.length === 0}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition disabled:opacity-30 cursor-pointer"
+            title="Exporta a lista de problemas de áudio (truncadas, fake 320k, baixa qualidade) em formato CSV"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5 text-serato-gold" />
+            <span>Exportar CSV</span>
           </button>
         </div>
       </div>
