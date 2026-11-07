@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::{AppHandle, Emitter, Manager, Window};
 use serde::{Deserialize, Serialize};
@@ -146,6 +146,19 @@ fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> R
 fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
     find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name))
 }
+fn make_python_cmd(script: &Path, bin: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    cmd.arg(script);
+    cmd
+}
+
+fn find_python_cmd(app: Option<&AppHandle>, script_name: &str) -> Command {
+    let script = find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name));
+    let bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+    make_python_cmd(&script, &bin)
+}
+
 
 pub fn is_serato_running() -> bool {
     Command::new("pgrep")
@@ -647,6 +660,7 @@ mod commands {
             let _ = window_clone.emit("sync-log", format!("🐍 Motor Python: {}", script_path.display()));
 
             let mut cmd = Command::new(&python_bin);
+            cmd.env("PYTHONDONTWRITEBYTECODE", "1");
             cmd.arg(&script_path);
             cmd.arg(&mp3_clean);
             cmd.arg(&serato_clean);
@@ -755,9 +769,7 @@ mod commands {
         app: AppHandle,
         mp3_path: String,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "tag_doctor.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
         cmd.arg("--list-crates");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -784,9 +796,7 @@ mod commands {
         include_subcrates: Option<bool>,
         naming_mode: Option<String>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "tag_doctor.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
         cmd.arg("--scan-tags");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -885,8 +895,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-apply");
             cmd.arg("--mp3");
             cmd.arg(&mp3_path);
@@ -997,8 +1007,8 @@ mod commands {
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--apply-tags");
             cmd.arg(&temp_file);
             if let Some(true) = rename_files {
@@ -1080,8 +1090,8 @@ mod commands {
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--enrich-artists");
             cmd.arg(&temp_file);
 
@@ -1141,9 +1151,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn backup_serato_db(app: AppHandle) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "tag_doctor.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
         cmd.arg("--backup-db");
 
         let output = cmd.output().map_err(|e| format!("Falha ao executar backup: {}", e))?;
@@ -1157,9 +1165,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn list_serato_backups(app: AppHandle) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "tag_doctor.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
         cmd.arg("--list-backups");
 
         let output = cmd.output().map_err(|e| format!("Falha ao listar backups: {}", e))?;
@@ -1169,9 +1175,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn restore_serato_db(app: AppHandle, backup_path: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "tag_doctor.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
         cmd.arg("--restore-db");
         cmd.arg(&backup_path);
 
@@ -1191,9 +1195,7 @@ mod commands {
         mp3_path: String,
         batch: Option<usize>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--scan");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1245,9 +1247,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn list_cue_backups(app: AppHandle, search: Option<String>) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
         cmd.arg("--list-backups");
         if let Some(s) = search {
             if !s.trim().is_empty() {
@@ -1272,9 +1272,7 @@ mod commands {
         if is_serato_running() {
             return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de restaurar Hot Cues.".into());
         }
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
         cmd.arg("--restore");
         cmd.arg(&filepath);
 
@@ -1295,6 +1293,7 @@ mod commands {
         let path = find_canonical_python_script(Some(app), script)?;
         let python_bin = find_python_binary()?;
         let mut cmd = Command::new(&python_bin);
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         cmd.arg(&path);
         for a in args {
             cmd.arg(a);
@@ -1328,6 +1327,7 @@ mod commands {
         let script = find_canonical_python_script(Some(&app), "duplicates_tool.py")?;
         let python_bin = find_python_binary()?;
         let mut cmd = Command::new(&python_bin);
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         cmd.arg(&script).arg("--roots");
         for r in &roots {
             cmd.arg(r);
@@ -1464,7 +1464,9 @@ mod commands {
             bloqueio_serato("gravar BPM e tom nas tags")?;
         }
         let script = find_python_script(Some(&app), "music_analysis.py");
-        let mut cmd = Command::new("/usr/bin/python3");
+        let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+        let mut cmd = Command::new(&python_bin);
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         cmd.arg(&script).arg("--analyze-batch").arg(&mp3_path);
         cmd.arg("--limit").arg(limit.to_string());
         if write {
@@ -1587,9 +1589,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn get_sound_seal_status(app: AppHandle) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--status");
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar status do Sound Seal: {}", e))?;
@@ -1605,9 +1605,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn get_sound_seal_duplicates(app: AppHandle, strategy: Option<String>) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--duplicates");
         if let Some(s) = strategy {
             cmd.arg("--strategy");
@@ -1627,9 +1625,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn set_sound_seal_master(app: AppHandle, audio_seal: String, filepath: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--set-master");
         cmd.arg(&audio_seal);
         cmd.arg(&filepath);
@@ -1647,9 +1643,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn batch_set_sound_seal_masters(app: AppHandle, masters_json: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--batch-set-masters");
         cmd.arg(&masters_json);
 
@@ -1666,9 +1660,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn clear_sound_seal_masters(app: AppHandle) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--clear-masters");
 
         let output = cmd.output().map_err(|e| format!("Falha ao limpar preferências de master: {}", e))?;
@@ -1689,9 +1681,7 @@ mod commands {
         mp3_path: String,
         serato_path: String,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--relocate");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1746,9 +1736,7 @@ mod commands {
         rel_path: String,
         source_path: String,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--relink");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1776,8 +1764,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-relink");
             cmd.arg(&items_json);
             cmd.arg("--mp3");
@@ -1826,9 +1814,7 @@ mod commands {
         target_path: Option<String>,
         target_paths: Option<String>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--remove-lost");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1873,9 +1859,7 @@ mod commands {
         serato_path: String,
         export_crate: Option<String>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "track_matcher.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
         cmd.arg("--serato");
@@ -1931,9 +1915,7 @@ mod commands {
         app: AppHandle,
         upgrades_json: String,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "track_matcher.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py");
         cmd.arg("--replace-upgrades");
         cmd.arg(&upgrades_json);
 
@@ -1948,9 +1930,7 @@ mod commands {
         tracks_json: String,
         target_folder: String,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "track_matcher.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py");
         cmd.arg("--integrate-tracks");
         cmd.arg(&tracks_json);
         cmd.arg("--target-folder");
@@ -1974,9 +1954,7 @@ mod commands {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
         cmd.arg("--scan");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2059,9 +2037,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn resample_track_local(app: AppHandle, filepath: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
         cmd.arg("--resample-local");
         cmd.arg(&filepath);
 
@@ -2080,8 +2056,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-resample-local");
             cmd.arg(&filepaths_json);
             cmd.stdout(Stdio::piped());
@@ -2122,9 +2098,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn repair_track_online(app: AppHandle, filepath: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
         cmd.arg("--repair-online");
         cmd.arg(&filepath);
 
@@ -2143,8 +2117,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-repair-online");
             cmd.arg(&filepaths_json);
             cmd.stdout(Stdio::piped());
@@ -2185,9 +2159,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn preaudit_track_online(app: AppHandle, filepath: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
         cmd.arg("--preaudit-online");
         cmd.arg(&filepath);
 
@@ -2206,8 +2178,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-preaudit-online");
             cmd.arg(&filepaths_json);
             cmd.stdout(Stdio::piped());
@@ -2252,9 +2224,7 @@ mod commands {
         filepath: String,
         new_name: String,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
         cmd.arg("--rename-track");
         cmd.arg(&filepath);
         cmd.arg("--new-name");
@@ -2267,9 +2237,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn preview_auto_cues(app: AppHandle, filepath: String) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
         cmd.arg("--preview");
         cmd.arg(&filepath);
 
@@ -2283,9 +2251,7 @@ mod commands {
         if is_serato_running() {
             return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de gravar Hot Cues nos arquivos.".into());
         }
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
         cmd.arg("--apply");
         cmd.arg(&filepath);
 
@@ -2307,9 +2273,7 @@ mod commands {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
         cmd.arg("--scan-crate");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2406,8 +2370,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-crate");
             cmd.arg("--mp3");
             cmd.arg(&mp3_path);
@@ -2482,8 +2446,8 @@ mod commands {
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let mut cmd = Command::new("/usr/bin/python3");
-            cmd.arg(&script);
+            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--repair-batch");
             cmd.arg("--mp3");
             cmd.arg(&mp3_path);
@@ -2544,9 +2508,7 @@ mod commands {
         if is_serato_running() {
             return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de aplicar lote de Hot Cues nos arquivos.".into());
         }
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
         cmd.arg("--apply-batch");
         cmd.arg(&filepaths_json);
 
