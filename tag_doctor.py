@@ -12,6 +12,8 @@ preservando 100% dos marcadores Serato (GEOB Markers, Beatgrids, BPM e Key).
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import re
 import html
 import shutil

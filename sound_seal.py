@@ -12,6 +12,8 @@ com scores de confiança (100%, 87%, 77%) e detecção de arquivos na Lixeira (.
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import re
 import time
 import json

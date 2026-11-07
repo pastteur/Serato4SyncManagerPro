@@ -18,6 +18,8 @@ não são registradas aqui (ver backups específicos de cada módulo).
 
 import os
 import sys
+
+sys.dont_write_bytecode = True
 import json
 import shutil
 import sqlite3

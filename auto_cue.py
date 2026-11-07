@@ -14,6 +14,8 @@ com streaming de progresso e backup de segurança blindado contra sobrescritas.
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import json
 import base64
 import struct

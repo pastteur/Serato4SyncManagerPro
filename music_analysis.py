@@ -25,6 +25,8 @@ escrita o estado anterior do bloco ID3 é gravado no journal (undo).
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import math
 import json
 import shutil

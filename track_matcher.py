@@ -12,6 +12,8 @@ Cruzamento de playlists (Spotify, YouTube Music, M3U, CSV ou Texto) contra as
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import re
 import json
 import shutil

@@ -16,6 +16,8 @@ Auditoria profunda de integridade e reparação de faixas:
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import json
 import shutil
 import argparse

@@ -18,6 +18,8 @@ Matcher. Nenhuma tag é alterada aqui.
 import os
 import re
 import sys
+
+sys.dont_write_bytecode = True
 import json
 import argparse
 from pathlib import Path
