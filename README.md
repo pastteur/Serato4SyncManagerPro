@@ -45,19 +45,30 @@
 ### 6. 🩺 Audio Health Doctor (Auditoria de Integridade)
 * **Detecção de Downloads Interrompidos:** Alerta faixas cortadas no meio (ex: 1:30 min) com incompatibilidade de bytes vs duração.
 * **Filtro de Duração:** Encontra vinhetas, toques e previews menores que 60s acidentalmente misturados no acervo.
-* **Qualidade de Áudio:** Aponta arquivos com menos de 192 kbps para substituição.
+* **Qualidade de Áudio & Fake 320 kbps:** Aponta arquivos com menos de 192 kbps e analisa o espectro de frequências sonoras (corte brusco em 16kHz/17.5kHz) para desmascarar áudios de baixa fidelidade re-encodados falsamente como 320 kbps.
 
-### 7. 🎯 Auto-Cue Generator (Hot Cues Oficiais para Serato)
-* **Estrutura Métrica de DJ:** Calcula automaticamente os 5 pontos fundamentais de mixagem com base em BPM e compassos:
-  * 🔴 **Cue 1:** Intro / Primeiro Kick
-  * 🔵 **Cue 2:** Drop 1 (16/32 compassos)
+### 7. 🎯 Auto-Cue Generator com Análise de Transientes
+* **Alinhamento Acústico Real:** Análise espectral de energia e detecção de transientes (*onset/punch*) via FFmpeg para cravar o Cue 1 exatamente no primeiro impacto sonoro da música, alinhando os 16/32 compassos em fase.
+* **Estrutura Métrica de DJ:** Calcula automaticamente os 5 pontos fundamentais de mixagem:
+  * 🔴 **Cue 1:** Intro / Primeiro Kick (alinhado ao transiente real)
+  * 🔵 **Cue 2:** Drop 1 (16/32 compassos em fase)
   * 🟡 **Cue 3:** Breakdown / Ponte
   * 🟢 **Cue 4:** Drop 2 (Clímax)
   * 🟠 **Cue 5:** Outro / Ponto de Mix-out
+* **Proteção de Cues Manuais:** Nunca sobrescreve pontos de Cue personalizados já marcados pelo DJ.
 * **Gravação Nativa:** Grava diretamente na tag `GEOB:Serato Markers2`, acendendo os pads coloridos no controlador.
 
-### 8. 🛡️ Gerenciador de Backups
-* **Snapshots Automáticos:** Salva cópias versionadas e datadas do banco central em `~/pasync/backups/`.
+### 8. 🔀 Varredura Lateral Multi-Pastas (Cross-Folders)
+* **Cruzamento de Múltiplos Discos:** Compare lateralmente arquivos espalhados em pastas distintas, discos internos, SSDs externos e pen-drives.
+* **Assinatura Acústica Sound Seal (SHA-256 Puro):** Isola os frames de áudio brutos (ignora tags ID3), identificando arquivos 100% idênticos mesmo com nomes e tags diferentes.
+* **Keeper Inteligente:** Heurística automática que protege a faixa de maior bitrate, indexada no Serato e mais antiga.
+
+### 9. 🔒 Trava de Segurança de Processo (Serato Lock)
+* **Proteção Ativa:** Monitora a execução do `Serato DJ Pro`. Se o software estiver aberto, qualquer gravação física em crates ou tags é bloqueada preventivamente, impedindo que o cache da memória RAM do Serato sobrescreva ou reverta suas alterações.
+
+### 10. 🛡️ Gerenciador de Backups & Journal de Desfazer
+* **Desfazer Unificado (Undo Journal):** Histórico de operações de tags ID3 para restauração imediata do estado anterior.
+* **Snapshots Automáticos:** Salva cópias versionadas e datadas da biblioteca do Serato.
 * **Restauração em 1 Clique:** Retorne ao estado de qualquer data anterior sem complicações.
 
 ---
@@ -76,7 +87,7 @@
 ### Pré-requisitos
 * [Bun](https://bun.sh/) instalado
 * [Rust](https://rustup.rs/) e Cargo instalados
-* Python 3 com `mutagen` (`pip3 install mutagen`)
+* Python 3 instalado no macOS (a biblioteca `mutagen` já é distribuída e embutida no projeto em `vendor/mutagen`)
 
 ### Instalação e Execução
 ```bash
