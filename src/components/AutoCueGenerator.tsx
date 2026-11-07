@@ -2,17 +2,20 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { Target, Sparkles, CheckCircle2, Play, Music, ArrowRight, RefreshCw, Layers, FolderTree, Zap, Eye, Search, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
+import { PlayingTrackInfo } from './AudioPlayerBar';
 
 interface AutoCueGeneratorProps {
   mp3Path: string;
   onAddLog: (message: string) => void;
   onOpenFileInFinder?: (filePath: string) => void;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
 }
 
 export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
   mp3Path,
   onAddLog,
-  onOpenFileInFinder
+  onOpenFileInFinder,
+  onPlayTrack
 }) => {
   const [selectedFile, setSelectedFile] = useState<string>('');
   const [cuePreview, setCuePreview] = useState<any>(null);
@@ -871,6 +874,25 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                         <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950 text-amber-300 border border-amber-800/40 font-bold">
                           ⏳ Pendente
                         </span>
+                      )}
+
+                      {onPlayTrack && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onPlayTrack({
+                              caminho: t.caminho,
+                              nome: t.arquivo,
+                              bpm: t.bpm,
+                              cues: cuePreview && selectedFile === t.caminho ? cuePreview.cues : undefined
+                            });
+                          }}
+                          className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer"
+                          title="Tocar no Player com Hot Cues"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                        </button>
                       )}
 
                       {onOpenFileInFinder && (

@@ -13,6 +13,7 @@ import { BackupManager } from './components/BackupManager';
 import { AudioHealth } from './components/AudioHealth';
 import { AutoCueGenerator } from './components/AutoCueGenerator';
 import { LibraryTools } from './components/LibraryTools';
+import { AudioPlayerBar, PlayingTrackInfo } from './components/AudioPlayerBar';
 import { LogEntry, SyncSummary } from './types';
 import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2, X, Library, Sun, Moon } from 'lucide-react';
 
@@ -78,6 +79,7 @@ export const App: React.FC = () => {
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [seratoRunning, setSeratoRunning] = useState<boolean>(false);
   const [fsNotification, setFsNotification] = useState<{ count: number; extensions: string[] } | null>(null);
+  const [activePlayingTrack, setActivePlayingTrack] = useState<PlayingTrackInfo | null>(null);
 
   // Monitoramento FSEvents em tempo real da pasta de músicas
   useEffect(() => {
@@ -742,6 +744,7 @@ export const App: React.FC = () => {
                 mp3Path={mp3Path}
                 onAddLog={addLog}
                 onOpenFileInFinder={handleOpenFileInFinder}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 
@@ -762,6 +765,13 @@ export const App: React.FC = () => {
           </div>
         </div>
       </main>
+
+      {/* Barra Persistente de Áudio e Pré-Escuta de Hot Cues para DJs */}
+      <AudioPlayerBar
+        track={activePlayingTrack}
+        onClose={() => setActivePlayingTrack(null)}
+        onAddLog={addLog}
+      />
 
       {/* Modal / Dialog do Guia Serato 4 acessível a partir da esteira de utilidades do Header */}
       {isGuideOpen && (
