@@ -75,6 +75,20 @@
 * **Observador Nativo em Rust:** Monitoramento contínuo em segundo plano da pasta de músicas (`MP3`) via FSEvents do macOS.
 * **Detecção Inteligente & Debounce:** Identifica adições, remoções e alterações de faixas (`.mp3`, `.wav`, `.aif`, `.flac`, `.m4a`) e alerta com um clique para rodar uma pré-avaliação segura (Dry Run).
 
+### 12. 🎧 Reprodutor Nativo Universal & Atalhos de DJ
+* **Pré-Escuta Integrada (100% das Telas):** Player de áudio presente em todas as abas (Auto-Cue, Tag Doctor, Track Matcher, Sound Seal, Duplicatas, Árvore de Crates, Ferramentas e Audio Health).
+* **Atalhos de Teclado:**
+  * <kbd>1</kbd> a <kbd>5</kbd>: Salto imediato para os 5 Hot Cues da faixa.
+  * <kbd>Espaço</kbd>: Play / Pause com proteção inteligente de campos de texto.
+  * <kbd>←</kbd> / <kbd>→</kbd>: Saltos rápidos de 5 segundos na faixa.
+  * <kbd>Shift</kbd> + <kbd>←</kbd> / <kbd>→</kbd>: Saltos dinâmicos de 15 segundos.
+
+### 13. 🛡️ Trava Nativa contra Fechamento Acidental
+* **Interceptação Tauri:** Intercepta o evento de fechamento de janela (`CloseRequested`, <kbd>Cmd</kbd>+<kbd>W</kbd> ou botão vermelho) enquanto sincronizações ou processos em lote estiverem ativos, impedindo corrupção de bibliotecas no meio de uma gravação.
+
+### 14. 📊 Exportação Estruturada de Diagnósticos
+* **Snapshot em JSON:** Exportação com um clique do diagnóstico consolidado da biblioteca (crates mapeadas, novas faixas, remoções, cópias redundantes e integridade de cache).
+
 ---
 
 ## 🛠️ Tecnologias Utilizadas
@@ -109,3 +123,4 @@ bun run tauri build --bundles app
 
 ## 📄 Licença
 Distribuído sob a licença MIT. Desenvolvido para máxima fidelidade e segurança de DJs profissionais.
+<!-- git-hash-salt: 1 -->
