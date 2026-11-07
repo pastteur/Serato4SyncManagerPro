@@ -2820,6 +2820,37 @@ pub fn run() {
     tauri::Builder::default()
         .manage(FsWatcherState::new())
         .plugin(tauri_plugin_dialog::init())
+        .setup(|app| {
+            let app_handle = app.handle().clone();
+
+            // Watcher nativo em segundo plano para monitorar hot-plug de volumes (/Volumes)
+            std::thread::spawn(move || {
+                let volumes_path = PathBuf::from("/Volumes");
+                if volumes_path.exists() {
+                    let (tx, rx) = channel();
+                    if let Ok(mut watcher) = RecommendedWatcher::new(
+                        move |res| {
+                            let _ = tx.send(res);
+                        },
+                        Config::default().with_poll_interval(Duration::from_secs(2)),
+                    ) {
+                        if watcher.watch(&volumes_path, RecursiveMode::NonRecursive).is_ok() {
+                            let mut last_trigger = std::time::Instant::now();
+                            while let Ok(_) = rx.recv() {
+                                // Debounce de 1 segundo para estabilizar a montagem do volume
+                                if last_trigger.elapsed() >= Duration::from_secs(1) {
+                                    last_trigger = std::time::Instant::now();
+                                    std::thread::sleep(Duration::from_millis(800));
+                                    let _ = app_handle.emit("volumes-changed", ());
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_system_telemetry,
             commands::get_detected_paths,

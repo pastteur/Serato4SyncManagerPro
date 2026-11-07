@@ -25,6 +25,7 @@ import subprocess
 import argparse
 from pathlib import Path
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Garante flushing imediato
 if hasattr(sys.stdout, 'reconfigure'):
@@ -1070,10 +1071,22 @@ def main():
         try:
             files = json.loads(args.apply_batch)
             updated = 0
-            for f in files:
-                r = generate_and_save_serato_cues(f, overwrite_existing=args.overwrite_existing)
-                if r.get("sucesso") and not r.get("ignorado"):
-                    updated += 1
+            
+            def process_file(file_path):
+                return generate_and_save_serato_cues(file_path, overwrite_existing=args.overwrite_existing)
+
+            # Execução paralela aproveitando múltiplos núcleos do Apple Silicon (4 a 8 threads)
+            max_workers = min(8, max(2, (os.cpu_count() or 4)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(process_file, f) for f in files]
+                for future in as_completed(futures):
+                    try:
+                        r = future.result()
+                        if r.get("sucesso") and not r.get("ignorado"):
+                            updated += 1
+                    except Exception:
+                        pass
+
             print(json.dumps({"sucesso": True, "total": len(files), "atualizados": updated}))
             sys.exit(0)
         except Exception as e:

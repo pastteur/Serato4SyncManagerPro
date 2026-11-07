@@ -35,9 +35,12 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
-  // Varredura de volumes de DJ montados no Mac
+  // Varredura de volumes de DJ montados no Mac com listener em tempo real
   useEffect(() => {
     if (!isTauri) return;
+
+    let unlisten: (() => void) | undefined;
+
     const fetchVolumes = async () => {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
@@ -49,7 +52,26 @@ export const PathSelector: React.FC<PathSelectorProps> = ({
         // Silencioso
       }
     };
+
     fetchVolumes();
+
+    // Escuta evento nativo de montagem/desmontagem de volumes
+    const setupListener = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen('volumes-changed', () => {
+          fetchVolumes();
+        });
+      } catch (e) {
+        // Silencioso
+      }
+    };
+
+    setupListener();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, [isTauri]);
 
   // Modo Compacto (quando pastas já estão detectadas e não foi solicitado expandir)
