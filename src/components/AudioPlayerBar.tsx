@@ -146,9 +146,9 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({ track, onClose, 
     if (!track) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignora se estiver digitando em input/textarea
+      // Ignora se estiver digitando em input/textarea ou elemento editável
       const target = e.target as HTMLElement;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) {
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
         return;
       }
 
