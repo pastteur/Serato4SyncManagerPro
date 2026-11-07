@@ -71,6 +71,10 @@
 * **Snapshots Automáticos:** Salva cópias versionadas e datadas da biblioteca do Serato.
 * **Restauração em 1 Clique:** Retorne ao estado de qualquer data anterior sem complicações.
 
+### 11. ⚡ Monitoramento de Pastas em Tempo Real (macOS FSEvents)
+* **Observador Nativo em Rust:** Monitoramento contínuo em segundo plano da pasta de músicas (`MP3`) via FSEvents do macOS.
+* **Detecção Inteligente & Debounce:** Identifica adições, remoções e alterações de faixas (`.mp3`, `.wav`, `.aif`, `.flac`, `.m4a`) e alerta com um clique para rodar uma pré-avaliação segura (Dry Run).
+
 ---
 
 ## 🛠️ Tecnologias Utilizadas
