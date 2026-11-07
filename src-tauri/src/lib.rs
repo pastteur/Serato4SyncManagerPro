@@ -2226,6 +2226,20 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn get_audio_spectrogram(app: AppHandle, filepath: String) -> Result<String, String> {
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+        cmd.arg("--spectrogram");
+        cmd.arg(&filepath);
+
+        let output = cmd.output().map_err(|e| format!("Falha ao gerar espectrograma: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            return Err(stdout);
+        }
+        Ok(stdout)
+    }
+
+    #[tauri::command]
     pub async fn resample_track_local(app: AppHandle, filepath: String) -> Result<String, String> {
         let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
         cmd.arg("--resample-local");
@@ -2888,6 +2902,7 @@ pub fn run() {
             commands::replace_upgrades_track_matcher,
             commands::integrate_tracks_to_crate,
             commands::scan_audio_health,
+            commands::get_audio_spectrogram,
             commands::repair_track_online,
             commands::batch_repair_online,
             commands::preaudit_track_online,

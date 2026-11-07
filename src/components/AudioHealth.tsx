@@ -103,6 +103,15 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     isSaving: false,
   });
 
+  // Modal do Espectrograma de Áudio
+  const [spectrogramModal, setSpectrogramModal] = useState<{
+    isOpen: boolean;
+    isLoading: boolean;
+    item: any | null;
+    imageData: string | null;
+    erro: string | null;
+  }>({ isOpen: false, isLoading: false, item: null, imageData: null, erro: null });
+
   // Normalização Local de Frequência 44.1k via FFmpeg
   const [isResamplingLocal, setIsResamplingLocal] = useState<boolean>(false);
   const [resampleProgress, setResampleProgress] = useState<{
@@ -433,6 +442,46 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     }
     setIsPlaying(false);
     setPlayingTrack(null);
+  };
+
+  // Abre e gera o espectrograma acústico da faixa
+  const handleOpenSpectrogram = async (item: any) => {
+    setSpectrogramModal({
+      isOpen: true,
+      isLoading: true,
+      item,
+      imageData: null,
+      erro: null
+    });
+
+    try {
+      const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+      if (isTauri) {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const resJson = await invoke<string>('get_audio_spectrogram', { filepath: item.caminho });
+        const data = JSON.parse(resJson);
+        if (data.sucesso && data.imagem_base64) {
+          setSpectrogramModal(prev => ({
+            ...prev,
+            isLoading: false,
+            imageData: data.imagem_base64,
+            erro: null
+          }));
+        } else {
+          setSpectrogramModal(prev => ({
+            ...prev,
+            isLoading: false,
+            erro: data.erro || 'Falha ao renderizar espectrograma.'
+          }));
+        }
+      }
+    } catch (e) {
+      setSpectrogramModal(prev => ({
+        ...prev,
+        isLoading: false,
+        erro: String(e)
+      }));
+    }
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1333,6 +1382,16 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       </span>
                     )}
 
+                    {/* Botão Visualizar Espectrograma */}
+                    <button
+                      type="button"
+                      onClick={() => handleOpenSpectrogram(item)}
+                      className="p-1.5 rounded bg-serato-dark hover:bg-slate-700 text-purple-300 border border-purple-500/30 hover:border-purple-400 transition cursor-pointer"
+                      title="Abrir Espectrograma Acústico (Auditoria de Frequências e Fake 320k)"
+                    >
+                      <Activity className="w-3.5 h-3.5 text-purple-400" />
+                    </button>
+
                     {/* Botão Play / Ouvir com Player Ilimitado */}
                     <button
                       type="button"
@@ -1537,6 +1596,81 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         </div>
       )}
 
+      {/* Modal Visualizador do Espectrograma Acústico */}
+      {spectrogramModal.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-serato-dark border border-purple-500/40 rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col overflow-hidden">
+            <div className="bg-serato-header px-5 py-3 border-b border-serato-cardBorder flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Activity className="w-5 h-5 text-purple-400" />
+                <span className="text-sm font-bold text-white font-sans">
+                  Auditoria Espectral Acústica • {spectrogramModal.item?.arquivo}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSpectrogramModal({ isOpen: false, isLoading: false, item: null, imageData: null, erro: null })}
+                className="text-slate-400 hover:text-white p-1 rounded transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {spectrogramModal.isLoading ? (
+                <div className="py-20 flex flex-col items-center justify-center gap-3">
+                  <div className="w-8 h-8 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                  <span className="text-xs text-purple-300 font-semibold">Renderizando espectrograma de frequências via FFmpeg...</span>
+                </div>
+              ) : spectrogramModal.erro ? (
+                <div className="p-4 bg-rose-950/40 border border-rose-800 rounded-xl text-rose-300 text-xs">
+                  {spectrogramModal.erro}
+                </div>
+              ) : spectrogramModal.imageData ? (
+                <div className="space-y-3">
+                  <div className="border border-white/10 rounded-xl overflow-hidden bg-black flex justify-center shadow-inner">
+                    <img
+                      src={spectrogramModal.imageData}
+                      alt="Espectrograma Acústico"
+                      className="w-full max-h-72 object-contain"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                    <div className="p-2.5 rounded-lg bg-slate-900/80 border border-white/5">
+                      <div className="text-[10px] text-slate-400 font-bold uppercase">Corte em 16.000 Hz</div>
+                      <div className="text-rose-400 font-semibold mt-0.5">MP3 128 kbps típico</div>
+                      <div className="text-[10px] text-slate-500 mt-1">Corte abrupto indica áudio de rádio/YouTube comprimido.</div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-slate-900/80 border border-white/5">
+                      <div className="text-[10px] text-slate-400 font-bold uppercase">Corte em 17.500 Hz</div>
+                      <div className="text-amber-400 font-semibold mt-0.5">MP3 192 kbps</div>
+                      <div className="text-[10px] text-slate-500 mt-1">Qualidade intermediária aceitável para pistas menores.</div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-slate-900/80 border border-white/5">
+                      <div className="text-[10px] text-slate-400 font-bold uppercase">Acima de 20.000 Hz</div>
+                      <div className="text-emerald-400 font-semibold mt-0.5">320 kbps Genuíno / Lossless</div>
+                      <div className="text-[10px] text-slate-500 mt-1">Armônicos e transientes de alta fidelidade preservados.</div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="px-5 py-3 bg-slate-950/60 border-t border-white/5 flex items-center justify-between text-xs text-slate-400">
+              <span>Bitrate Informado: <strong>{spectrogramModal.item?.bitrate_kbps || 0} kbps</strong></span>
+              <button
+                type="button"
+                onClick={() => setSpectrogramModal({ isOpen: false, isLoading: false, item: null, imageData: null, erro: null })}
+                className="px-4 py-1.5 rounded-lg bg-slate-800 text-slate-200 hover:bg-slate-700 transition cursor-pointer font-semibold"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ConfirmModal
         isOpen={modalConfig.isOpen}
         title={modalConfig.title}
@@ -1550,3 +1684,4 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     </div>
   );
 };
+ // comment 

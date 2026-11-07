@@ -149,6 +149,70 @@ def detect_fake_320k_cutoff(filepath: Path, duration: float, bitrate: int) -> tu
     return False, ""
 
 
+def generate_audio_spectrogram(filepath: Path, out_png_path: Path = None) -> dict:
+    """
+    Gera um espectrograma de áudio visual em alta resolução via FFmpeg e retorna base64.
+    Permite aos DJs inspecionar visualmente o corte de frequência (16kHz / 17.5kHz / 20kHz).
+    """
+    ffmpeg_bin = get_ffmpeg_bin()
+    if not ffmpeg_bin:
+        return {"sucesso": False, "erro": "FFmpeg não foi localizado no sistema."}
+
+    if not filepath.exists() or not filepath.is_file():
+        return {"sucesso": False, "erro": "Arquivo de áudio não encontrado."}
+
+    try:
+        import tempfile
+        import base64
+
+        tmp_out = out_png_path
+        if not tmp_out:
+            tmp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+            tmp_out = Path(tmp_file.name)
+            tmp_file.close()
+
+        # Extrai 20 segundos representativos do meio da faixa para análise espectral precisa
+        cmd = [
+            ffmpeg_bin,
+            "-v", "error",
+            "-y",
+            "-ss", "30",
+            "-t", "20",
+            "-i", str(filepath),
+            "-filter_complex",
+            "showspectrumpic=s=800x300:mode=combined:color=intensity:scale=log:fscale=log:legend=1",
+            str(tmp_out)
+        ]
+
+        # Se falhar no seek de 30s (faixas mais curtas), gera a partir do início
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12)
+        if proc.returncode != 0 or not tmp_out.exists() or tmp_out.stat().st_size == 0:
+            cmd[3] = "0"
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=12)
+
+        if proc.returncode == 0 and tmp_out.exists() and tmp_out.stat().st_size > 0:
+            png_bytes = tmp_out.read_bytes()
+            b64_str = base64.b64encode(png_bytes).decode("ascii")
+
+            # Remove arquivo temporário se criado automaticamente
+            if not out_png_path:
+                try:
+                    tmp_out.unlink()
+                except Exception:
+                    pass
+
+            return {
+                "sucesso": True,
+                "arquivo": filepath.name,
+                "imagem_base64": f"data:image/png;base64,{b64_str}"
+            }
+        else:
+            return {"sucesso": False, "erro": f"FFmpeg falhou ao renderizar espectrograma: {proc.stderr.decode('utf-8', errors='ignore')}"}
+
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
+
+
 def get_yt_dlp_bin():
     for p in YT_DLP_CANDIDATES:
         if p and os.path.exists(p) and os.access(p, os.X_OK):
@@ -997,6 +1061,7 @@ def main():
     parser.add_argument("--batch-resample-local", type=str, default="", help="JSON de lista de caminhos a normalizar frequência")
     parser.add_argument("--preaudit-online", type=str, default="", help="Caminho do arquivo a pré-auditar online")
     parser.add_argument("--batch-preaudit-online", type=str, default="", help="JSON de lista de caminhos a pré-auditar online")
+    parser.add_argument("--spectrogram", type=str, default="", help="Gera espectrograma de frequências de um arquivo")
     parser.add_argument("--rename-track", type=str, default="", help="Caminho do arquivo a renomear")
     parser.add_argument("--new-name", type=str, default="", help="Novo nome do arquivo")
 
@@ -1005,6 +1070,11 @@ def main():
 
     if args.rename_track and args.new_name:
         res = rename_audio_track(args.rename_track, args.new_name)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0 if res.get("sucesso") else 1)
+
+    if args.spectrogram:
+        res = generate_audio_spectrogram(Path(args.spectrogram))
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
 
