@@ -524,7 +524,13 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen bg-serato-dark text-slate-100 overflow-hidden font-sans select-none">
-      <Header isRunning={isRunning} onOpenGuide={() => setIsGuideOpen(true)} />
+      <Header
+        isRunning={isRunning}
+        mp3Path={mp3Path}
+        seratoPath={seratoPath}
+        onOpenGuide={() => setIsGuideOpen(true)}
+        onAddLog={addLog}
+      />
 
       {/* Main Container without Double Scrolling */}
       <main className="flex-1 min-h-0 flex flex-col p-2 md:p-3 space-y-2 overflow-hidden">

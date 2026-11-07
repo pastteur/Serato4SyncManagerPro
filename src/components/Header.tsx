@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio, BookOpen } from 'lucide-react';
+import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio, BookOpen, FileText } from 'lucide-react';
 
 interface HeaderProps {
   isRunning: boolean;
+  mp3Path?: string;
+  seratoPath?: string;
   onOpenGuide?: () => void;
+  onAddLog?: (msg: string) => void;
 }
 
 interface SystemTelemetry {
@@ -18,8 +21,9 @@ interface SystemTelemetry {
   serato_running: boolean;
 }
 
-export const Header: React.FC<HeaderProps> = ({ isRunning, onOpenGuide }) => {
+export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, onOpenGuide, onAddLog }) => {
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+  const [isExportingReport, setIsExportingReport] = useState<boolean>(false);
   
   const [telemetry, setTelemetry] = useState<SystemTelemetry>({
     cpu_percent: 0,
@@ -57,6 +61,32 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, onOpenGuide }) => {
       clearInterval(interval);
     };
   }, [isTauri]);
+
+  // Exporta diagnóstico executivo HTML e revela no Finder / abre no navegador
+  const handleExportDiagnosis = async () => {
+    if (!isTauri || !mp3Path) {
+      if (onAddLog) onAddLog('⚠️ Selecione a pasta MP3 Master para gerar o diagnóstico.');
+      return;
+    }
+
+    setIsExportingReport(true);
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('export_html_report', {
+        mp3Path,
+        seratoPath: seratoPath || ''
+      });
+      const data = JSON.parse(resJson);
+      if (data.sucesso && data.arquivo) {
+        if (onAddLog) onAddLog(`📊 Diagnóstico executivo gerado com sucesso: ${data.arquivo}`);
+        await invoke('open_file_in_finder', { path: data.arquivo });
+      }
+    } catch (e) {
+      if (onAddLog) onAddLog(`⚠️ Falha ao exportar diagnóstico: ${e}`);
+    } finally {
+      setIsExportingReport(false);
+    }
+  };
 
   // Cores dinâmicas de acordo com a carga
   const cpuColor = telemetry.cpu_percent > 85 ? 'text-rose-400' : telemetry.cpu_percent > 60 ? 'text-amber-400' : 'text-serato-cyan';
@@ -152,6 +182,18 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, onOpenGuide }) => {
 
       {/* Lado Direito: Badges do Sistema & Esteira de Utilidades */}
       <div className="flex items-center space-x-2 shrink-0">
+        {mp3Path && (
+          <button
+            type="button"
+            onClick={handleExportDiagnosis}
+            disabled={isExportingReport || isRunning}
+            className="flex items-center gap-1.5 text-[11px] font-bold text-black bg-gradient-to-r from-amber-400 to-serato-gold hover:opacity-90 px-2.5 py-1.5 rounded-lg shadow-sm transition disabled:opacity-50 cursor-pointer"
+            title="Gera um dashboard executivo HTML da biblioteca e abre no Finder / Navegador"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span>{isExportingReport ? 'Gerando...' : 'Diagnóstico Geral'}</span>
+          </button>
+        )}
         <div className="flex items-center space-x-1.5 text-[11px] text-slate-400 bg-serato-card px-2.5 py-1.5 rounded-lg border border-serato-cardBorder font-sans">
           <Cpu className="w-3.5 h-3.5 text-serato-cyan" />
           <span>macOS Tahoe / Silicon</span>

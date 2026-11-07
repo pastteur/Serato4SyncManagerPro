@@ -23,6 +23,7 @@ sys.dont_write_bytecode = True
 import json
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 _VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
 if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
@@ -266,6 +267,193 @@ def library_health(mp3_folder, serato_dir=None):
     return resultado
 
 
+def generate_html_report(mp3_folder, serato_dir=None, out_html_path=None):
+    """Gera um relatório HTML executivo com design dark moderno de DJ e suporte a impressão/PDF."""
+    health = library_health(mp3_folder, serato_dir)
+    data_hora = datetime.now().strftime("%d/%m/%Y às %H:%M:%S")
+
+    total = health.get("total_faixas", 0)
+    sem_bpm = health.get("sem_bpm", 0)
+    sem_tom = health.get("sem_tom", 0)
+    baixa_qual = health.get("baixa_qualidade", 0)
+    sem_cues = health.get("sem_cues", 0)
+    tamanho = health.get("tamanho_gb", 0)
+    crates_count = health.get("crates", 0)
+    quebradas = health.get("referencias_quebradas", 0)
+
+    com_bpm = max(0, total - sem_bpm)
+    com_tom = max(0, total - sem_tom)
+    com_cues = max(0, total - sem_cues)
+    alta_qual = max(0, total - baixa_qual)
+
+    pct_bpm = round((com_bpm / total) * 100, 1) if total > 0 else 0
+    pct_tom = round((com_tom / total) * 100, 1) if total > 0 else 0
+    pct_cues = round((com_cues / total) * 100, 1) if total > 0 else 0
+    pct_alta = round((alta_qual / total) * 100, 1) if total > 0 else 0
+
+    html = f"""<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Diagnóstico da Biblioteca Serato - {data_hora}</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background-color: #0b0f19;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    padding: 32px;
+    line-height: 1.5;
+  }}
+  .container {{ max-width: 900px; margin: 0 auto; }}
+  header {{
+    border-bottom: 1px solid #1e293b;
+    padding-bottom: 24px;
+    margin-bottom: 28px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }}
+  h1 {{ font-size: 24px; color: #ffd700; font-weight: 800; display: flex; align-items: center; gap: 8px; }}
+  .badge {{ background: rgba(0, 229, 255, 0.15); color: #00e5ff; border: 1px solid rgba(0, 229, 255, 0.4); padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 700; }}
+  .meta-sub {{ color: #94a3b8; font-size: 13px; margin-top: 4px; }}
+  .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 28px; }}
+  .card {{
+    background: #131b2e;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+  }}
+  .card-title {{ font-size: 12px; font-weight: 700; text-transform: uppercase; color: #94a3b8; margin-bottom: 8px; }}
+  .card-value {{ font-size: 28px; font-weight: 800; color: #ffffff; font-family: ui-monospace, monospace; }}
+  .card-desc {{ font-size: 12px; color: #64748b; margin-top: 4px; }}
+  .section {{
+    background: #131b2e;
+    border: 1px solid #1e293b;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }}
+  .section-title {{ font-size: 16px; font-weight: 700; color: #ffffff; margin-bottom: 16px; }}
+  .progress-item {{ margin-bottom: 16px; }}
+  .progress-label {{ display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 6px; }}
+  .bar-bg {{ background: #0b0f19; height: 8px; border-radius: 4px; overflow: hidden; border: 1px solid #1e293b; }}
+  .bar-fill {{ height: 100%; border-radius: 4px; }}
+  .btn-print {{
+    background: #ffd700;
+    color: #000;
+    font-weight: 700;
+    border: none;
+    padding: 10px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+  }}
+  @media print {{
+    body {{ background: #fff; color: #000; }}
+    .card, .section {{ background: #f8fafc; border-color: #cbd5e1; }}
+    .card-value, h1, .section-title {{ color: #0f172a; }}
+    .btn-print {{ display: none; }}
+  }}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div>
+      <h1>🎧 Serato 4 Sync Manager Pro</h1>
+      <div class="meta-sub">Diagnóstico Executivo da Biblioteca • Gerado em {data_hora}</div>
+    </div>
+    <button class="btn-print" onclick="window.print()">Imprimir / Salvar PDF</button>
+  </header>
+
+  <div class="grid">
+    <div class="card">
+      <div class="card-title">Total de Músicas</div>
+      <div class="card-value" style="color: #00e5ff;">{total:,}</div>
+      <div class="card-desc">{tamanho} GB em disco</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Crates Serato</div>
+      <div class="card-value" style="color: #ffd700;">{crates_count}</div>
+      <div class="card-desc">{quebradas} referências quebradas</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Alta Fidelidade</div>
+      <div class="card-value" style="color: #10b981;">{pct_alta}%</div>
+      <div class="card-desc">{baixa_qual} faixas &lt; 192 kbps</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Hot Cues Prontos</div>
+      <div class="card-value" style="color: #a855f7;">{pct_cues}%</div>
+      <div class="card-desc">{com_cues} faixas com marcadores</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Índices de Prontidão para Apresentação ao Vivo</div>
+    
+    <div class="progress-item">
+      <div class="progress-label">
+        <span>BPM Mapeado: {com_bpm} de {total}</span>
+        <span style="font-weight: 700; color: #00e5ff;">{pct_bpm}%</span>
+      </div>
+      <div class="bar-bg"><div class="bar-fill" style="width: {pct_bpm}%; background: #00e5ff;"></div></div>
+    </div>
+
+    <div class="progress-item">
+      <div class="progress-label">
+        <span>Tonalidade Camelot: {com_tom} de {total}</span>
+        <span style="font-weight: 700; color: #ffd700;">{pct_tom}%</span>
+      </div>
+      <div class="bar-bg"><div class="bar-fill" style="width: {pct_tom}%; background: #ffd700;"></div></div>
+    </div>
+
+    <div class="progress-item">
+      <div class="progress-label">
+        <span>Hot Cues Serato Markers2: {com_cues} de {total}</span>
+        <span style="font-weight: 700; color: #a855f7;">{pct_cues}%</span>
+      </div>
+      <div class="bar-bg"><div class="bar-fill" style="width: {pct_cues}%; background: #a855f7;"></div></div>
+    </div>
+
+    <div class="progress-item">
+      <div class="progress-label">
+        <span>Qualidade de Áudio (&ge; 192 kbps): {alta_qual} de {total}</span>
+        <span style="font-weight: 700; color: #10b981;">{pct_alta}%</span>
+      </div>
+      <div class="bar-bg"><div class="bar-fill" style="width: {pct_alta}%; background: #10b981;"></div></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Diretórios Mapeados</div>
+    <div style="font-family: ui-monospace, monospace; font-size: 12px; color: #94a3b8; line-height: 1.8;">
+      <div>📂 <strong>Pasta MP3 Master:</strong> {mp3_folder}</div>
+      <div>💽 <strong>Pasta Serato:</strong> {serato_dir or "Não informada"}</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+"""
+
+    if not out_html_path:
+        out_html_path = Path.home() / "Desktop" / f"diagnostico_serato_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+    else:
+        out_html_path = Path(out_html_path)
+
+    out_html_path.parent.mkdir(parents=True, exist_ok=True)
+    out_html_path.write_text(html, encoding="utf-8")
+
+    return {
+        "sucesso": True,
+        "arquivo": str(out_html_path),
+        "health": health
+    }
+
+
 # ------------------------------------------------------------------------------
 # Crates inteligentes
 # ------------------------------------------------------------------------------
@@ -411,6 +599,7 @@ def main():
     parser.add_argument("--import-m3u", type=str, default="", help="Caminho do M3U a importar")
     parser.add_argument("--crate-name", type=str, default="", help="Nome da crate a criar")
     parser.add_argument("--health", action="store_true")
+    parser.add_argument("--export-html-report", action="store_true", help="Gera dashboard executivo HTML da biblioteca")
     parser.add_argument("--smart-create", type=str, default="", help="JSON com nome e regras")
     parser.add_argument("--smart-dry-run", action="store_true")
     parser.add_argument("--smart-refresh", action="store_true")
@@ -427,6 +616,8 @@ def main():
         res = import_m3u_as_crate(args.serato, args.import_m3u, args.crate_name)
     elif args.health:
         res = library_health(args.mp3, args.serato or None)
+    elif args.export_html_report:
+        res = generate_html_report(args.mp3, args.serato or None, args.out or None)
     elif args.smart_create:
         cfg = json.loads(args.smart_create)
         res = create_smart_crate(args.mp3, args.serato, cfg.get("nome", ""), cfg.get("regras", {}),

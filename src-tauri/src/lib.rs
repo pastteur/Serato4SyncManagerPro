@@ -1708,6 +1708,13 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn export_html_report(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
+        run_py_json(&app, "library_tools.py", &[
+            "--export-html-report".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
+        ])
+    }
+
+    #[tauri::command]
     pub async fn export_crate_m3u(app: AppHandle, serato_path: String, crate_file: String) -> Result<String, String> {
         run_py_json(&app, "library_tools.py", &[
             "--export-m3u".into(), crate_file, "--serato".into(), serato_path,
@@ -2903,6 +2910,7 @@ pub fn run() {
             commands::undo_journal,
             commands::check_crate_references,
             commands::library_health,
+            commands::export_html_report,
             commands::export_crate_m3u,
             commands::import_m3u_crate,
             commands::smart_crate_create,
