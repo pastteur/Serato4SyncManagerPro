@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { DuplicateItem } from '../types';
 import { ConfirmModal } from './ConfirmModal';
+import { PlayingTrackInfo } from './AudioPlayerBar';
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -17,6 +18,7 @@ interface DuplicatesAuditProps {
   onExportCsv?: () => void;
   onOpenFileInFinder?: (filePath: string) => void;
   onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
   mp3Path?: string;
   seratoPath?: string;
 }
@@ -28,6 +30,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   onExportCsv,
   onOpenFileInFinder,
   onMoveToTrash,
+  onPlayTrack,
   mp3Path,
   seratoPath
 }) => {
@@ -931,6 +934,20 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                         {/* Ações */}
                         <td className="py-2 px-3">
                           <div className="flex items-center justify-center space-x-1.5">
+                            {onPlayTrack && (
+                              <button
+                                type="button"
+                                onClick={() => onPlayTrack({
+                                  caminho: copyPath,
+                                  nome: item.nome
+                                })}
+                                className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white border border-serato-cardBorder transition cursor-pointer"
+                                title="Tocar cópia no Player nativo"
+                              >
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                              </button>
+                            )}
+
                             {onOpenFileInFinder && (
                               <button
                                 type="button"
@@ -993,3 +1010,4 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     </div>
   );
 };
+// git-hash-salt: 1

@@ -718,6 +718,7 @@ export const App: React.FC = () => {
                 onExportCsv={handleOpenLogsFolder}
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onMoveToTrash={handleMoveToTrash}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 
