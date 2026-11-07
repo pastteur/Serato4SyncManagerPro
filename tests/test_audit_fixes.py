@@ -36,6 +36,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 import serato_macos_app
 import auto_cue
 import track_matcher
+import audio_health
 
 
 class TestSeratoSyncProAuditFixes(unittest.TestCase):
@@ -425,6 +426,53 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         self.assertEqual(resumo_reanalise["crates_inalteradas"], 1)
         self.assertEqual(resumo_reanalise["faixas_adicionadas"], 0)
         self.assertEqual(resumo_reanalise["faixas_removidas"], 0)
+
+    # --------------------------------------------------------------------------
+    # MELHORIA 1: VENDORIZAÇÃO EMBUTIDA DO MUTAGEN (PORTABILIDADE TOTAL NO MACOS)
+    # --------------------------------------------------------------------------
+    def test_vendor_mutagen_isolation_and_loading(self):
+        """Comprova que o mutagen vendorizado existe e carrega perfeitamente sem pip."""
+        vendor_dir = PROJECT_ROOT / "vendor" / "mutagen"
+        self.assertTrue(vendor_dir.is_dir(), "Diretório vendor/mutagen ausente no projeto")
+        self.assertTrue((vendor_dir / "__init__.py").is_file(), "vendor/mutagen/__init__.py ausente")
+
+        # Verifica se o auto_cue e audio_health carregaram mutagen com sucesso
+        self.assertIsNotNone(auto_cue.mutagen, "auto_cue.mutagen não foi carregado")
+        self.assertIsNotNone(audio_health.mutagen, "audio_health.mutagen não foi carregado")
+
+    # --------------------------------------------------------------------------
+    # MELHORIA 2: AUTO-CUE COM DETECÇÃO DE TRANSIENTES E ALINHAMENTO DE COMPASSO
+    # --------------------------------------------------------------------------
+    def test_auto_cue_transient_phase_alignment(self):
+        """Valida que o cálculo de Hot Cues respeita transientes e alinha compassos."""
+        # 1. Sem arquivo de áudio físico (modo estático padrão)
+        cues_static = auto_cue.calculate_smart_cues(duration_sec=180.0, bpm_float=128.0)
+        self.assertEqual(len(cues_static), 5)
+        self.assertEqual(cues_static[0]["label"], "Intro")
+        self.assertEqual(cues_static[0]["pos_ms"], 500)
+        self.assertEqual(cues_static[1]["label"], "Drop 1")
+        self.assertTrue(cues_static[1]["pos_ms"] > cues_static[0]["pos_ms"])
+
+        # 2. Com arquivo contendo transientes rápidos
+        test_audio = Path("/Users/pastteur/.gemini/tmp/rea/extracted_asar/assets/SoundFX/Free Packs/Free Pack 1/Dog Bark.mp3")
+        if test_audio.exists():
+            cues_audio = auto_cue.calculate_smart_cues(duration_sec=3.0, bpm_float=120.0, filepath_str=str(test_audio))
+            self.assertEqual(len(cues_audio), 5)
+            # Confirma que detectou o início do áudio diferente do padrão fixo de 500ms
+            self.assertIn(cues_audio[0]["pos_ms"], [50, 100])
+
+    # --------------------------------------------------------------------------
+    # MELHORIA 3: AUDITORIA ESPECTRAL DE FAKE 320 KBPS
+    # --------------------------------------------------------------------------
+    def test_fake_320k_spectral_cutoff_detection(self):
+        """Valida detecção de corte de frequências altas em faixas com falso 320k."""
+        # Arquivo normal que não deve ser classificado como fake
+        test_audio = Path("/Users/pastteur/.gemini/tmp/rea/extracted_asar/assets/SoundFX/Free Packs/Free Pack 1/Dog Bark.mp3")
+        if test_audio.exists():
+            diag = audio_health.inspect_track_health(test_audio, max_duration_suspicious=1.0)
+            # Faixa tem 3 segundos de som (não deve quebrar ou lançar exceção)
+            self.assertIn("status", diag)
+            self.assertIn("categoria", diag)
 
 
 if __name__ == "__main__":

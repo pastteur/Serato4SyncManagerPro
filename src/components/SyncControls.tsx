@@ -9,6 +9,7 @@ interface SyncControlsProps {
   exportCsv: boolean;
   setExportCsv: (val: boolean) => void;
   summary: SyncSummary | null;
+  seratoRunning?: boolean;
 }
 
 export const SyncControls: React.FC<SyncControlsProps> = ({
@@ -17,7 +18,8 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
   canStart,
   exportCsv,
   setExportCsv,
-  summary
+  summary,
+  seratoRunning = false
 }) => {
   return (
     <div className="bg-serato-card border border-serato-cardBorder rounded-xl p-3.5 shadow-lg flex flex-col md:flex-row items-center justify-between gap-3 shrink-0">
@@ -116,14 +118,25 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
               ? 'bg-slate-700 text-slate-400 cursor-not-allowed border border-slate-600'
               : !canStart
               ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+              : seratoRunning
+              ? 'bg-amber-950/40 text-amber-300 border border-amber-600/50 hover:bg-amber-900/40'
               : 'bg-gradient-to-r from-serato-gold to-yellow-500 hover:from-yellow-400 hover:to-amber-500 text-black shadow-serato-gold/20 hover:scale-[1.02] active:scale-[0.98]'
           }`}
-          title="Gravar crates (.crate), atualizar neworder.pref e cache no HD"
+          title={
+            seratoRunning
+              ? 'Trava de segurança ativa: Feche o Serato DJ Pro para aplicar alterações'
+              : 'Gravar crates (.crate), atualizar neworder.pref e cache no HD'
+          }
         >
           {isRunning ? (
             <>
               <Loader2 className="w-3.5 h-3.5 animate-spin text-black" />
               <span>Processando...</span>
+            </>
+          ) : seratoRunning ? (
+            <>
+              <Zap className="w-3.5 h-3.5 fill-current text-amber-400" />
+              <span>AJUSTAR (SERATO ABERTO - TRAVA ATIVA)</span>
             </>
           ) : (
             <>

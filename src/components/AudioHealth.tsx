@@ -30,9 +30,10 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     truncada: number;
     curta: number;
     baixa_qualidade: number;
+    fake_320k: number;
     sample_rate: number;
     corrompida: number;
-  }>({ truncada: 0, curta: 0, baixa_qualidade: 0, sample_rate: 0, corrompida: 0 });
+  }>({ truncada: 0, curta: 0, baixa_qualidade: 0, fake_320k: 0, sample_rate: 0, corrompida: 0 });
 
   // Progresso do Coletor de Dados (Scanner)
   const [scanProgress, setScanProgress] = useState<{
@@ -1004,6 +1005,24 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
         <button
           type="button"
           onClick={() => {
+            setSelectedCategory('fake_320k');
+            loadHealthScan('fake_320k', maxDuration);
+          }}
+          className={`flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold transition cursor-pointer border ${
+            selectedCategory === 'fake_320k'
+              ? 'bg-purple-950 text-purple-200 border-purple-500 shadow'
+              : 'bg-serato-card text-purple-400/80 border-serato-cardBorder hover:text-purple-200'
+          }`}
+        >
+          <span>🎭 Fake 320k (Upsampled)</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-purple-950 font-mono text-purple-300">
+            {categoryCounts.fake_320k || 0}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
             setSelectedCategory('corrompida');
             loadHealthScan('corrompida', maxDuration);
           }}
@@ -1197,6 +1216,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       ? 'bg-amber-950/20 border-amber-900/50 hover:bg-amber-950/30'
                       : item.categoria === 'corrompida'
                       ? 'bg-red-950/20 border-red-900/50 hover:bg-red-950/30'
+                      : item.categoria === 'fake_320k'
+                      ? 'bg-purple-950/20 border-purple-900/50 hover:bg-purple-950/30'
                       : 'bg-indigo-950/20 border-indigo-900/50 hover:bg-indigo-950/30'
                   } ${isSelected ? 'ring-1 ring-serato-cyan' : ''}`}
                 >
@@ -1217,6 +1238,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                           ? 'bg-amber-950 text-amber-300 border border-amber-800'
                           : item.categoria === 'corrompida'
                           ? 'bg-red-950 text-red-300 border border-red-800'
+                          : item.categoria === 'fake_320k'
+                          ? 'bg-purple-950 text-purple-300 border border-purple-800 font-black'
                           : 'bg-indigo-950 text-indigo-300 border border-indigo-800'
                       }`}
                     >
@@ -1226,6 +1249,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                         ? '✂️ MUITO CURTA'
                         : item.categoria === 'corrompida'
                         ? '❌ CORROMPIDA'
+                        : item.categoria === 'fake_320k'
+                        ? '🎭 FAKE 320 KBPS'
                         : '📉 BAIXA QUALIDADE'}
                     </span>
 

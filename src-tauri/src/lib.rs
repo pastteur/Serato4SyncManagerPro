@@ -147,6 +147,15 @@ fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
     find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name))
 }
 
+pub fn is_serato_running() -> bool {
+    Command::new("pgrep")
+        .arg("-x")
+        .arg("Serato DJ Pro")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 extern "C" {
     fn mach_port_deallocate(task: libc::mach_port_t, name: libc::mach_port_t) -> libc::c_int;
 }
@@ -293,12 +302,7 @@ mod commands {
         }
 
         // 4. Serato DJ Pro Running
-        let serato_running = Command::new("pgrep")
-            .arg("-x")
-            .arg("Serato DJ Pro")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let serato_running = is_serato_running();
 
         SystemTelemetry {
             cpu_percent: (cpu_pct * 10.0).round() / 10.0,
@@ -629,6 +633,12 @@ mod commands {
             return Err("Diretório da biblioteca Serato inválido ou não encontrado no disco.".into());
         }
 
+        if !dry_run && is_serato_running() {
+            let err_msg = "❌ BLOQUEIO DE SEGURANÇA: O Serato DJ Pro está em execução ativa. Feche o aplicativo Serato DJ Pro antes de gravar ou ajustar a biblioteca. Enquanto o Serato estiver aberto, seu cache na memória RAM reverterá e sobrescreverá qualquer alteração física ao ser encerrado. O Modo Análise (Sem Alterar) permanece disponível.".to_string();
+            let _ = window.emit("sync-log", &err_msg);
+            return Err(err_msg);
+        }
+
         let script_path = find_canonical_python_script(Some(&app), "serato_macos_app.py")?;
         let python_bin = find_python_binary()?;
         let window_clone = window.clone();
@@ -868,6 +878,9 @@ mod commands {
         rename_files: Option<bool>,
         search: Option<String>,
     ) -> Result<(), String> {
+        if is_serato_running() {
+            return Err("Bloqueio de segurança: O Serato DJ Pro está aberto. Feche o Serato antes de aplicar tags nos arquivos para evitar perda de dados por conflito de gravação.".into());
+        }
         let script = find_python_script(Some(&app), "tag_doctor.py");
         let window_clone = window.clone();
 
@@ -966,6 +979,9 @@ mod commands {
         items_json: String,
         rename_files: Option<bool>,
     ) -> Result<(), String> {
+        if is_serato_running() {
+            return Err("Bloqueio de segurança: O Serato DJ Pro está aberto. Feche o Serato antes de aplicar tags nos arquivos para evitar perda de dados por conflito de gravação.".into());
+        }
         let script = find_python_script(Some(&app), "tag_doctor.py");
         let window_clone = window.clone();
 
@@ -1902,6 +1918,9 @@ mod commands {
 
     #[tauri::command]
     pub async fn apply_auto_cues(app: AppHandle, filepath: String) -> Result<String, String> {
+        if is_serato_running() {
+            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de gravar Hot Cues nos arquivos.".into());
+        }
         let script = find_python_script(Some(&app), "auto_cue.py");
         let mut cmd = Command::new("/usr/bin/python3");
         cmd.arg(&script);
@@ -2018,6 +2037,9 @@ mod commands {
         only_pending: Option<bool>,
         overwrite_existing: Option<bool>,
     ) -> Result<(), String> {
+        if is_serato_running() {
+            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de aplicar Hot Cues na crate.".into());
+        }
         let script = find_python_script(Some(&app), "auto_cue.py");
         let window_clone = window.clone();
 
@@ -2157,6 +2179,9 @@ mod commands {
 
     #[tauri::command]
     pub async fn apply_batch_auto_cues(app: AppHandle, filepaths_json: String) -> Result<String, String> {
+        if is_serato_running() {
+            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de aplicar lote de Hot Cues nos arquivos.".into());
+        }
         let script = find_python_script(Some(&app), "auto_cue.py");
         let mut cmd = Command::new("/usr/bin/python3");
         cmd.arg(&script);

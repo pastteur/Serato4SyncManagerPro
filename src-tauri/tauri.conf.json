@@ -45,7 +45,8 @@
       "../auto_cue.py": "auto_cue.py",
       "../audio_health.py": "audio_health.py",
       "../track_matcher.py": "track_matcher.py",
-      "../run_local_agent.py": "run_local_agent.py"
+      "../run_local_agent.py": "run_local_agent.py",
+      "../vendor": "vendor"
     },
     "icon": [
       "icons/32x32.png",

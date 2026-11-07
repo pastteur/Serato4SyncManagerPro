@@ -131,20 +131,20 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, onOpenGuide }) => {
           </div>
         </div>
 
-        {/* Card 3: Serato DJ Pro Live Status */}
+        {/* Card 3: Serato DJ Pro Live Status & Safety Lock */}
         <div 
           className={`border px-3 py-1.5 rounded-lg flex items-center gap-2 shadow-inner transition ${
             telemetry.serato_running 
-              ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-300' 
+              ? 'bg-amber-950/40 border-amber-500/50 text-amber-300' 
               : 'bg-slate-900/60 border-slate-800 text-slate-400'
           }`}
-          title={telemetry.serato_running ? 'Serato DJ Pro está em execução ativa' : 'Serato DJ Pro não está aberto'}
+          title={telemetry.serato_running ? 'Serato DJ Pro está em execução ativa. Gravação bloqueada por segurança até fechar o Serato.' : 'Serato DJ Pro fechado. Gravação física liberada com segurança.'}
         >
-          <Radio className={`w-3.5 h-3.5 shrink-0 ${telemetry.serato_running ? 'text-emerald-400 animate-pulse' : 'text-slate-500'}`} />
+          <Radio className={`w-3.5 h-3.5 shrink-0 ${telemetry.serato_running ? 'text-amber-400 animate-pulse' : 'text-slate-500'}`} />
           <span className="text-[10px] font-sans font-bold">Serato:</span>
           <span className="flex items-center gap-1 font-bold">
-            <span className={`w-1.5 h-1.5 rounded-full ${telemetry.serato_running ? 'bg-emerald-400 shadow-sm shadow-emerald-400' : 'bg-slate-500'}`} />
-            <span>{telemetry.serato_running ? 'Online' : 'Fechado'}</span>
+            <span className={`w-1.5 h-1.5 rounded-full ${telemetry.serato_running ? 'bg-amber-400 shadow-sm shadow-amber-400' : 'bg-emerald-400'}`} />
+            <span>{telemetry.serato_running ? 'Aberto (Trava Ativa)' : 'Fechado (Pronto)'}</span>
           </span>
         </div>
 

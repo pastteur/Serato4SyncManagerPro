@@ -23,6 +23,11 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+# Vendor fallback: permite carregar dependências empacotadas sem exigir pip local
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
+
 try:
     import mutagen
 except ImportError:

@@ -37,6 +37,25 @@ export const App: React.FC = () => {
   const [summary, setSummary] = useState<SyncSummary | null>(null);
   const [activeTab, setActiveTab] = useState<'logs' | 'duplicates' | 'tree' | 'tagDoctor' | 'soundSeal' | 'matcher' | 'health' | 'autoCue' | 'backups'>('logs');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
+  const [seratoRunning, setSeratoRunning] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isTauri) return;
+    const checkSerato = async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const tele = await invoke<any>('get_system_telemetry');
+        if (tele) {
+          setSeratoRunning(Boolean(tele.serato_running));
+        }
+      } catch (e) {
+        // Silencioso em caso de polling
+      }
+    };
+    checkSerato();
+    const interval = setInterval(checkSerato, 2500);
+    return () => clearInterval(interval);
+  }, [isTauri]);
 
   useEffect(() => {
     if (mp3Path && mp3Path.trim()) {
@@ -231,6 +250,25 @@ export const App: React.FC = () => {
       return;
     }
 
+    if (!dryRun && isTauri) {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const tele = await invoke<any>('get_system_telemetry');
+        if (tele && tele.serato_running) {
+          alert(
+            "⚠️ BLOQUEIO DE SEGURANÇA ATIVO!\n\n" +
+            "O Serato DJ Pro está em execução ativa no momento.\n\n" +
+            "Feche o Serato DJ Pro antes de aplicar alterações ('Ajustar').\n" +
+            "Enquanto o Serato estiver aberto, seu cache na memória RAM sobrescreverá e reverterá qualquer alteração física nas crates e tags quando você o fechar.\n\n" +
+            "Dica: O 'Modo Análise (Sem Alterar)' pode ser executado normalmente a qualquer momento com o Serato aberto."
+          );
+          return;
+        }
+      } catch (err) {
+        // Fallback para trava nativa do Tauri backend
+      }
+    }
+
     setIsRunning(true);
     setLogs([]);
     setActiveTab('logs');
@@ -397,6 +435,7 @@ export const App: React.FC = () => {
               exportCsv={exportCsv}
               setExportCsv={setExportCsv}
               summary={summary}
+              seratoRunning={seratoRunning}
             />
           </div>
         )}

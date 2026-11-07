@@ -29,6 +29,11 @@ if hasattr(sys.stdout, 'reconfigure'):
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(line_buffering=True)
 
+# Vendor fallback: permite carregar dependências empacotadas sem exigir pip local
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
+
 try:
     import mutagen
     from mutagen.mp3 import MP3
@@ -44,6 +49,83 @@ YT_DLP_CANDIDATES = [
 ]
 FFMPEG_DIR = "/opt/homebrew/bin:/usr/local/bin:/usr/bin"
 QUARANTINE_DIR = Path.home() / ".serato_quarentena_audio"
+FFMPEG_CANDIDATES = [
+    "/opt/homebrew/bin/ffmpeg",
+    "/usr/local/bin/ffmpeg",
+    shutil.which("ffmpeg") or ""
+]
+
+
+def get_ffmpeg_bin():
+    for p in FFMPEG_CANDIDATES:
+        if p and os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def detect_fake_320k_cutoff(filepath: Path, duration: float, bitrate: int) -> tuple:
+    """
+    Realiza auditoria espectral rápida de altas frequências via ffmpeg para detectar falso 320 kbps.
+    Faixas 128 kbps possuem um filtro brickwall lowpass estrito cortando frequências em torno de 16 kHz.
+    Faixas genuínas 320 kbps ou lossless mantêm energia expressiva entre 17.5 kHz e 22 kHz.
+    """
+    ffmpeg_bin = get_ffmpeg_bin()
+    if not ffmpeg_bin or duration < 12.0 or bitrate < 240000:
+        return False, ""
+
+    try:
+        start_sec = max(4.0, duration * 0.35)
+        if start_sec + 4.0 > duration:
+            start_sec = max(0.0, duration - 5.0)
+
+        cmd = [
+            ffmpeg_bin,
+            "-v", "error",
+            "-ss", str(round(start_sec, 2)),
+            "-t", "4",
+            "-i", str(filepath),
+            "-filter_complex",
+            "[0:a]asplit=2[a1][a2];"
+            "[a1]bandpass=f=12000:width_type=h:w=4000,volumedetect[out1];"
+            "[a2]highpass=f=17500,highpass=f=17500,volumedetect[out2]",
+            "-map", "[out1]", "-f", "null", "-",
+            "-map", "[out2]", "-f", "null", "-"
+        ]
+
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5, text=True)
+        output = proc.stderr
+
+        out1_max = None
+        out2_max = None
+        out2_mean = None
+
+        for line in output.splitlines():
+            line_s = line.strip()
+            if "max_volume:" in line_s:
+                try:
+                    val = float(line_s.split("max_volume:")[1].split("dB")[0].strip())
+                    if out1_max is None:
+                        out1_max = val
+                    else:
+                        out2_max = val
+                except Exception:
+                    pass
+            elif "mean_volume:" in line_s:
+                try:
+                    val = float(line_s.split("mean_volume:")[1].split("dB")[0].strip())
+                    out2_mean = val
+                except Exception:
+                    pass
+
+        if out1_max is not None and out2_max is not None:
+            if out1_max > -38.0 and (out2_max < -53.0 or (out2_mean is not None and out2_mean < -82.0)):
+                reason = f"Nível de agudos acima de 17.5kHz é de apenas {out2_max} dB (mid-highs: {out1_max} dB)."
+                return True, reason
+
+    except Exception:
+        pass
+
+    return False, ""
 
 
 def get_yt_dlp_bin():
@@ -169,6 +251,21 @@ def inspect_track_health(filepath: Path, max_duration_suspicious: float = 60.0):
             "sample_rate": sample_rate
         }
 
+    # 4. Detecção espectral de Fake 320 kbps (Upsampled de 128k com corte em ~16 kHz)
+    if bitrate >= 240000 and duration >= 12.0:
+        is_fake, fake_reason = detect_fake_320k_cutoff(filepath, duration, bitrate)
+        if is_fake:
+            return {
+                "status": "atencao",
+                "categoria": "fake_320k",
+                "tipo_problema": "upsampled_fake_320k",
+                "severidade": "alta",
+                "detalhes": f"Falso 320 kbps detectado (Corte espectral em ~16 kHz). O cabeçalho declara {round(bitrate / 1000)} kbps, mas o áudio foi reencodado a partir de fonte comprimida. {fake_reason}",
+                "duracao": round(duration, 1),
+                "bitrate": round(bitrate / 1000),
+                "sample_rate": sample_rate
+            }
+
     # 4. Saudável (44.1k, 48k, 88.2k, 96k rodam perfeitamente nos softwares modernos de DJ)
     return {
         "status": "saudavel",
@@ -214,7 +311,7 @@ def scan_audio_health(
             "sucesso": True,
             "total_analisadas": 0,
             "total_problemas": 0,
-            "categorias_contagem": {"truncada": 0, "curta": 0, "baixa_qualidade": 0, "corrompida": 0},
+            "categorias_contagem": {"truncada": 0, "curta": 0, "baixa_qualidade": 0, "fake_320k": 0, "corrompida": 0},
             "items": []
         }
         if stream_progress:
@@ -239,6 +336,7 @@ def scan_audio_health(
         "truncada": 0,
         "curta": 0,
         "baixa_qualidade": 0,
+        "fake_320k": 0,
         "corrompida": 0
     }
 

@@ -18,6 +18,8 @@ import json
 import base64
 import struct
 import sqlite3
+import shutil
+import subprocess
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -27,6 +29,11 @@ if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(line_buffering=True)
+
+# Vendor fallback: permite carregar dependências empacotadas sem exigir pip local
+_VENDOR_DIR = Path(__file__).resolve().parent / "vendor"
+if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
+    sys.path.insert(0, str(_VENDOR_DIR))
 
 try:
     import mutagen
@@ -231,9 +238,73 @@ def extract_cues_from_raw_tag(raw_data: bytes) -> list:
     return cues
 
 
-def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0):
+def get_ffmpeg_bin():
+    candidates = [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        shutil.which("ffmpeg") or ""
+    ]
+    for p in candidates:
+        if p and os.path.exists(p) and os.access(p, os.X_OK):
+            return p
+    return None
+
+
+def detect_audio_transients(filepath_str: str, duration_sec: float) -> dict:
     """
-    Calcula os 5 pontos de Hot Cue ideais com base na métrica musical de DJs.
+    Analisa os transientes de áudio via ffmpeg para identificar o início exato
+    do primeiro beat audível e o alinhamento de fase de compassos.
+    """
+    ffmpeg_bin = get_ffmpeg_bin()
+    if not ffmpeg_bin or not filepath_str or duration_sec < 1.0:
+        return {"first_beat_ms": 500, "has_transient": False}
+
+    try:
+        # Detecta silêncio inicial nos primeiros 15 segundos
+        cmd = [
+            ffmpeg_bin,
+            "-v", "error",
+            "-ss", "0",
+            "-t", "15",
+            "-i", str(filepath_str),
+            "-af", "silencedetect=noise=-35dB:d=0.06",
+            "-f", "null", "-"
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4, text=True)
+        lines = proc.stderr.splitlines()
+
+        first_silence_end = None
+        has_initial_silence = False
+
+        for line in lines:
+            if "silence_start: 0" in line or "silence_start: 0.0" in line:
+                has_initial_silence = True
+            if "silence_end:" in line:
+                parts = line.split("silence_end:")
+                if len(parts) > 1:
+                    val_str = parts[1].split("|")[0].strip()
+                    try:
+                        val = float(val_str)
+                        if first_silence_end is None:
+                            first_silence_end = val
+                    except Exception:
+                        pass
+
+        if has_initial_silence and first_silence_end is not None:
+            beat_ms = max(50, int(first_silence_end * 1000))
+            return {"first_beat_ms": beat_ms, "has_transient": True}
+        elif not has_initial_silence:
+            return {"first_beat_ms": 100, "has_transient": True}
+
+    except Exception:
+        pass
+
+    return {"first_beat_ms": 500, "has_transient": False}
+
+
+def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0, filepath_str: str = ""):
+    """
+    Calcula os 5 pontos de Hot Cue ideais com base na métrica musical de DJs e detecção de transientes.
     """
     duration_ms = duration_sec * 1000
 
@@ -243,23 +314,33 @@ def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0):
     else:
         bar_ms = 2000.0 # ~120 BPM padrão
 
-    # 1. Intro: Primeiro beat (500 ms)
-    pos_cue1 = 500
+    first_beat_ms = 500
+    if filepath_str and os.path.exists(filepath_str):
+        trans = detect_audio_transients(filepath_str, duration_sec)
+        first_beat_ms = trans.get("first_beat_ms", 500)
 
-    # 2. Drop 1: 16 ou 32 compassos (cerca de 30s a 45s)
-    drop1_target = bar_ms * 16
-    if drop1_target < 20000:
-        drop1_target = bar_ms * 32
-    pos_cue2 = min(drop1_target, duration_ms * 0.25)
+    # 1. Intro: Primeiro beat real
+    pos_cue1 = int(first_beat_ms)
 
-    # 3. Breakdown (Ponte): Meio da música - 8 compassos
-    pos_cue3 = max(pos_cue2 + 15000, (duration_ms / 2.0) - (bar_ms * 4))
+    # 2. Drop 1: 16 ou 32 compassos alinhados ao primeiro beat
+    bars_for_drop1 = 16 if (bar_ms * 16) >= 20000 else 32
+    target_drop1 = first_beat_ms + (bar_ms * bars_for_drop1)
+    if target_drop1 > duration_ms * 0.35:
+        target_drop1 = first_beat_ms + (bar_ms * 16)
+    pos_cue2 = int(min(target_drop1, duration_ms * 0.30))
+
+    # 3. Breakdown (Ponte): Alinhado a compasso próximo da metade
+    half_time = duration_ms / 2.0
+    bars_to_half = max(1, round((half_time - first_beat_ms) / bar_ms))
+    pos_cue3 = int(max(pos_cue2 + 15000, first_beat_ms + ((bars_to_half - 4) * bar_ms)))
 
     # 4. Drop 2 (Clímax): Meio da música + 8 compassos
-    pos_cue4 = min(duration_ms * 0.75, (duration_ms / 2.0) + (bar_ms * 8))
+    pos_cue4 = int(min(duration_ms * 0.75, first_beat_ms + ((bars_to_half + 8) * bar_ms)))
 
-    # 5. Outro (Mix-out): 16 ou 32 compassos antes do fim
-    pos_cue5 = max(pos_cue4 + 10000, duration_ms - (bar_ms * 16))
+    # 5. Outro (Mix-out): 16 compassos antes do fim alinhado ao grid
+    bars_total = max(1, int((duration_ms - first_beat_ms) / bar_ms))
+    bars_outro = max(1, bars_total - 16)
+    pos_cue5 = int(max(pos_cue4 + 10000, first_beat_ms + (bars_outro * bar_ms)))
 
     cues = [
         {"index": 0, "label": "Intro", "pos_ms": int(pos_cue1), "color": "red", "color_hex": "#cc0000"},
@@ -300,7 +381,7 @@ def repair_track_cues(filepath_str: str) -> dict:
             if 'TBPM' in audio:
                 try: bpm_val = float(str(audio['TBPM']).split('.')[0])
                 except Exception: pass
-            existing_cues = calculate_smart_cues(duration, bpm_val)
+            existing_cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
 
         # Salva backup de segurança
         backup_track_cues(str(file_p), audio)
@@ -380,7 +461,7 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
             except Exception:
                 pass
 
-        cues = calculate_smart_cues(duration, bpm_val)
+        cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
 
         # Salva backup de segurança antes de alterar
         backup_track_cues(str(file_p), audio)
@@ -839,7 +920,7 @@ def main():
             bpm = 0.0
             if audio and 'TBPM' in audio:
                 bpm = float(str(audio['TBPM']).split('.')[0])
-            cues = calculate_smart_cues(dur, bpm)
+            cues = calculate_smart_cues(dur, bpm, filepath_str=str(file_p))
             print(json.dumps({"sucesso": True, "duracao": dur, "bpm": bpm, "cues": cues}, ensure_ascii=False))
             sys.exit(0)
         except Exception as e:
