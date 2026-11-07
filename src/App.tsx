@@ -443,6 +443,25 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleExportReport = async () => {
+    if (!summary) return;
+    try {
+      const dataStr = JSON.stringify(summary, null, 2);
+      const blob = new Blob([dataStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `serato_diagnostico_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      addLog('📄 Relatório de auditoria exportado com sucesso (JSON).');
+    } catch (e) {
+      addLog(`⚠️ Falha ao exportar relatório: ${e}`);
+    }
+  };
+
   const handleOpenLogsFolder = async () => {
     if (isTauri) {
       try {
@@ -589,6 +608,7 @@ export const App: React.FC = () => {
               setExportCsv={setExportCsv}
               summary={summary}
               seratoRunning={seratoRunning}
+              onExportReport={handleExportReport}
             />
           </div>
         )}

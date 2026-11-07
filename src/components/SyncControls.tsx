@@ -1,5 +1,5 @@
 import React from 'react';
-import { Zap, Loader2, Music, CheckCircle2, Copy, Shield, FileSpreadsheet, Search } from 'lucide-react';
+import { Zap, Loader2, Music, CheckCircle2, Copy, Shield, FileSpreadsheet, Search, Download } from 'lucide-react';
 import { SyncSummary } from '../types';
 
 interface SyncControlsProps {
@@ -10,6 +10,7 @@ interface SyncControlsProps {
   setExportCsv: (val: boolean) => void;
   summary: SyncSummary | null;
   seratoRunning?: boolean;
+  onExportReport?: () => void;
 }
 
 export const SyncControls: React.FC<SyncControlsProps> = ({
@@ -19,7 +20,8 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
   exportCsv,
   setExportCsv,
   summary,
-  seratoRunning = false
+  seratoRunning = false,
+  onExportReport
 }) => {
   return (
     <div className="bg-serato-card border border-serato-cardBorder rounded-xl p-3.5 shadow-lg flex flex-col md:flex-row items-center justify-between gap-3 shrink-0">
@@ -89,6 +91,19 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
           <FileSpreadsheet className="w-3.5 h-3.5 text-serato-gold" />
           <span>Salvar CSV</span>
         </label>
+
+        {summary && onExportReport && (
+          <button
+            type="button"
+            onClick={onExportReport}
+            disabled={isRunning}
+            className="px-2.5 py-1.5 rounded-lg font-medium text-xs tracking-wide transition-all shadow border flex items-center justify-center gap-1.5 cursor-pointer bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700 hover:border-slate-600"
+            title="Exportar dados consolidados de diagnóstico e crates em JSON"
+          >
+            <Download className="w-3.5 h-3.5 text-serato-cyan" />
+            <span>Exportar Diagnóstico</span>
+          </button>
+        )}
 
         {/* Button 1: Somente Análise (Dry Run - Sem Alterações) */}
         <button
