@@ -24,6 +24,8 @@ Nada é alterado no disco por este módulo, exceto as ações explícitas
 
 import os
 import sys
+
+sys.dont_write_bytecode = True
 import csv
 import json
 import shutil

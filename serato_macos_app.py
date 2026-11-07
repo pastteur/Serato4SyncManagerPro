@@ -13,6 +13,8 @@ anti-falso-positivo, caminhos relativos puros e conformidade total com o Serato 
 
 import sys
 import os
+
+sys.dont_write_bytecode = True
 import struct
 import shutil
 import unicodedata

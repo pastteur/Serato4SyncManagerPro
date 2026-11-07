@@ -11,6 +11,8 @@ raiz da biblioteca são rejeitados: gerariam referência quebrada no Serato.
 
 import os
 import sys
+
+sys.dont_write_bytecode = True
 import json
 import struct
 import argparse
