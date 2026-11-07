@@ -128,7 +128,7 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
           ) : (
             <>
               <Zap className="w-3.5 h-3.5 fill-current text-black" />
-              <span>INICIAR SINCRONIZAÇÃO</span>
+              <span>AJUSTAR (APLICAR ALTERAÇÕES)</span>
             </>
           )}
         </button>

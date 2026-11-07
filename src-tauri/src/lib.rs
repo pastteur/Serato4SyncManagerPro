@@ -34,20 +34,82 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
-    let mut possible = Vec::new();
+fn find_python_binary() -> Result<PathBuf, String> {
+    // 1. Variável de ambiente explícita
+    if let Ok(py_env) = std::env::var("SERATO_PYTHON").or_else(|_| std::env::var("PYTHON_PATH")) {
+        let p = PathBuf::from(&py_env);
+        if p.exists() && p.is_file() {
+            return Ok(p);
+        }
+    }
 
-    // 1. Bundle Resources inside .app (Contents/Resources/...)
+    // 2. Ambiente virtual ativo (VIRTUAL_ENV)
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let venv_py = PathBuf::from(venv).join("bin").join("python3");
+        if venv_py.exists() && venv_py.is_file() {
+            return Ok(venv_py);
+        }
+    }
+
+    // 3. Python empacotado no bundle .app se existir
     if let Ok(exe) = std::env::current_exe() {
         if let Some(macos_dir) = exe.parent() {
             if let Some(contents_dir) = macos_dir.parent() {
-                possible.push(contents_dir.join("Resources").join(script_name));
-                possible.push(contents_dir.join("Resources").join("_up_").join(script_name));
+                let bundled_py = contents_dir.join("Resources").join("python").join("bin").join("python3");
+                if bundled_py.exists() && bundled_py.is_file() {
+                    return Ok(bundled_py);
+                }
             }
         }
     }
 
-    // 2. Tauri App resource directory
+    // 4. Locais padrão no macOS
+    let candidates = [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ];
+
+    for candidate in &candidates {
+        let p = PathBuf::from(candidate);
+        if p.exists() && p.is_file() {
+            return Ok(p);
+        }
+    }
+
+    // 5. Fallback via PATH
+    if let Ok(output) = Command::new("which").arg("python3").output() {
+        if output.status.success() {
+            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                let p = PathBuf::from(path_str);
+                if p.exists() && p.is_file() {
+                    return Ok(p);
+                }
+            }
+        }
+    }
+
+    Err("Nenhum interpretador Python 3 funcional foi localizado no sistema (verificado Homebrew, /usr/local/bin, /usr/bin).".into())
+}
+
+fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> Result<PathBuf, String> {
+    let mut possible = Vec::new();
+
+    // 1. Recursos oficiais empacotados dentro do bundle macOS (.app/Contents/Resources/...)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents_dir) = macos_dir.parent() {
+                let res = contents_dir.join("Resources");
+                if res.is_dir() {
+                    possible.push(res.join(script_name));
+                    possible.push(res.join("_up_").join(script_name));
+                }
+            }
+        }
+    }
+
+    // 2. Diretório canônico de recursos da API Tauri
     if let Some(handle) = app {
         if let Ok(res_dir) = handle.path().resource_dir() {
             possible.push(res_dir.join(script_name));
@@ -55,19 +117,34 @@ fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
         }
     }
 
-    // 3. User Directories
-    if let Some(home) = dirs_home() {
-        possible.push(home.join("SeratoSync").join(script_name));
-        possible.push(home.join("pasync").join(script_name));
+    // Em modo de desenvolvimento local exclusivo (cargo run / tauri dev), permite resolução da raiz do workspace
+    #[cfg(debug_assertions)]
+    {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if let Some(parent) = manifest_dir.parent() {
+            possible.push(parent.join(script_name));
+        }
+        possible.push(PathBuf::from(script_name));
     }
 
-    // 4. Current working directory
-    possible.push(PathBuf::from(script_name));
+    // NOTA DE SEGURANÇA DA AUDITORIA:
+    // Foram removidas buscas em ~/SeratoSync, ~/pasync e diretório de trabalho arbitrário.
+    // O aplicativo em produção executa estritamente os scripts distribuídos em seu pacote.
 
-    possible
-        .into_iter()
-        .find(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from(script_name))
+    for p in possible {
+        if p.exists() && p.is_file() {
+            return Ok(p);
+        }
+    }
+
+    Err(format!(
+        "Script Python canônico '{}' não foi encontrado nos recursos empacotados do aplicativo.",
+        script_name
+    ))
+}
+
+fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
+    find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name))
 }
 
 extern "C" {
@@ -238,7 +315,7 @@ mod commands {
 
     #[tauri::command]
     pub fn get_detected_paths() -> DetectedPaths {
-        // 1. Check external volumes (/Volumes/*)
+        // Prioridade 1: Volume externo que possua TANTO pasta de músicas quanto pasta Serato na mesma unidade
         if let Ok(entries) = std::fs::read_dir("/Volumes") {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -250,43 +327,111 @@ mod commands {
                         let mp3_path = path.join("Music").join("MP3");
                         let music_path = path.join("Music");
 
-                        let final_serato = if serato_path.exists() {
-                            serato_path
-                        } else if serato_legada.exists() {
-                            serato_legada
+                        let opt_serato = if serato_path.exists() && serato_path.is_dir() {
+                            Some(serato_path)
+                        } else if serato_legada.exists() && serato_legada.is_dir() {
+                            Some(serato_legada)
                         } else {
-                            serato_path
+                            None
                         };
 
-                        let final_mp3 = if mp3_path.exists() {
-                            mp3_path
+                        let opt_mp3 = if mp3_path.exists() && mp3_path.is_dir() {
+                            Some(mp3_path)
+                        } else if music_path.exists() && music_path.is_dir() {
+                            Some(music_path)
                         } else {
-                            music_path
+                            None
                         };
 
-                        return DetectedPaths {
-                            mp3: final_mp3.to_string_lossy().to_string(),
-                            serato: final_serato.to_string_lossy().to_string(),
-                        };
+                        if let (Some(s), Some(m)) = (opt_serato, opt_mp3) {
+                            return DetectedPaths {
+                                mp3: m.to_string_lossy().to_string(),
+                                serato: s.to_string_lossy().to_string(),
+                            };
+                        }
                     }
                 }
             }
         }
 
-        // 2. Fallback to internal storage (Notebook)
+        // Prioridade 2: Armazenamento interno (Macintosh HD / Notebook) na mesma unidade
         if let Some(home) = dirs_home() {
-            let internal_mp3 = home.join("Music").join("MP3");
-            let internal_serato = home.join("Library").join("Application Support").join("Serato");
-            return DetectedPaths {
-                mp3: internal_mp3.to_string_lossy().to_string(),
-                serato: internal_serato.to_string_lossy().to_string(),
+            let internal_mp3_sub = home.join("Music").join("MP3");
+            let internal_mp3 = home.join("Music");
+            let internal_serato_appsup = home.join("Library").join("Application Support").join("Serato");
+            let internal_serato_music = home.join("Music").join("_Serato_");
+
+            let opt_serato = if internal_serato_appsup.exists() && internal_serato_appsup.is_dir() {
+                Some(internal_serato_appsup)
+            } else if internal_serato_music.exists() && internal_serato_music.is_dir() {
+                Some(internal_serato_music)
+            } else {
+                None
             };
+
+            let opt_mp3 = if internal_mp3_sub.exists() && internal_mp3_sub.is_dir() {
+                Some(internal_mp3_sub)
+            } else if internal_mp3.exists() && internal_mp3.is_dir() {
+                Some(internal_mp3)
+            } else {
+                None
+            };
+
+            if let (Some(s), Some(m)) = (&opt_serato, &opt_mp3) {
+                return DetectedPaths {
+                    mp3: m.to_string_lossy().to_string(),
+                    serato: s.to_string_lossy().to_string(),
+                };
+            }
+        }
+
+        // Se nenhum volume tiver ambos, procura individualmente mas NUNCA inventa caminhos inexistentes
+        let mut final_mp3 = String::new();
+        let mut final_serato = String::new();
+
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.starts_with('.') && !name.starts_with("Macintosh") {
+                        if final_mp3.is_empty() {
+                            let mp3_path = path.join("Music").join("MP3");
+                            let music_path = path.join("Music");
+                            if mp3_path.exists() && mp3_path.is_dir() {
+                                final_mp3 = mp3_path.to_string_lossy().to_string();
+                            } else if music_path.exists() && music_path.is_dir() {
+                                final_mp3 = music_path.to_string_lossy().to_string();
+                            }
+                        }
+                        if final_serato.is_empty() {
+                            let serato_path = path.join("Serato");
+                            let serato_legada = path.join("_Serato_");
+                            if serato_path.exists() && serato_path.is_dir() {
+                                final_serato = serato_path.to_string_lossy().to_string();
+                            } else if serato_legada.exists() && serato_legada.is_dir() {
+                                final_serato = serato_legada.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         DetectedPaths {
-            mp3: String::new(),
-            serato: String::new(),
+            mp3: final_mp3,
+            serato: final_serato,
         }
+    }
+
+    #[tauri::command]
+    pub fn validate_path(path: String) -> bool {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let p = PathBuf::from(trimmed);
+        p.exists() && p.is_dir()
     }
 
     #[tauri::command]
@@ -474,16 +619,27 @@ mod commands {
         export_csv: bool,
         dry_run: bool,
     ) -> Result<(), String> {
+        let mp3_clean = mp3_path.trim().to_string();
+        let serato_clean = serato_path.trim().to_string();
+
+        if mp3_clean.is_empty() || !PathBuf::from(&mp3_clean).is_dir() {
+            return Err("Diretório de músicas MP3 inválido ou não encontrado no disco.".into());
+        }
+        if serato_clean.is_empty() || !PathBuf::from(&serato_clean).is_dir() {
+            return Err("Diretório da biblioteca Serato inválido ou não encontrado no disco.".into());
+        }
+
+        let script_path = find_canonical_python_script(Some(&app), "serato_macos_app.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
-        let script_path = find_python_script(Some(&app), "serato_macos_app.py");
 
         std::thread::spawn(move || {
             let _ = window_clone.emit("sync-log", format!("🐍 Motor Python: {}", script_path.display()));
 
-            let mut cmd = Command::new("/usr/bin/python3");
+            let mut cmd = Command::new(&python_bin);
             cmd.arg(&script_path);
-            cmd.arg(&mp3_path);
-            cmd.arg(&serato_path);
+            cmd.arg(&mp3_clean);
+            cmd.arg(&serato_clean);
             cmd.arg("--json-summary");
 
             if !export_csv {
@@ -500,53 +656,83 @@ mod commands {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    let _ = window_clone.emit("sync-log", format!("❌ Erro ao disparar Python: {}", e));
+                    let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
+                    let _ = window_clone.emit("sync-log", &err_msg);
                     let _ = window_clone.emit(
                         "sync-finished",
                         SyncFinishedPayload {
                             success: false,
                             exit_code: Some(1),
-                            message: e.to_string(),
+                            message: err_msg,
                         },
                     );
                     return;
                 }
             };
 
-            // Stream stdout in real time
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        let _ = window_clone.emit("sync-log", line);
+            // Leitura concorrente de stdout e stderr para eliminação total de deadlocks
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+
+            let win_stdout = window_clone.clone();
+            let stdout_thread = std::thread::spawn(move || {
+                let mut captured_summary = None;
+                if let Some(out) = stdout {
+                    let reader = BufReader::new(out);
+                    for line_res in reader.lines() {
+                        if let Ok(line) = line_res {
+                            if line.starts_with("__PAYLOAD_JSON_SUMMARY__") {
+                                captured_summary = Some(line.clone());
+                            }
+                            let _ = win_stdout.emit("sync-log", line);
+                        }
                     }
                 }
-            }
+                captured_summary
+            });
 
-            // Stream stderr in real time
-            if let Some(stderr) = child.stderr.take() {
-                let reader = BufReader::new(stderr);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        let _ = window_clone.emit("sync-log", format!("⚠️ [STDERR] {}", line));
+            let win_stderr = window_clone.clone();
+            let stderr_thread = std::thread::spawn(move || {
+                let mut err_lines = Vec::new();
+                if let Some(err) = stderr {
+                    let reader = BufReader::new(err);
+                    for line_res in reader.lines() {
+                        if let Ok(line) = line_res {
+                            let _ = win_stderr.emit("sync-log", format!("⚠️ [STDERR] {}", line));
+                            err_lines.push(line);
+                        }
                     }
                 }
-            }
+                err_lines.join("\n")
+            });
 
-            let exit_status = child.wait().ok();
-            let code = exit_status.and_then(|s| s.code()).unwrap_or(-1);
-            let success = code == 0;
+            let _ = stdout_thread.join();
+            let stderr_output = stderr_thread.join().unwrap_or_default();
+
+            let exit_status = child.wait();
+            let (success, code, message) = match exit_status {
+                Ok(status) => {
+                    let code = status.code().unwrap_or(-1);
+                    if status.success() {
+                        (true, code, "Sincronização concluída com sucesso.".into())
+                    } else {
+                        let err_detail = if !stderr_output.trim().is_empty() {
+                            format!("Erro no motor Python (código {}): {}", code, stderr_output.trim())
+                        } else {
+                            format!("O processo Python encerrou com código de erro {}", code)
+                        };
+                        (false, code, err_detail)
+                    }
+                }
+                Err(e) => (false, -1, format!("Falha de comunicação/espera do processo: {}", e)),
+            };
 
             let _ = window_clone.emit(
                 "sync-finished",
                 SyncFinishedPayload {
                     success,
                     exit_code: Some(code),
-                    message: if success {
-                        "Sincronização concluída com sucesso.".into()
-                    } else {
-                        format!("Processo finalizou com código {}", code)
-                    },
+                    message,
                 },
             );
         });
@@ -1783,8 +1969,9 @@ mod commands {
         subcrate: Option<String>,
         include_subcrates: Option<bool>,
     ) -> Result<String, String> {
-        let script = find_python_script(Some(&app), "auto_cue.py");
-        let mut cmd = Command::new("/usr/bin/python3");
+        let script = find_canonical_python_script(Some(&app), "auto_cue.py")?;
+        let python_bin = find_python_binary()?;
+        let mut cmd = Command::new(&python_bin);
         cmd.arg(&script);
         cmd.arg("--audit-crate");
         cmd.arg("--mp3");
@@ -1807,6 +1994,16 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao auditar cues na crate: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if !output.status.success() {
+            let err_msg = if !stderr.trim().is_empty() {
+                format!("Erro na auditoria de cues: {}", stderr.trim())
+            } else {
+                format!("Erro na auditoria (código {}): {}", output.status.code().unwrap_or(-1), stdout.trim())
+            };
+            return Err(err_msg);
+        }
         Ok(stdout)
     }
 
@@ -1982,6 +2179,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_system_telemetry,
             commands::get_detected_paths,
+            commands::validate_path,
             commands::start_sync,
             commands::open_in_finder,
             commands::open_file_in_finder,

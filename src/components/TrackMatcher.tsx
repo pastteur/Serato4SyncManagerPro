@@ -750,7 +750,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
               {(statusFilter === 'all' || statusFilter === 'found' || statusFilter === 'upgrades' || statusFilter === 'conflicts') && filteredEncontradas.map((item: any, idx: number) => {
                 const isSelected = selectedFound.has(item.caminho_completo);
                 const isReplaced = replacedUpgrades.has(item.caminho_completo);
-                const isDivergent = item.versao_divergente || item.duracao_incompativel;
+                const isDivergent = item.versao_divergente || item.duracao_incompativel || (item.confianca === 'INCERTA');
 
                 return (
                   <div 
@@ -801,6 +801,18 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                         ) : (
                           <span className="text-[10px] bg-emerald-950 text-emerald-400 border border-emerald-800/40 px-1.5 py-0.5 rounded font-bold shrink-0 font-mono">
                             {item.score}% MATCH
+                          </span>
+                        )}
+
+                        {item.confianca && (
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold shrink-0 border ${
+                            item.confianca === 'ALTA'
+                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                              : item.confianca === 'MEDIA'
+                              ? 'bg-yellow-950/70 text-yellow-300 border-yellow-700/60'
+                              : 'bg-rose-950/70 text-rose-300 border-rose-700/60'
+                          }`}>
+                            {item.confianca === 'ALTA' ? '🟢 ALTA CONFIANÇA' : item.confianca === 'MEDIA' ? '🟡 MÉDIA' : '🔴 INCERTA'}
                           </span>
                         )}
 

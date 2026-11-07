@@ -456,11 +456,22 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
 
                         {/* Track Name */}
                         <td className="py-2 px-3 text-white font-sans font-medium">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="w-2 h-2 rounded-full bg-serato-orange shrink-0" />
                             <span className="truncate max-w-[220px] font-semibold text-slate-100" title={item.nome}>
                               {item.nome}
                             </span>
+                            {item.grau_certeza && (
+                              <span className={`text-[9px] px-1.5 py-0.5 rounded font-mono font-bold shrink-0 border ${
+                                item.grau_certeza === 'IDENTICO_COMPROVADO'
+                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700/60'
+                                  : item.grau_certeza === 'POSSIVEL_DUPLICADO'
+                                  ? 'bg-yellow-950/70 text-yellow-300 border-yellow-700/60'
+                                  : 'bg-orange-950/70 text-orange-300 border-orange-700/60'
+                              }`} title={item.motivo || ''}>
+                                {item.grau_certeza === 'IDENTICO_COMPROVADO' ? '✅ 100% IDÊNTICO' : item.grau_certeza === 'POSSIVEL_DUPLICADO' ? '⚠️ POSSÍVEL' : 'ℹ️ SEMELHANTE'}
+                              </span>
+                            )}
                           </div>
                         </td>
 

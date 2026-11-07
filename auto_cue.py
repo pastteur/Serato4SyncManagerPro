@@ -422,6 +422,7 @@ def audit_crate_cues_detailed(
     Realiza uma auditoria aprofundada de todas as faixas da Crate ou Subcrate,
     detectando Hot Cues gravados, identificando se são os Auto-Cues padrão ou Hot Cues manuais de DJ,
     e listando o que já está implantado vs pendente sem qualquer limite de paginação.
+    Trata erros de leitura adequadamente e protege cues manuais do DJ.
     """
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     if not base_path.exists():
@@ -441,6 +442,7 @@ def audit_crate_cues_detailed(
             "pendentes": 0,
             "personalizadas": 0,
             "padrao_autocue": 0,
+            "erros_leitura": 0,
             "items": []
         }
 
@@ -448,9 +450,11 @@ def audit_crate_cues_detailed(
     total_with_cues = 0
     total_custom = 0
     total_padrao = 0
+    total_erros = 0
     items = []
 
-    STANDARD_LABELS = {"INÍCIO", "INTRO", "DROP 1", "BREAK", "OUTRO", "DROP", "1", "2", "3", "4", "5"}
+    # O Auto-Cue padrão grava exatamente 5 cues nas posições calculadas com labels bem definidos
+    STANDARD_AUTO_CUE_LABELS = {"INTRO", "DROP 1", "BREAK", "DROP 2", "OUTRO", "INÍCIO"}
 
     for root, dirs, files in os.walk(str(target_dir)):
         if '/.' in root or '\\.' in root:
@@ -475,6 +479,7 @@ def audit_crate_cues_detailed(
                 dur = 0.0
                 bpm = 0.0
                 tipo_cue = "Sem Cues"
+                erro_msg = None
 
                 if mutagen:
                     try:
@@ -482,8 +487,10 @@ def audit_crate_cues_detailed(
                         if audio is not None:
                             dur = getattr(audio.info, 'length', 0.0)
                             if 'TBPM' in audio:
-                                try: bpm = float(str(audio['TBPM']).split('.')[0])
-                                except Exception: pass
+                                try:
+                                    bpm = float(str(audio['TBPM']).split('.')[0])
+                                except Exception:
+                                    pass
                             if 'GEOB:Serato Markers2' in audio:
                                 raw_m2 = audio['GEOB:Serato Markers2'].data
                                 cues_in = extract_cues_from_raw_tag(raw_m2)
@@ -492,25 +499,42 @@ def audit_crate_cues_detailed(
                                     cue_list = cues_in
                             elif 'GEOB:Serato Markers_' in audio:
                                 has_cues = True
-                    except Exception:
-                        pass
+                        else:
+                            erro_msg = "Formato de arquivo incompatível ou corrompido"
+                    except Exception as e:
+                        erro_msg = str(e)
 
-                if has_cues:
+                if erro_msg:
+                    total_erros += 1
+                    status_item = "Erro de Leitura"
+                    tipo_cue = f"Falha na Análise: {erro_msg}"
+                elif has_cues:
                     total_with_cues += 1
-                    # Verifica se são cues padrão ou personalizados de DJ
+                    status_item = "Gravado"
+
+                    # Classificação criteriosa:
+                    # O Auto-Cue padrão tem exatamente 5 marcadores (índices 0 a 4) com os labels padrão.
+                    # Se tiver quantidade diferente de 5, qualquer índice > 4, cores manuais ou rótulos próprios de DJ,
+                    # é considerado Personalizado DJ (Protegido).
                     is_custom = False
-                    if cue_list:
+                    if len(cue_list) != 5:
+                        is_custom = True
+                    else:
                         for c in cue_list:
                             lbl = (c.get("label") or "").strip().upper()
-                            if lbl and lbl not in STANDARD_LABELS:
+                            idx = c.get("index", 0)
+                            if idx > 4 or (lbl and lbl not in STANDARD_AUTO_CUE_LABELS):
                                 is_custom = True
                                 break
+
                     if is_custom:
                         total_custom += 1
                         tipo_cue = "Personalizado DJ (Protegido)"
                     else:
                         total_padrao += 1
                         tipo_cue = "Auto-Cue Padrão"
+                else:
+                    status_item = "Pendente"
 
                 crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
                 c_raiz = crate_parts[0] if crate_parts else "Raiz"
@@ -529,16 +553,19 @@ def audit_crate_cues_detailed(
                     "tipo_cue": tipo_cue,
                     "total_cues": len(cue_list),
                     "cue_labels": cue_labels_summary,
-                    "status": "Gravado" if has_cues else "Pendente"
+                    "status": status_item,
+                    "erro": erro_msg
                 })
 
+    pendentes_reais = total_tracks - total_with_cues - total_erros
     return {
         "sucesso": True,
         "total": total_tracks,
         "gravadas": total_with_cues,
-        "pendentes": total_tracks - total_with_cues,
+        "pendentes": max(0, pendentes_reais),
         "personalizadas": total_custom,
         "padrao_autocue": total_padrao,
+        "erros_leitura": total_erros,
         "items": items
     }
 
@@ -860,7 +887,7 @@ def main():
             include_subcrates=not args.no_subcrates
         )
         print(json.dumps(res, ensure_ascii=False))
-        sys.exit(0)
+        sys.exit(0 if res.get("sucesso") else 1)
 
     if args.scan_crate:
         res = scan_crate_cues(

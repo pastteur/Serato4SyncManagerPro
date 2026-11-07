@@ -39,11 +39,19 @@ export const App: React.FC = () => {
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
 
   useEffect(() => {
-    if (mp3Path) localStorage.setItem('serato_sync_mp3_path', mp3Path);
+    if (mp3Path && mp3Path.trim()) {
+      localStorage.setItem('serato_sync_mp3_path', mp3Path.trim());
+    } else {
+      localStorage.removeItem('serato_sync_mp3_path');
+    }
   }, [mp3Path]);
 
   useEffect(() => {
-    if (seratoPath) localStorage.setItem('serato_sync_serato_path', seratoPath);
+    if (seratoPath && seratoPath.trim()) {
+      localStorage.setItem('serato_sync_serato_path', seratoPath.trim());
+    } else {
+      localStorage.removeItem('serato_sync_serato_path');
+    }
   }, [seratoPath]);
 
   const addLog = useCallback((message: string) => {
@@ -72,34 +80,49 @@ export const App: React.FC = () => {
     ]);
   }, []);
 
-  // Initial path detection
-  const handleAutoDetect = useCallback(async () => {
+  // Initial path detection & validation
+  const handleAutoDetect = useCallback(async (forceOverride: boolean = false) => {
     if (isTauri) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
+
+        const currentMp3 = (localStorage.getItem('serato_sync_mp3_path') || mp3Path || '').trim();
+        const currentSerato = (localStorage.getItem('serato_sync_serato_path') || seratoPath || '').trim();
+
+        const isMp3Valid = currentMp3 ? await invoke<boolean>('validate_path', { path: currentMp3 }) : false;
+        const isSeratoValid = currentSerato ? await invoke<boolean>('validate_path', { path: currentSerato }) : false;
+
+        // Se ambos forem válidos e não for um clique forçado, preserva rigorosamente a seleção do usuário
+        if (!forceOverride && isMp3Valid && isSeratoValid) {
+          return;
+        }
+
         const paths = await invoke<{ mp3: string; serato: string }>('get_detected_paths');
-        if (paths.mp3) setMp3Path(paths.mp3);
-        if (paths.serato) setSeratoPath(paths.serato);
-        addLog(`🔍 Auto-detecção concluída: MP3=${paths.mp3} | Serato=${paths.serato}`);
+
+        // Preenche somente caminhos ausentes ou inválidos
+        if (paths.mp3 && (forceOverride || !isMp3Valid)) {
+          setMp3Path(paths.mp3);
+        }
+        if (paths.serato && (forceOverride || !isSeratoValid)) {
+          setSeratoPath(paths.serato);
+        }
+
+        addLog(`🔍 Auto-detecção de pastas: MP3=${paths.mp3 || '(não localizado)'} | Serato=${paths.serato || '(não localizado)'}`);
       } catch (err) {
         addLog(`⚠️ Falha na auto-detecção via Tauri: ${err}`);
       }
     } else {
-      // Browser Mock / Local Fallback
-      setMp3Path('/Volumes/Pastteyr/Music/MP3');
-      setSeratoPath('/Volumes/Pastteyr/_Serato_');
+      // Browser Mock
+      if (!mp3Path) setMp3Path('/Volumes/Pastteyr/Music/MP3');
+      if (!seratoPath) setSeratoPath('/Volumes/Pastteyr/_Serato_');
       addLog('🔍 Auto-detecção simulada em ambiente Web Dev.');
     }
-  }, [addLog]);
+  }, [mp3Path, seratoPath, addLog]);
 
   useEffect(() => {
-    // Se o usuário já tiver caminhos no localStorage, não sobrescreve a menos que estejam vazios
-    const savedMp3 = localStorage.getItem('serato_sync_mp3_path');
-    const savedSerato = localStorage.getItem('serato_sync_serato_path');
-    if (!savedMp3 || !savedSerato) {
-      handleAutoDetect();
-    }
-  }, [handleAutoDetect]);
+    // Inicialização: preenche somente caminhos ausentes ou inválidos sem sobrescrever caminhos válidos
+    handleAutoDetect(false);
+  }, []);
 
   // Setup Tauri Event Listeners
   useEffect(() => {
@@ -359,7 +382,7 @@ export const App: React.FC = () => {
             seratoPath={seratoPath}
             onSelectMp3={handleSelectMp3}
             onSelectSerato={handleSelectSerato}
-            onAutoDetect={handleAutoDetect}
+            onAutoDetect={() => handleAutoDetect(true)}
             disabled={isRunning}
           />
         </div>

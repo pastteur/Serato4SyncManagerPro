@@ -6,6 +6,9 @@ export interface DuplicateItem {
   caminho_copia?: string;
   caminho_original?: string;
   tamanho: number;
+  grau_certeza?: 'IDENTICO_COMPROVADO' | 'POSSIVEL_DUPLICADO' | 'NOMES_SEMELHANTES';
+  motivo?: string;
+  hash_audio?: string;
 }
 
 export interface CrateTrack {
@@ -26,6 +29,8 @@ export interface CrateTreeItem {
 
 export interface SyncSummary {
   sucesso: boolean;
+  status_analise?: 'completo' | 'parcial_com_erros';
+  erros_leitura?: string[];
   dry_run?: boolean;
   total_faixas: number;
   crates_gravadas: number;

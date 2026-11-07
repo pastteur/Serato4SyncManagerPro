@@ -111,6 +111,32 @@ def extract_version_descriptors(text: str) -> set:
     return found
 
 
+import difflib
+
+STOP_WORDS = {"the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for", "with", "by", "o", "a", "os", "as", "de", "do", "da", "dos", "das", "e", "em", "um", "uma"}
+
+def token_similarity(s1: str, s2: str) -> float:
+    """Calcula similaridade combinada (tokens + sequência de caracteres) entre dois textos."""
+    if not s1 or not s2:
+        return 0.0
+    s1_clean = s1.strip().lower()
+    s2_clean = s2.strip().lower()
+    if s1_clean == s2_clean:
+        return 1.0
+
+    tokens1 = set(w for w in s1_clean.split() if w not in STOP_WORDS and len(w) > 1)
+    tokens2 = set(w for w in s2_clean.split() if w not in STOP_WORDS and len(w) > 1)
+
+    seq_ratio = difflib.SequenceMatcher(None, s1_clean, s2_clean).ratio()
+
+    if tokens1 and tokens2:
+        intersection = tokens1.intersection(tokens2)
+        union = tokens1.union(tokens2)
+        jaccard = len(intersection) / len(union) if union else 0.0
+        return max(jaccard, seq_ratio)
+    return seq_ratio
+
+
 def normalize_str(s: str) -> str:
     """Normaliza texto base para comparação fonética/fuzzy removendo parênteses."""
     if not s:
@@ -391,24 +417,49 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
             has_live_lib = any('live' in v or 'ao vivo' in v for v in lib_versions)
             version_match = (has_remix_req == has_remix_lib) and (has_live_req == has_live_lib)
 
-            # 1. Match perfeito (título base + artista + mesma versão de mix)
-            if target_norm in lib["norm"] and (not target_art or target_art in lib["norm"]):
-                score = 100 if version_match else 70
-                if target_full == lib["full_norm"]:
-                    score = 100
+            # 1. Correspondência exata de título completo
+            if target_full == lib["full_norm"] and target_full:
+                score = 100 if version_match else 75
                 if score > best_score:
                     best_match = lib
                     best_score = score
                     if score == 100:
                         break
-            # 2. Match secundário por título
-            elif target_norm and target_norm in lib["norm"]:
-                score = 80 if version_match else 60
-                if score > best_score:
-                    best_match = lib
-                    best_score = score
+                continue
 
-        if best_match:
+            # 2. Similaridade estruturada de Título e Artista (eliminando falsos positivos de palavras avulsas)
+            sim_full = token_similarity(target_full, lib["full_norm"])
+            sim_title = token_similarity(target_norm, lib["norm"])
+            sim_art = token_similarity(target_art, lib["norm"]) if target_art else 1.0
+
+            # Se o artista foi informado, exige que ele coincida razoavelmente
+            if target_art and sim_art < 0.45:
+                continue
+
+            if target_norm and len(target_norm) > 2:
+                if target_art and sim_art >= 0.6 and sim_title >= 0.70:
+                    current_score = int((sim_title * 0.6 + sim_art * 0.4) * 100)
+                    if not version_match:
+                        current_score = max(50, current_score - 25)
+                    if current_score > best_score and current_score >= 70:
+                        best_match = lib
+                        best_score = current_score
+                elif sim_full >= 0.78:
+                    current_score = int(sim_full * 100)
+                    if not version_match:
+                        current_score = max(50, current_score - 25)
+                    if current_score > best_score and current_score >= 70:
+                        best_match = lib
+                        best_score = current_score
+                elif sim_title >= 0.85 and (not target_art or sim_art >= 0.5):
+                    current_score = int(sim_title * 100)
+                    if not version_match:
+                        current_score = max(50, current_score - 25)
+                    if current_score > best_score and current_score >= 75:
+                        best_match = lib
+                        best_score = current_score
+
+        if best_match and best_score >= 70:
             lib_versions = best_match["version_tags"]
             has_remix_lib = any('remix' in v or 'mix' in v for v in lib_versions)
             has_live_lib = any('live' in v or 'ao vivo' in v for v in lib_versions)
@@ -478,7 +529,17 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
                 elif req.get("ext") in ('.flac', '.wav', '.aif') and lib_ext in ('MP3', 'AAC', 'M4A') and lib_bitrate < 320:
                     bitrate_superior = True
 
-                # TRAVA DE SEGURANÇA CONTRA SUBSTITUIÇÃO INDEVIDA (REMIX VS ORIGINAL)
+                # Nível de Confiança
+                if best_score >= 90 and not versao_divergente and not duracao_incompativel:
+                    confianca = "ALTA"
+                elif best_score >= 75 and not versao_divergente and not duracao_incompativel:
+                    confianca = "MEDIA"
+                else:
+                    confianca = "INCERTA"
+
+                item_match["confianca"] = confianca
+
+                # TRAVA DE SEGURANÇA CONTRA SUBSTITUIÇÃO INDEVIDA (REMIX VS ORIGINAL E CONFIANÇA)
                 is_safe_upgrade = False
                 aviso_motivo = None
 
@@ -488,6 +549,9 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
                 elif duracao_incompativel:
                     status_comp = "DURACAO_INCOMPATIVEL"
                     aviso_motivo = f"⚠️ Duração Incompatível: difere em {round(delta_dur, 1)}s. Provável versão estendida ou remix."
+                elif confianca != "ALTA":
+                    status_comp = "CORRESPONDENCIA_INCERTA"
+                    aviso_motivo = f"⚠️ Correspondência Incerta (Score {best_score}%, Confiança {confianca}). Não substituir automaticamente."
                 elif bitrate_superior:
                     # Calcula hash de áudio do arquivo original para confirmar
                     lib_seal = compute_audio_seal(best_match["full_path"])
