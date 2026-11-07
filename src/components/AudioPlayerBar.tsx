@@ -181,12 +181,40 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({ track, onClose, 
           const cueMs = track.cues[cueIndex].pos_ms;
           jumpToTime(cueMs / 1000);
         }
+        return;
+      }
+
+      // Atalho de mudo (M)
+      if (e.key === 'm' || e.key === 'M') {
+        e.preventDefault();
+        toggleMute();
+        return;
+      }
+
+      // Atalhos de volume (Setas Cima/Baixo)
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        handleVolumeChange(Math.min(1, Number((volume + 0.05).toFixed(2))));
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        handleVolumeChange(Math.max(0, Number((volume - 0.05).toFixed(2))));
+        return;
+      }
+
+      // Fechar player com Escape
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+        return;
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [track, isPlaying, duration]);
+  }, [track, isPlaying, duration, volume, isMuted, onClose]);
 
   if (!track) return null;
 
@@ -336,3 +364,4 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({ track, onClose, 
     </aside>
   );
 };
+// git-hash-salt: 1
