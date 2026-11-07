@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle, FileSpreadsheet } from 'lucide-react';
+import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle, FileSpreadsheet, Play } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 export interface TagDoctorItem {
@@ -45,13 +45,16 @@ export interface CrateInfo {
   subcrates: CrateSubInfo[];
 }
 
+import { PlayingTrackInfo } from './AudioPlayerBar';
+
 interface TagDoctorProps {
   mp3Path: string;
   onAddLog: (message: string) => void;
   onOpenFileInFinder?: (filePath: string) => void;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
 }
 
-export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenFileInFinder }) => {
+export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenFileInFinder, onPlayTrack }) => {
   const [items, setItems] = useState<TagDoctorItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isApplying, setIsApplying] = useState<boolean>(false);
@@ -1334,22 +1337,43 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                         </div>
                       </td>
 
-                      {/* Status */}
+                      {/* Status & Player */}
                       <td className="py-2 px-3 text-center">
-                        <div className="flex flex-col items-center gap-1">
-                          {item.precisa_limpeza ? (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-gold/20 text-serato-gold border border-serato-gold/30 font-bold">
-                              Ajustar
-                            </span>
-                          ) : (
-                            <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-neonGreen/20 text-serato-neonGreen border border-serato-neonGreen/30 font-bold">
-                              Limpo
-                            </span>
-                          )}
-                          {item.duplicata_hd && (
-                            <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950/60 text-amber-300 border border-amber-800/50" title="Já existe outro arquivo no disco com o nome limpo pretendido. Trata-se de uma duplicata no disco.">
-                              ⚠️ Duplicata HD
-                            </span>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <div className="flex flex-col items-center gap-1">
+                            {item.precisa_limpeza ? (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-gold/20 text-serato-gold border border-serato-gold/30 font-bold">
+                                Ajustar
+                              </span>
+                            ) : (
+                              <span className="text-[10px] px-2 py-0.5 rounded-full bg-serato-neonGreen/20 text-serato-neonGreen border border-serato-neonGreen/30 font-bold">
+                                Limpo
+                              </span>
+                            )}
+                            {item.duplicata_hd && (
+                              <span className="text-[9px] px-1.5 py-0.2 rounded bg-amber-950/60 text-amber-300 border border-amber-800/50" title="Já existe outro arquivo no disco com o nome limpo pretendido. Trata-se de uma duplicata no disco.">
+                                ⚠️ Duplicata HD
+                              </span>
+                            )}
+                          </div>
+                          {onPlayTrack && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onPlayTrack({
+                                  caminho: item.caminho,
+                                  nome: item.arquivo_atual,
+                                  artista: item.artista_atual || item.artista_sugerido,
+                                  titulo: item.titulo_atual || item.titulo_sugerido,
+                                  bpm: item.bpm ? parseFloat(item.bpm) : undefined
+                                });
+                              }}
+                              className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer shrink-0"
+                              title="Tocar no Player nativo"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                            </button>
                           )}
                         </div>
                       </td>
@@ -1408,3 +1432,4 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
     </div>
   );
 };
+// git-hash-salt: 1

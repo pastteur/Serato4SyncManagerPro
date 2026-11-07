@@ -4,21 +4,24 @@ import {
   Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle,
   ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap,
   CheckSquare, Square, RefreshCw, X, Layers, PlusCircle, Check,
-  Clock, ShieldAlert, ShieldCheck, Hash
+  Clock, ShieldAlert, ShieldCheck, Hash, Play
 } from 'lucide-react';
+import { PlayingTrackInfo } from './AudioPlayerBar';
 
 interface TrackMatcherProps {
   mp3Path: string;
   seratoPath: string;
   onAddLog: (message: string) => void;
   onOpenFileInFinder?: (filePath: string) => void;
+  onPlayTrack?: (track: PlayingTrackInfo) => void;
 }
 
 export const TrackMatcher: React.FC<TrackMatcherProps> = ({
   mp3Path,
   seratoPath,
   onAddLog,
-  onOpenFileInFinder
+  onOpenFileInFinder,
+  onPlayTrack
 }) => {
   const [inputType, setInputType] = useState<'spotify' | 'text' | 'folder' | 'file'>('folder');
   const [inputData, setInputData] = useState<string>('');
@@ -951,6 +954,38 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                         </button>
                       )}
 
+                      {/* Tocar faixa atual do HD no Player */}
+                      {onPlayTrack && item.caminho_completo && (
+                        <button
+                          type="button"
+                          onClick={() => onPlayTrack({
+                            caminho: item.caminho_completo,
+                            nome: item.arquivo_local || item.solicitado,
+                            bpm: item.bpm ? parseFloat(item.bpm) : undefined
+                          })}
+                          className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-cyan hover:text-white transition cursor-pointer shrink-0"
+                          title="Tocar versão do HD no Player nativo"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                        </button>
+                      )}
+
+                      {/* Tocar faixa de Origem (Nova) no Player se diferente */}
+                      {onPlayTrack && item.caminho_novo && item.caminho_novo !== item.caminho_completo && (
+                        <button
+                          type="button"
+                          onClick={() => onPlayTrack({
+                            caminho: item.caminho_novo,
+                            nome: item.solicitado,
+                            bpm: item.bpm ? parseFloat(item.bpm) : undefined
+                          })}
+                          className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer shrink-0"
+                          title="Tocar versão Nova (Origem) no Player nativo"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
+                        </button>
+                      )}
+
                       {/* Abrir Pasta de Origem da Faixa Nova no Finder */}
                       {item.caminho_novo && (
                         <button
@@ -1055,6 +1090,22 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                         >
                           <PlusCircle className="w-3 h-3 text-emerald-400" />
                           <span>Integrar em Crate...</span>
+                        </button>
+                      )}
+
+                      {/* Tocar faixa de Origem no Player se disponível */}
+                      {onPlayTrack && item.caminho_novo && (
+                        <button
+                          type="button"
+                          onClick={() => onPlayTrack({
+                            caminho: item.caminho_novo,
+                            nome: item.solicitado,
+                            bpm: item.bpm ? parseFloat(item.bpm) : undefined
+                          })}
+                          className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer shrink-0"
+                          title="Tocar no Player nativo"
+                        >
+                          <Play className="w-3.5 h-3.5 fill-current" />
                         </button>
                       )}
 

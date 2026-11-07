@@ -708,6 +708,7 @@ export const App: React.FC = () => {
                 mp3Path={mp3Path}
                 onAddLog={addLog}
                 onOpenFileInFinder={handleOpenFileInFinder}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 
@@ -727,6 +728,7 @@ export const App: React.FC = () => {
                 seratoPath={seratoPath}
                 onAddLog={addLog}
                 onOpenFileInFinder={handleOpenFileInFinder}
+                onPlayTrack={(track) => setActivePlayingTrack(track)}
               />
             </div>
 
