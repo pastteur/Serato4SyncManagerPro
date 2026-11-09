@@ -2,13 +2,28 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Activity, AlertTriangle, ShieldAlert, CheckCircle2, RefreshCw, Trash2,
   Eye, Filter, ArrowRight, Globe, Zap, DownloadCloud, FolderTree, Search,
-  Play, Pause, Volume2, X, Edit3, ShieldCheck, AlertCircle, FileSpreadsheet
+  Play, Pause, Volume2, X, Edit3, ShieldCheck, AlertCircle, FileSpreadsheet,
+  Clock, CheckCircle, ChevronUp, ChevronDown
 } from 'lucide-react';
 import { CrateInfo } from './TagDoctor';
 import { ConfirmModal } from './ConfirmModal';
 
+export type DownloadJobStatus = 'queued' | 'downloading' | 'duration_check' | 'success' | 'error';
+
+export interface DownloadJob {
+  id: string;
+  item: any;
+  status: DownloadJobStatus;
+  progressPercent: number;
+  message?: string;
+  error?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
 interface AudioHealthProps {
   mp3Path: string;
+  seratoPath?: string;
   onAddLog: (message: string) => void;
   onOpenFileInFinder?: (filePath: string) => void;
   onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
@@ -16,6 +31,7 @@ interface AudioHealthProps {
 
 export const AudioHealth: React.FC<AudioHealthProps> = ({
   mp3Path,
+  seratoPath = '',
   onAddLog,
   onOpenFileInFinder,
   onMoveToTrash
@@ -142,6 +158,148 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     onConfirm: () => {}
   });
 
+  // Fila de Downloads Assíncrona com Concorrência Máxima = 4
+  const MAX_CONCURRENT = 4;
+  const [downloadQueue, setDownloadQueue] = useState<DownloadJob[]>([]);
+  const [isQueuePaused, setIsQueuePaused] = useState<boolean>(false);
+  const [isDrawerOpen, setIsDrawerOpen] = useState<boolean>(false);
+  const activeJobsCount = useMemo(() => {
+    return downloadQueue.filter(j => j.status === 'downloading' || j.status === 'duration_check').length;
+  }, [downloadQueue]);
+  const queuedJobsCount = useMemo(() => {
+    return downloadQueue.filter(j => j.status === 'queued').length;
+  }, [downloadQueue]);
+  const completedJobsCount = useMemo(() => {
+    return downloadQueue.filter(j => j.status === 'success').length;
+  }, [downloadQueue]);
+  const errorJobsCount = useMemo(() => {
+    return downloadQueue.filter(j => j.status === 'error').length;
+  }, [downloadQueue]);
+
+  // Enfileirar faixas na fila de download
+  const enqueueTracks = (tracksToQueue: any[]) => {
+    setDownloadQueue(prev => {
+      const existingIds = new Set(prev.map(j => j.id));
+      const newJobs: DownloadJob[] = tracksToQueue
+        .filter(t => !existingIds.has(t.id))
+        .map(t => ({
+          id: t.id,
+          item: t,
+          status: 'queued',
+          progressPercent: 0,
+          message: 'Na fila de download...'
+        }));
+      return [...prev, ...newJobs];
+    });
+    setIsDrawerOpen(true);
+    onAddLog(`📥 ${tracksToQueue.length} faixa(s) adicionada(s) à Fila de Downloads.`);
+  };
+
+  // Limpar itens finalizados ou toda a fila
+  const handleClearFinishedQueue = () => {
+    setDownloadQueue(prev => prev.filter(j => j.status === 'queued' || j.status === 'downloading' || j.status === 'duration_check'));
+  };
+
+  const handleClearAllQueue = () => {
+    setDownloadQueue(prev => prev.filter(j => j.status === 'downloading' || j.status === 'duration_check'));
+  };
+
+  const handleRemoveQueueItem = (jobId: string) => {
+    setDownloadQueue(prev => prev.filter(j => j.id !== jobId || j.status === 'downloading' || j.status === 'duration_check'));
+  };
+
+  const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+
+  // Worker que consome a fila com até MAX_CONCURRENT tarefas ativas
+  useEffect(() => {
+    if (isQueuePaused) return;
+
+    const running = downloadQueue.filter(j => j.status === 'downloading' || j.status === 'duration_check').length;
+    const availableSlots = MAX_CONCURRENT - running;
+    if (availableSlots <= 0) return;
+
+    const nextJobs = downloadQueue.filter(j => j.status === 'queued').slice(0, availableSlots);
+    if (nextJobs.length === 0) return;
+
+    // Marca imediatamente como downloading
+    setDownloadQueue(prev =>
+      prev.map(j =>
+        nextJobs.some(nj => nj.id === j.id)
+          ? { ...j, status: 'downloading', progressPercent: 20, message: 'Buscando e baixando áudio 320k...', startedAt: Date.now() }
+          : j
+      )
+    );
+
+    // Executa as tarefas em paralelo
+    nextJobs.forEach(async (job) => {
+      try {
+        if (isTauri) {
+          const { invoke } = await import('@tauri-apps/api/core');
+
+          // Atualiza status para duration_check após download começar
+          setTimeout(() => {
+            setDownloadQueue(prev =>
+              prev.map(j =>
+                j.id === job.id && j.status === 'downloading'
+                  ? { ...j, status: 'duration_check', progressPercent: 65, message: 'Validando duração e integridade...' }
+                  : j
+              )
+            );
+          }, 3000);
+
+          const resJson = await invoke<string>('repair_track_online', {
+            filepath: job.item.caminho,
+            seratoDir: seratoPath || null
+          });
+          const data = JSON.parse(resJson);
+
+          if (data.sucesso) {
+            setDownloadQueue(prev =>
+              prev.map(j =>
+                j.id === job.id
+                  ? { ...j, status: 'success', progressPercent: 100, message: data.mensagem || 'Substituída com sucesso!', finishedAt: Date.now() }
+                  : j
+              )
+            );
+            onAddLog(`🎉 [Fila] ${job.item.arquivo}: ${data.mensagem}`);
+            // Remove da lista principal de problemas
+            setItems(prev => prev.filter(i => i.id !== job.item.id));
+          } else {
+            setDownloadQueue(prev =>
+              prev.map(j =>
+                j.id === job.id
+                  ? { ...j, status: 'error', progressPercent: 100, error: data.erro, message: data.erro, finishedAt: Date.now() }
+                  : j
+              )
+            );
+            onAddLog(`❌ [Fila] Erro em ${job.item.arquivo}: ${data.erro}`);
+          }
+        } else {
+          // Mock em ambiente dev
+          setTimeout(() => {
+            setDownloadQueue(prev =>
+              prev.map(j =>
+                j.id === job.id
+                  ? { ...j, status: 'success', progressPercent: 100, message: 'Simulado com sucesso!', finishedAt: Date.now() }
+                  : j
+              )
+            );
+            setItems(prev => prev.filter(i => i.id !== job.item.id));
+          }, 2000);
+        }
+      } catch (err: any) {
+        setDownloadQueue(prev =>
+          prev.map(j =>
+            j.id === job.id
+              ? { ...j, status: 'error', progressPercent: 100, error: String(err), message: String(err), finishedAt: Date.now() }
+              : j
+          )
+        );
+        onAddLog(`❌ [Fila] Exceção em ${job.item.arquivo}: ${err}`);
+      }
+    });
+  }, [downloadQueue, isQueuePaused, isTauri, seratoPath, onAddLog]);
+
   // Filtros de busca e severidade
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [severityFilter, setSeverityFilter] = useState<'all' | 'error' | 'warning'>('all');
@@ -164,7 +322,6 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     return result;
   }, [items, searchTerm, severityFilter]);
 
-  const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const activeCrateData = cratesList.find(c => c.nome === selectedCrate);
 
   // Carrega Crates
@@ -648,53 +805,12 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     });
   };
 
-  // Correção online de uma única música com barra de status ativa
-  const handleRepairSingleOnline = async (item: any) => {
-    setProcessingSingleId(item.id);
-    setProcessingSingleAction('repair');
-    setIsRepairingOnline(true);
-    setRepairProgress({
-      processados: 0,
-      total: 1,
-      percentual: 35,
-      atualizados: 0,
-      faixa_atual: `Baixando versão oficial 320k: ${item.arquivo}...`
-    });
-    onAddLog(`🌐 Iniciando busca e download em 320kbps para: ${item.arquivo}...`);
-    try {
-      if (isTauri) {
-        const { invoke } = await import('@tauri-apps/api/core');
-        const resJson = await invoke<string>('repair_track_online', {
-          filepath: item.caminho
-        });
-        const data = JSON.parse(resJson);
-        if (data.sucesso) {
-          setRepairProgress({
-            processados: 1,
-            total: 1,
-            percentual: 100,
-            atualizados: 1,
-            faixa_atual: `✅ Concluído: ${item.arquivo}`
-          });
-          onAddLog(`🎉 ${item.arquivo}: ${data.mensagem}`);
-          setItems(prev => prev.filter(i => i.id !== item.id));
-        } else {
-          onAddLog(`❌ Erro no download/substituição: ${data.erro}`);
-        }
-      }
-    } catch (e) {
-      onAddLog(`❌ Falha: ${e}`);
-    } finally {
-      setTimeout(() => {
-        setProcessingSingleId(null);
-        setProcessingSingleAction(null);
-        setIsRepairingOnline(false);
-        setRepairProgress(null);
-      }, 500);
-    }
+  // Correção online de uma única música via fila assíncrona
+  const handleRepairSingleOnline = (item: any) => {
+    enqueueTracks([item]);
   };
 
-  // Correção online em massa das selecionadas
+  // Correção online em massa das selecionadas via fila assíncrona
   const handleRepairBatchOnline = () => {
     const selectedItems = items.filter(i => selectedIds.has(i.id));
     if (selectedItems.length === 0) {
@@ -705,36 +821,13 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     setModalConfig({
       isOpen: true,
       title: 'Correção Online e Substituição Automática',
-      message: `Deseja buscar e substituir automaticamente as ${selectedItems.length} faixas selecionadas por versões completas em 320kbps?`,
-      detail: 'Os arquivos originais corrompidos ou incompletos serão guardados em segurança na pasta de quarentena (~/SeratoSync/quarantine/).',
-      confirmText: `Reparar ${selectedItems.length} faixas`,
+      message: `Deseja enfileirar ${selectedItems.length} faixa(s) selecionada(s) para download e substituição automática por versões completas em 320kbps?`,
+      detail: 'Downloads ocorrem em segundo plano (até 4 faixas simultâneas). Os arquivos originais serão guardados em segurança na pasta de quarentena do Serato.',
+      confirmText: `Enfileirar ${selectedItems.length} faixas`,
       variant: 'warning',
-      onConfirm: async () => {
+      onConfirm: () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));
-        setIsRepairingOnline(true);
-        setRepairProgress({
-          processados: 0,
-          total: selectedItems.length,
-          percentual: 0,
-          atualizados: 0,
-          faixa_atual: 'Iniciando downloads em alta qualidade...'
-        });
-
-        onAddLog(`🌐 Disparando correção online em massa de ${selectedItems.length} faixas via yt-dlp...`);
-
-        try {
-          if (isTauri) {
-            const { invoke } = await import('@tauri-apps/api/core');
-            const filepaths = selectedItems.map(i => i.caminho);
-            await invoke('batch_repair_online', {
-              filepathsJson: JSON.stringify(filepaths)
-            });
-          }
-        } catch (e) {
-          setIsRepairingOnline(false);
-          setRepairProgress(null);
-          onAddLog(`❌ Falha na chamada da correção online: ${e}`);
-        }
+        enqueueTracks(selectedItems);
       }
     });
   };
@@ -1372,6 +1465,53 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       </span>
                     )}
 
+                    {/* Status da Fila de Downloads Assíncrona */}
+                    {(() => {
+                      const job = downloadQueue.find(j => j.id === item.id);
+                      if (!job) return null;
+                      if (job.status === 'queued') {
+                        return (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border bg-slate-900 text-slate-300 border-slate-700 animate-pulse shrink-0">
+                            <Clock className="w-3 h-3 text-slate-400" />
+                            <span>Na Fila</span>
+                          </span>
+                        );
+                      }
+                      if (job.status === 'downloading') {
+                        return (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border bg-cyan-950 text-serato-cyan border-cyan-700 animate-pulse shrink-0">
+                            <RefreshCw className="w-3 h-3 animate-spin text-serato-cyan" />
+                            <span>Baixando 320k...</span>
+                          </span>
+                        );
+                      }
+                      if (job.status === 'duration_check') {
+                        return (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border bg-amber-950 text-amber-300 border-amber-700 animate-pulse shrink-0">
+                            <ShieldCheck className="w-3 h-3 animate-spin text-amber-400" />
+                            <span>Verificando Duração</span>
+                          </span>
+                        );
+                      }
+                      if (job.status === 'success') {
+                        return (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border bg-emerald-950 text-emerald-300 border-emerald-700 shrink-0">
+                            <CheckCircle className="w-3 h-3 text-emerald-400" />
+                            <span>Concluído</span>
+                          </span>
+                        );
+                      }
+                      if (job.status === 'error') {
+                        return (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-bold flex items-center gap-1 border bg-rose-950 text-rose-300 border-rose-700 shrink-0" title={job.error}>
+                            <AlertCircle className="w-3 h-3 text-rose-400" />
+                            <span>Erro</span>
+                          </span>
+                        );
+                      }
+                      return null;
+                    })()}
+
                     <span className="text-slate-300">{item.duracao_seg}s</span>
                     {item.bitrate_kbps > 0 && (
                       <span className="text-serato-cyan">{item.bitrate_kbps} kbps</span>
@@ -1420,30 +1560,36 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
                       <Edit3 className="w-3.5 h-3.5 text-serato-gold" />
                     </button>
 
-                    {/* Botão Baixar Online */}
-                    <button
-                      type="button"
-                      onClick={() => handleRepairSingleOnline(item)}
-                      disabled={isRepairingOnline || isResamplingLocal}
-                      className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold transition cursor-pointer border ${
-                        processingSingleId === item.id && processingSingleAction === 'repair'
-                          ? 'bg-cyan-900 text-white border-cyan-400 animate-pulse'
-                          : 'bg-cyan-950/50 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/40 disabled:opacity-40'
-                      }`}
-                      title="Baixa automaticamente versão 320kbps íntegra (44.1kHz) e substitui esta faixa (com trava de segurança de ±10s)"
-                    >
-                      {processingSingleId === item.id && processingSingleAction === 'repair' ? (
-                        <>
-                          <RefreshCw className="w-3 h-3 text-serato-cyan animate-spin" />
-                          <span>Baixando 320k...</span>
-                        </>
-                      ) : (
-                        <>
-                          <DownloadCloud className="w-3.5 h-3.5" />
-                          <span>Baixar 320k</span>
-                        </>
-                      )}
-                    </button>
+                    {/* Botão Baixar Online via Fila */}
+                    {(() => {
+                      const job = downloadQueue.find(j => j.id === item.id);
+                      const isQueuedOrRunning = job && (job.status === 'queued' || job.status === 'downloading' || job.status === 'duration_check');
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => handleRepairSingleOnline(item)}
+                          disabled={Boolean(isQueuedOrRunning)}
+                          className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold transition cursor-pointer border ${
+                            isQueuedOrRunning
+                              ? 'bg-cyan-900/60 text-white border-cyan-500/50'
+                              : 'bg-cyan-950/50 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/40 disabled:opacity-40'
+                          }`}
+                          title="Adiciona à fila de download assíncrono para baixar versão 320kbps íntegra (44.1kHz)"
+                        >
+                          {isQueuedOrRunning ? (
+                            <>
+                              <RefreshCw className="w-3 h-3 text-serato-cyan animate-spin" />
+                              <span>Em processo...</span>
+                            </>
+                          ) : (
+                            <>
+                              <DownloadCloud className="w-3.5 h-3.5" />
+                              <span>Baixar 320k</span>
+                            </>
+                          )}
+                        </button>
+                      );
+                    })()}
 
                     {/* Revelar no Finder */}
                     {onOpenFileInFinder && (
@@ -1475,6 +1621,149 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           )}
         </div>
       </div>
+
+      {/* Drawer / Barra de Status da Fila de Downloads Assíncrona */}
+      {downloadQueue.length > 0 && (
+        <div className="bg-slate-900 border border-serato-cardBorder rounded-xl shadow-2xl shrink-0 overflow-hidden transition-all duration-200">
+          {/* Header da Barra de Status da Fila */}
+          <div className="px-3.5 py-2 flex items-center justify-between bg-slate-950/80 border-b border-white/5">
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <DownloadCloud className={`w-4 h-4 text-serato-cyan ${activeJobsCount > 0 ? 'animate-bounce' : ''}`} />
+                <span className="text-xs font-bold text-white">Fila de Downloads (320kbps)</span>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-950 text-serato-cyan border border-cyan-800/50 font-mono">
+                  {activeJobsCount} ativos / {downloadQueue.length} total
+                </span>
+              </div>
+
+              {/* Badges de Contagem */}
+              <div className="hidden sm:flex items-center gap-2 text-[11px] font-mono">
+                {queuedJobsCount > 0 && (
+                  <span className="text-slate-400">⏳ {queuedJobsCount} na fila</span>
+                )}
+                {completedJobsCount > 0 && (
+                  <span className="text-emerald-400">✅ {completedJobsCount} concluídos</span>
+                )}
+                {errorJobsCount > 0 && (
+                  <span className="text-rose-400">❌ {errorJobsCount} com erro</span>
+                )}
+              </div>
+            </div>
+
+            {/* Ações da Fila: Pausar/Continuar, Limpar, Expandir/Minimizar */}
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsQueuePaused(!isQueuePaused)}
+                className={`px-2.5 py-1 rounded text-[11px] font-semibold transition cursor-pointer flex items-center gap-1 border ${
+                  isQueuePaused
+                    ? 'bg-amber-950/80 text-amber-300 border-amber-600/50 hover:bg-amber-900'
+                    : 'bg-slate-800 text-slate-300 border-white/5 hover:bg-slate-700'
+                }`}
+                title={isQueuePaused ? "Retomar processamento da fila" : "Pausar downloads"}
+              >
+                {isQueuePaused ? (
+                  <>
+                    <Play className="w-3 h-3 fill-current" />
+                    <span>Retomar</span>
+                  </>
+                ) : (
+                  <>
+                    <Pause className="w-3 h-3 fill-current" />
+                    <span>Pausar</span>
+                  </>
+                )}
+              </button>
+
+              <button
+                type="button"
+                onClick={handleClearFinishedQueue}
+                disabled={completedJobsCount === 0 && errorJobsCount === 0}
+                className="px-2.5 py-1 rounded text-[11px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-white/5 transition disabled:opacity-30 cursor-pointer"
+                title="Limpar faixas concluídas ou com erro da lista"
+              >
+                Limpar Concluídos
+              </button>
+
+              <button
+                type="button"
+                onClick={handleClearAllQueue}
+                disabled={queuedJobsCount === 0}
+                className="px-2.5 py-1 rounded text-[11px] font-semibold bg-rose-950/40 hover:bg-rose-900 text-rose-300 border border-rose-800/40 transition disabled:opacity-30 cursor-pointer"
+                title="Cancelar e limpar faixas ainda na fila"
+              >
+                Limpar Fila
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setIsDrawerOpen(!isDrawerOpen)}
+                className="p-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-white transition cursor-pointer"
+                title={isDrawerOpen ? "Minimizar lista de downloads" : "Expandir lista de downloads"}
+              >
+                {isDrawerOpen ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+              </button>
+            </div>
+          </div>
+
+          {/* Drawer Expansível com as Faixas da Fila */}
+          {isDrawerOpen && (
+            <div className="max-h-48 overflow-y-auto divide-y divide-white/5 p-2 space-y-1.5">
+              {downloadQueue.map((job) => (
+                <div key={job.id} className="p-2 rounded-lg bg-slate-950/40 border border-white/5 flex items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2.5 min-w-0 max-w-xl truncate">
+                    {job.status === 'queued' && <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />}
+                    {job.status === 'downloading' && <RefreshCw className="w-3.5 h-3.5 text-serato-cyan animate-spin shrink-0" />}
+                    {job.status === 'duration_check' && <ShieldCheck className="w-3.5 h-3.5 text-amber-400 animate-spin shrink-0" />}
+                    {job.status === 'success' && <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />}
+                    {job.status === 'error' && <AlertCircle className="w-3.5 h-3.5 text-rose-400 shrink-0" />}
+
+                    <div className="truncate">
+                      <div className="font-semibold text-white truncate" title={job.item.arquivo}>
+                        {job.item.arquivo}
+                      </div>
+                      <div className="text-[10px] text-slate-400 truncate">
+                        {job.message || (job.status === 'queued' ? 'Aguardando slot disponível (máx 4)...' : '')}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3 shrink-0">
+                    {/* Barra de progresso individual da tarefa */}
+                    {(job.status === 'downloading' || job.status === 'duration_check') && (
+                      <div className="w-24 bg-slate-950 rounded-full h-1.5 overflow-hidden border border-white/5">
+                        <div
+                          className="h-full bg-gradient-to-r from-serato-cyan to-blue-500 transition-all duration-300"
+                          style={{ width: `${job.progressPercent}%` }}
+                        />
+                      </div>
+                    )}
+
+                    <span className="text-[10px] font-mono text-slate-400 uppercase">
+                      {job.status === 'queued' && 'Na Fila'}
+                      {job.status === 'downloading' && 'Baixando'}
+                      {job.status === 'duration_check' && 'Validando'}
+                      {job.status === 'success' && 'Concluído'}
+                      {job.status === 'error' && 'Falha'}
+                    </span>
+
+                    {(job.status === 'queued' || job.status === 'success' || job.status === 'error') && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveQueueItem(job.id)}
+                        className="text-slate-500 hover:text-rose-400 p-0.5 rounded cursor-pointer"
+                        title="Remover item da lista"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Dock do Player de Áudio Ilimitado com Barra de Rolagem */}
       {playingTrack && (

@@ -51,6 +51,47 @@ YT_DLP_CANDIDATES = [
 ]
 FFMPEG_DIR = "/opt/homebrew/bin:/usr/local/bin:/usr/bin"
 QUARANTINE_DIR = Path.home() / ".serato_quarentena_audio"
+
+
+def get_quarantine_dir(serato_dir_str: str = "", file_path: Path = None) -> Path:
+    """
+    Retorna o diretório de quarentena:
+    1. Se serato_dir_str for fornecido ou detectável, usa <_Serato_>/Quarentena.
+    2. Se file_path estiver dentro de um volume/árvore que contenha _Serato_, usa esse _Serato_/Quarentena.
+    3. Fallback seguro: ~/.serato_quarentena_audio.
+    """
+    if serato_dir_str and serato_dir_str.strip():
+        base = Path(os.path.expanduser(serato_dir_str.strip())).resolve()
+        # Se apontar para _Serato_ diretamente ou diretório que o contenha
+        if base.name in ("_Serato_", "Serato"):
+            q = base / "Quarentena"
+        elif (base / "_Serato_").exists():
+            q = base / "_Serato_" / "Quarentena"
+        elif (base / "Serato").exists():
+            q = base / "Serato" / "Quarentena"
+        else:
+            q = base / "Quarentena"
+        try:
+            q.mkdir(parents=True, exist_ok=True)
+            return q
+        except Exception:
+            pass
+
+    if file_path:
+        # Tenta achar _Serato_ na raiz do volume do arquivo
+        try:
+            curr = file_path.resolve()
+            for parent in [curr] + list(curr.parents):
+                candidate = parent / "_Serato_"
+                if candidate.is_dir():
+                    q = candidate / "Quarentena"
+                    q.mkdir(parents=True, exist_ok=True)
+                    return q
+        except Exception:
+            pass
+
+    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    return QUARANTINE_DIR
 FFMPEG_CANDIDATES = [
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
@@ -504,12 +545,14 @@ def scan_audio_health(
     return res
 
 
-def repair_track_online(filepath_str: str):
+def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     """
     Substitui a faixa danificada baixando uma versão 320kbps de alta fidelidade (44.100 Hz CBR) via yt-dlp.
     Utiliza estratégia de busca multi-provedor (YouTube Oficial -> YouTube Geral -> SoundCloud) para contornar
     restrições de palavras sensíveis ou ausência de catálogo.
-    Preserva 100% dos marcadores Serato (Cue points, Beatgrid, BPM e Key) do arquivo original.
+    Preserva 100% dos marcadores Serato (Cue points, Beatgrid, BPM e Key) e contagens de execução do arquivo original.
+    Quarentena no diretório <_Serato_>/Quarentena/.
+    Download temporário realizado no diretório de destino da faixa usando padrão .__sync_work_<timestamp>.mp3.
     """
     yt_dlp = get_yt_dlp_bin()
     if not yt_dlp:
@@ -537,10 +580,9 @@ def repair_track_online(filepath_str: str):
     clean_query = re.sub(r'\s*\.\s*\d+.*$', '', clean_query).strip()
     clean_query = re.sub(r'\s+', ' ', clean_query).strip()
 
-    temp_id = f"repair_{int(datetime.now().timestamp() * 1000)}"
-    temp_dir = Path("/tmp") / temp_id
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    out_template = str(temp_dir / "download.%(ext)s")
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    temp_target_file = file_p.parent / f"{file_p.stem}.__sync_work_{timestamp_str}.mp3"
+    out_template = str(file_p.parent / f"{file_p.stem}.__sync_work_{timestamp_str}.%(ext)s")
 
     env = os.environ.copy()
     env["PATH"] = f"{FFMPEG_DIR}:{env.get('PATH', '')}"
@@ -585,11 +627,17 @@ def repair_track_online(filepath_str: str):
             if proc.returncode not in (0, 101):
                 last_err = proc.stderr.decode('utf-8', errors='ignore')
 
-            mp3_candidates = list(temp_dir.glob("*.mp3"))
-            if mp3_candidates:
-                downloaded_mp3 = mp3_candidates[0]
+            if temp_target_file.exists() and temp_target_file.stat().st_size > 0:
+                downloaded_mp3 = temp_target_file
                 used_provider = provider_name
                 break
+            else:
+                # Caso yt-dlp tenha salvo com sufixo ou nome alternativo temporário
+                matches = list(file_p.parent.glob(f"{file_p.stem}.__sync_work_{timestamp_str}*.mp3"))
+                if matches and matches[0].stat().st_size > 0:
+                    downloaded_mp3 = matches[0]
+                    used_provider = provider_name
+                    break
         except subprocess.TimeoutExpired:
             last_err = f"Timeout na busca ({provider_name})"
             continue
@@ -597,16 +645,32 @@ def repair_track_online(filepath_str: str):
             last_err = str(e)
             continue
 
-    if not downloaded_mp3:
-        shutil.rmtree(str(temp_dir), ignore_errors=True)
+    def _cleanup_temp():
+        try:
+            for f in file_p.parent.glob(f"{file_p.stem}.__sync_work_{timestamp_str}*"):
+                try:
+                    f.unlink(missing_ok=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if not downloaded_mp3 or not downloaded_mp3.exists():
+        _cleanup_temp()
         return {
             "sucesso": False,
             "erro": f"Nenhuma versão compatível encontrada no YouTube ou SoundCloud. Detalhes: {last_err[:120]}" if last_err else "Nenhuma versão encontrada no YouTube ou SoundCloud com os filtros de qualidade DJ."
         }
 
     try:
-        # TRAVA RÍGIDA DE SEGURANÇA POR TEMPO (Tolerância máxima: ±10 segundos)
-        # Protege o DJ contra substituição caso o arquivo esteja com nome trocado
+        # Checagem estrita de integridade do download
+        if downloaded_mp3.stat().st_size < 20480:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": "Arquivo baixado corrompido ou incompleto (< 20 KB)."
+            }
+
         orig_dur = 0.0
         try:
             from mutagen.mp3 import MP3
@@ -620,41 +684,72 @@ def repair_track_online(filepath_str: str):
             from mutagen.mp3 import MP3
             cand_mp3 = MP3(str(downloaded_mp3))
             cand_dur = round(cand_mp3.info.length, 1)
-        except Exception:
-            pass
+        except Exception as e:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Arquivo baixado possui frames MPEG inválidos: {e}"
+            }
 
+        # TRAVA RÍGIDA DE SEGURANÇA POR TEMPO (Tolerância máxima: < 15 segundos)
+        # Protege o DJ contra substituição caso o arquivo esteja com nome trocado
         # Aplica a trava se o arquivo original tem duração de música normal (> 50s)
         if orig_dur > 50.0 and cand_dur > 0.0:
             diff_time = round(abs(cand_dur - orig_dur), 1)
-            if diff_time > 10.0:
-                shutil.rmtree(str(temp_dir), ignore_errors=True)
+            if diff_time >= 15.0:
+                _cleanup_temp()
                 return {
                     "sucesso": False,
                     "bloqueado_seguranca": True,
-                    "erro": f"Substituição cancelada por segurança: Duração local ({orig_dur}s) difere da versão encontrada ({cand_dur}s) por {diff_time}s (limite de 10s). Evitou sobrescrever faixa possivelmente com nome trocado.",
+                    "erro": f"Substituição cancelada por segurança: Duração local ({orig_dur}s) difere da versão encontrada ({cand_dur}s) por {diff_time}s (limite de < 15s). Evitou sobrescrever faixa possivelmente com nome trocado.",
                     "duracao_local": orig_dur,
                     "duracao_baixada": cand_dur,
                     "diferenca": diff_time
                 }
 
-        # Preserva tags Serato e ID3v2.3 do arquivo original (cues, beatgrid, bpm, tom, etc.)
+        # Preserva tags Serato e ID3v2.3 do arquivo original (cues, beatgrid, bpm, tom, play counts, etc.)
         try:
             from mutagen.id3 import ID3
             orig_id3 = ID3(str(file_p))
-            orig_id3.save(str(downloaded_mp3), v2_version=3)
-        except Exception:
-            pass
+            new_id3 = ID3(str(downloaded_mp3))
+            
+            # Copia todas as tags ID3 relevantes do original para o novo
+            # Dando prioridade para marcadores Serato, beatgrid, bpm, tom e playcount
+            for k in list(orig_id3.keys()):
+                # Tags críticas que devem sempre ser preservadas
+                is_critical = (
+                    k.startswith('GEOB') or
+                    k.startswith('TBPM') or
+                    k.startswith('TKEY') or
+                    'PLAYCOUNT' in k or
+                    'SERATO' in k or
+                    k.startswith('TIT2') or
+                    k.startswith('TPE1') or
+                    k.startswith('TALB') or
+                    k.startswith('TCON')
+                )
+                if is_critical or k not in new_id3:
+                    new_id3[k] = orig_id3[k]
 
-        # Move o arquivo original comprometido para quarentena
-        QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-        quarantine_file = QUARANTINE_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_p.name}"
+            new_id3.save(str(downloaded_mp3), v2_version=3)
+        except Exception:
+            try:
+                # Fallback: clona a estrutura ID3 inteira do original
+                from mutagen.id3 import ID3
+                orig_id3 = ID3(str(file_p))
+                orig_id3.save(str(downloaded_mp3), v2_version=3)
+            except Exception:
+                pass
+
+        # Quarentena: coloca em <_Serato_>/Quarentena/<timestamp>_<filename>
+        quarantine_dir = get_quarantine_dir(serato_dir_str, file_p)
+        quarantine_file = quarantine_dir / f"{timestamp_str}_{file_p.name}"
         shutil.move(str(file_p), str(quarantine_file))
 
-        # Substitui no caminho exato do usuário
+        # Substituição atômica no caminho exato do usuário
         shutil.move(str(downloaded_mp3), str(file_p))
 
-        # Limpa temp
-        shutil.rmtree(str(temp_dir), ignore_errors=True)
+        _cleanup_temp()
 
         return {
             "sucesso": True,
@@ -663,10 +758,10 @@ def repair_track_online(filepath_str: str):
             "duracao_local": orig_dur,
             "duracao_baixada": cand_dur,
             "quarentena": str(quarantine_file),
-            "mensagem": f"Faixa substituída com sucesso por versão 320kbps (44.1kHz CBR) via {used_provider} preservando Cues e Tags."
+            "mensagem": f"Faixa substituída com sucesso por versão 320kbps (44.1kHz CBR) via {used_provider} preservando Cues, BeatGrid, Tags e Play Count."
         }
     except Exception as e:
-        shutil.rmtree(str(temp_dir), ignore_errors=True)
+        _cleanup_temp()
         return {"sucesso": False, "erro": f"Falha ao substituir arquivo: {str(e)}"}
 
 
@@ -735,7 +830,7 @@ def preaudit_track_online(filepath_str: str) -> dict:
                     if cand_dur:
                         cand_dur = round(float(cand_dur), 1)
                         diff = round(abs(cand_dur - local_dur), 1)
-                        is_comp = diff <= 10.0
+                        is_comp = diff < 15.0
                         return {
                             "status": "compativel" if is_comp else "incompativel",
                             "caminho": str(file_p),
@@ -746,7 +841,7 @@ def preaudit_track_online(filepath_str: str) -> dict:
                             "diferenca": diff,
                             "provedor": prov,
                             "compativel": is_comp,
-                            "mensagem": f"Compatível (Diferença: {diff}s · {prov})" if is_comp else f"Divergência de {diff}s (>10s) · Online: {cand_dur}s"
+                            "mensagem": f"Compatível (Diferença: {diff}s · {prov})" if is_comp else f"Divergência de {diff}s (limite < 15s) · Online: {cand_dur}s"
                         }
         except Exception:
             continue
@@ -933,8 +1028,8 @@ def resample_track_local(filepath_str: str) -> dict:
             return {"sucesso": False, "erro": f"FFmpeg falhou: {err[:200]}"}
 
         # Backup de segurança na quarentena
-        QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
-        quarantine_file = QUARANTINE_DIR / f"pre_resample_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_p.name}"
+        quarantine_dir = get_quarantine_dir(file_path=file_p)
+        quarantine_file = quarantine_dir / f"pre_resample_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_p.name}"
         shutil.copy2(str(file_p), str(quarantine_file))
 
         # Substitui com o novo arquivo normalizado
@@ -997,7 +1092,7 @@ def batch_resample_tracks_local(filepaths: list):
     }, ensure_ascii=False), flush=True)
 
 
-def batch_repair_tracks_online(filepaths: list):
+def batch_repair_tracks_online(filepaths: list, serato_dir_str: str = ""):
     """Executa reparação online em lote com streaming de progresso."""
     total = len(filepaths)
     print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
@@ -1018,7 +1113,7 @@ def batch_repair_tracks_online(filepaths: list):
             "status": "baixando"
         }, ensure_ascii=False), flush=True)
 
-        res = repair_track_online(fp)
+        res = repair_track_online(fp, serato_dir_str=serato_dir_str)
         if res.get("sucesso"):
             updated_count += 1
         else:
@@ -1048,6 +1143,7 @@ def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Audio Health Doctor")
     parser.add_argument("--scan", action="store_true", help="Executa auditoria de saúde")
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3")
+    parser.add_argument("--serato", type=str, default="", help="Pasta _Serato_")
     parser.add_argument("--crate-raiz", type=str, default="", help="Crate raiz")
     parser.add_argument("--subcrate", type=str, default="", help="Subcrate")
     parser.add_argument("--no-subcrates", action="store_true", help="Não incluir subcrates")
@@ -1067,6 +1163,7 @@ def main():
 
     args = parser.parse_args()
     mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+    serato_dir = args.serato or ""
 
     if args.rename_track and args.new_name:
         res = rename_audio_track(args.rename_track, args.new_name)
@@ -1097,7 +1194,7 @@ def main():
             sys.exit(1)
 
     if args.repair_online:
-        res = repair_track_online(args.repair_online)
+        res = repair_track_online(args.repair_online, serato_dir_str=serato_dir)
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0 if res.get("sucesso") else 1)
 
@@ -1108,7 +1205,7 @@ def main():
             else:
                 with open(args.batch_repair_online, 'r', encoding='utf-8') as f:
                     fps = json.load(f)
-            batch_repair_tracks_online(fps)
+            batch_repair_tracks_online(fps, serato_dir_str=serato_dir)
             sys.exit(0)
         except Exception as e:
             print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))

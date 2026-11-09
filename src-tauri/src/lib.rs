@@ -2320,14 +2320,28 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn repair_track_online(app: AppHandle, filepath: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
-        cmd.arg("--repair-online");
-        cmd.arg(&filepath);
+    pub async fn repair_track_online(app: AppHandle, filepath: String, serato_dir: Option<String>) -> Result<String, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+            cmd.arg("--repair-online");
+            cmd.arg(&filepath);
+            if let Some(ref s_dir) = serato_dir {
+                if !s_dir.trim().is_empty() {
+                    cmd.arg("--serato");
+                    cmd.arg(s_dir);
+                }
+            }
 
-        let output = cmd.output().map_err(|e| format!("Falha ao reparar áudio online: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+            let res = cmd
+                .output()
+                .map_err(|e| format!("Falha ao reparar áudio online: {}", e))
+                .map(|output| String::from_utf8_lossy(&output.stdout).to_string());
+            let _ = tx.send(res);
+        });
+
+        rx.recv()
+            .map_err(|e| format!("Falha na execução em background da tarefa de reparação: {}", e))?
     }
 
     #[tauri::command]
@@ -2335,6 +2349,7 @@ mod commands {
         app: AppHandle,
         window: Window,
         filepaths_json: String,
+        serato_dir: Option<String>,
     ) -> Result<(), String> {
         let script = find_python_script(Some(&app), "audio_health.py");
         let window_clone = window.clone();
@@ -2344,6 +2359,12 @@ mod commands {
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-repair-online");
             cmd.arg(&filepaths_json);
+            if let Some(ref s_dir) = serato_dir {
+                if !s_dir.trim().is_empty() {
+                    cmd.arg("--serato");
+                    cmd.arg(s_dir);
+                }
+            }
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
 

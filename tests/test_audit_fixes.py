@@ -590,6 +590,96 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
             auto_cue.BACKUP_DB_PATH = home_original
             journal.JOURNAL_PATH = journal_original
 
+    # --------------------------------------------------------------------------
+    # REQUISITO 15: AUDIO HEALTH DOCTOR (DYNAMIC QUARANTINE & REPAIR TRAVA)
+    # --------------------------------------------------------------------------
+    def test_audio_health_quarantine_and_delta_threshold(self):
+        """Verifica resolução de pasta de quarentena dinâmica e trava de segurança de 15 segundos."""
+        # 1. Resolução dinâmica de quarentena com serato_dir explícito
+        custom_serato = self.root_path / "CustomSerato"
+        q_dir = audio_health.get_quarantine_dir(serato_dir_str=str(custom_serato))
+        self.assertEqual(q_dir.resolve(), (custom_serato / "Quarentena").resolve())
+        self.assertTrue(q_dir.exists())
+
+        # 2. Resolução dinâmica de quarentena a partir da árvore do arquivo MP3
+        track_in_serato_tree = self.serato_dir / "Subcrates" / "TestSong.mp3"
+        track_in_serato_tree.parent.mkdir(parents=True, exist_ok=True)
+        q_dir_file = audio_health.get_quarantine_dir(file_path=track_in_serato_tree)
+        self.assertEqual(q_dir_file.resolve(), (self.serato_dir / "Quarentena").resolve())
+        self.assertTrue(q_dir_file.exists())
+
+        # 3. Fallback seguro quando sem serato_dir e arquivo isolado (fora de qualquer árvore _Serato_)
+        isolated_dir = Path(tempfile.mkdtemp(prefix="serato_isolated_"))
+        try:
+            isolated_file = isolated_dir / "test.mp3"
+            isolated_file.touch()
+            q_fallback = audio_health.get_quarantine_dir(file_path=isolated_file)
+            self.assertEqual(q_fallback.resolve(), audio_health.QUARANTINE_DIR.resolve())
+        finally:
+            shutil.rmtree(isolated_dir, ignore_errors=True)
+
+    def test_audio_health_repair_duration_threshold_and_atomic_replace(self):
+        """Testa o fluxo de substituição atômica, quarentena e a trava rígida de 15s de delta."""
+        from unittest.mock import patch, MagicMock
+
+        # Simula arquivo original de 200 segundos
+        orig_file = self.mp3_dir / "TestTrack.mp3"
+        orig_file.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 25000)
+
+        # Mock da duração do original = 200.0s
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            if "__sync_work_" in path_str:
+                # Se for download candidato com 220s (delta = 20s > 15s)
+                mock_mp3.info.length = getattr(mock_mp3_side_effect, 'candidate_dur', 220.0)
+            else:
+                mock_mp3.info.length = 200.0
+            return mock_mp3
+
+        mock_mp3_side_effect.candidate_dur = 220.0
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect):
+
+            def fake_run(cmd, **kwargs):
+                # Extrai output template e cria o arquivo falso
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                out_path.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 30000)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            # Teste 1: Delta de 20s (220 vs 200) -> DEVE BLOQUEAR COM TRAVA DE SEGURANÇA
+            mock_mp3_side_effect.candidate_dur = 220.0
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertTrue(res.get("bloqueado_seguranca"))
+            self.assertIn("Substituição cancelada por segurança", res["erro"])
+            # Garante que nenhum arquivo temporário __sync_work_ ficou para trás
+            leftovers = list(self.mp3_dir.glob("*.__sync_work_*"))
+            self.assertEqual(len(leftovers), 0)
+
+            # Teste 2: Delta de 5s (205 vs 200) -> DEVE SUCEDER, QUARENTENAR E ATOMICAMENTE SUBSTITUIR
+            mock_mp3_side_effect.candidate_dur = 205.0
+            with patch("mutagen.id3.ID3"):
+                res_ok = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+                self.assertTrue(res_ok["sucesso"])
+                self.assertTrue(orig_file.exists())
+                # Verifica que foi enviado para a quarentena em <_Serato_>/Quarentena
+                q_dir = self.serato_dir / "Quarentena"
+                self.assertTrue(q_dir.exists())
+                quarantined_files = list(q_dir.glob("*_TestTrack.mp3"))
+                self.assertEqual(len(quarantined_files), 1)
+                # Garante que não sobrou nenhum resíduo temporário
+                leftovers = list(self.mp3_dir.glob("*.__sync_work_*"))
+                self.assertEqual(len(leftovers), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

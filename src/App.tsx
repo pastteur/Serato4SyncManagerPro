@@ -783,6 +783,7 @@ export const App: React.FC = () => {
             <div className={activeTab === 'health' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
               <AudioHealth
                 mp3Path={mp3Path}
+                seratoPath={seratoPath}
                 onAddLog={addLog}
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onMoveToTrash={handleMoveToTrash}
