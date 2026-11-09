@@ -618,32 +618,30 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         finally:
             shutil.rmtree(isolated_dir, ignore_errors=True)
 
-    def test_audio_health_repair_duration_threshold_and_atomic_replace(self):
-        """Testa o fluxo de substituição atômica, quarentena e a trava rígida de 15s de delta."""
+    def test_audio_health_repair_duration_threshold_boundaries(self):
+        """Valida rigorosamente os limites de tolerância de duração (<= 10.0s aceito, > 10.0s bloqueado)."""
         from unittest.mock import patch, MagicMock
 
-        # Simula arquivo original de 200 segundos
-        orig_file = self.mp3_dir / "TestTrack.mp3"
+        orig_file = self.mp3_dir / "BoundariesTrack.mp3"
         orig_file.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 25000)
 
-        # Mock da duração do original = 200.0s
         def mock_mp3_side_effect(path_str):
             mock_mp3 = MagicMock()
             if "__sync_work_" in path_str:
-                # Se for download candidato com 220s (delta = 20s > 15s)
-                mock_mp3.info.length = getattr(mock_mp3_side_effect, 'candidate_dur', 220.0)
+                mock_mp3.info.length = getattr(mock_mp3_side_effect, 'candidate_dur', 200.0)
+                mock_mp3.info.sample_rate = 44100
+                mock_mp3.info.bitrate = 320000
             else:
-                mock_mp3.info.length = 200.0
+                mock_mp3.info.length = getattr(mock_mp3_side_effect, 'orig_dur', 200.0)
             return mock_mp3
 
-        mock_mp3_side_effect.candidate_dur = 220.0
-
         with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
              patch("subprocess.run") as mock_subproc, \
-             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect):
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect), \
+             patch("mutagen.id3.ID3"):
 
             def fake_run(cmd, **kwargs):
-                # Extrai output template e cria o arquivo falso
                 out_idx = cmd.index("-o") + 1
                 out_tmpl = cmd[out_idx]
                 out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
@@ -654,32 +652,268 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
 
             mock_subproc.side_effect = fake_run
 
-            # Teste 1: Delta de 20s (220 vs 200) -> DEVE BLOQUEAR COM TRAVA DE SEGURANÇA
-            mock_mp3_side_effect.candidate_dur = 220.0
+            # 1. Delta 5.0s (205.0 vs 200.0) -> ACEITO (<= 10s)
+            mock_mp3_side_effect.orig_dur = 200.0
+            mock_mp3_side_effect.candidate_dur = 205.0
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertTrue(res["sucesso"], "Diferença de 5s deve ser aceita")
+
+            # 2. Delta 9.9s (209.9 vs 200.0) -> ACEITO (<= 10s)
+            mock_mp3_side_effect.candidate_dur = 209.9
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertTrue(res["sucesso"], "Diferença de 9.9s deve ser aceita")
+
+            # 3. Delta 10.0s (210.0 vs 200.0) -> ACEITO (<= 10s)
+            mock_mp3_side_effect.candidate_dur = 210.0
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertTrue(res["sucesso"], "Diferença de 10.0s deve ser aceita no limite")
+
+            # 4. Delta 10.1s (210.1 vs 200.0) -> BLOQUEADO (> 10s)
+            mock_mp3_side_effect.candidate_dur = 210.1
             res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
             self.assertFalse(res["sucesso"])
             self.assertTrue(res.get("bloqueado_seguranca"))
-            self.assertIn("Substituição cancelada por segurança", res["erro"])
-            # Garante que nenhum arquivo temporário __sync_work_ ficou para trás
-            leftovers = list(self.mp3_dir.glob("*.__sync_work_*"))
-            self.assertEqual(len(leftovers), 0)
+            self.assertIn("difere da versão encontrada", res["erro"])
 
-            # Teste 2: Delta de 5s (205 vs 200) -> DEVE SUCEDER, QUARENTENAR E ATOMICAMENTE SUBSTITUIR
-            mock_mp3_side_effect.candidate_dur = 205.0
-            with patch("mutagen.id3.ID3"):
-                res_ok = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
-                self.assertTrue(res_ok["sucesso"])
+            # 5. Delta 14.9s (214.9 vs 200.0) -> BLOQUEADO (> 10s)
+            mock_mp3_side_effect.candidate_dur = 214.9
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertTrue(res.get("bloqueado_seguranca"))
+
+            # 6. Delta 15.0s (215.0 vs 200.0) -> BLOQUEADO (> 10s)
+            mock_mp3_side_effect.candidate_dur = 215.0
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertTrue(res.get("bloqueado_seguranca"))
+
+            # 7. Duração inválida (0s no original) -> BLOQUEADO
+            mock_mp3_side_effect.orig_dur = 0.0
+            mock_mp3_side_effect.candidate_dur = 200.0
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertTrue(res.get("bloqueado_seguranca"))
+
+    def test_audio_health_repair_rollback_on_failure(self):
+        """Comprova rollback transacional quando ocorre falha durante a instalação."""
+        from unittest.mock import patch, MagicMock
+
+        orig_file = self.mp3_dir / "RollbackTrack.mp3"
+        original_bytes = b"\xFF\xFB\x90\x00ORIGINAL_TRACK_DATA" + b"\x00" * 25000
+        orig_file.write_bytes(original_bytes)
+
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            mock_mp3.info.length = 180.0
+            mock_mp3.info.sample_rate = 44100
+            mock_mp3.info.bitrate = 320000
+            return mock_mp3
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect), \
+             patch("mutagen.id3.ID3"):
+
+            def fake_run(cmd, **kwargs):
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                out_path.write_bytes(b"\xFF\xFB\x90\x00DOWNLOADED_DATA" + b"\x00" * 30000)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            # Injeta falha em os.replace na hora da substituição definitiva
+            real_replace = os.replace
+            replace_calls = 0
+
+            def failing_replace(src, dst):
+                nonlocal replace_calls
+                replace_calls += 1
+                if replace_calls == 1:
+                    # Primeira chamada tenta instalar o candidato: forçar erro de I/O
+                    raise OSError("Simulated Disk I/O Failure during track install")
+                return real_replace(src, dst)
+
+            with patch("os.replace", side_effect=failing_replace):
+                res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+                self.assertFalse(res["sucesso"])
+                self.assertIn("Rollback", res["erro"])
+                # Comprovação absoluta: O original foi preservado com seu conteúdo idêntico
                 self.assertTrue(orig_file.exists())
-                # Verifica que foi enviado para a quarentena em <_Serato_>/Quarentena
-                q_dir = self.serato_dir / "Quarentena"
-                self.assertTrue(q_dir.exists())
-                quarantined_files = list(q_dir.glob("*_TestTrack.mp3"))
-                self.assertEqual(len(quarantined_files), 1)
-                # Garante que não sobrou nenhum resíduo temporário
-                leftovers = list(self.mp3_dir.glob("*.__sync_work_*"))
-                self.assertEqual(len(leftovers), 0)
+                self.assertEqual(orig_file.read_bytes(), original_bytes)
+                # Nenhum arquivo temporário de trabalho deixado
+                work_files = list(self.mp3_dir.glob("*.__sync_work_*"))
+                self.assertEqual(len(work_files), 0)
+
+    def test_audio_health_serato_lock_blocks_repair(self):
+        """Comprova que a presença de processo Serato aberto bloqueia reparação individual e em lote."""
+        from unittest.mock import patch
+
+        orig_file = self.mp3_dir / "LockTrack.mp3"
+        orig_file.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 25000)
+
+        with patch("audio_health.is_serato_running_py", return_value=(True, "Processo 'Serato DJ Pro' está em execução ativa")):
+            # Reparação individual
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertTrue(res.get("bloqueado_serato"))
+            self.assertIn("BLOQUEIO DE SEGURANÇA", res["erro"])
+
+    def test_audio_health_quarantine_metadata_manifest(self):
+        """Comprova que o arquivo substituído gera manifesto .meta.json detalhado na Quarentena."""
+        from unittest.mock import patch, MagicMock
+
+        orig_file = self.mp3_dir / "ManifestTrack.mp3"
+        orig_file.write_bytes(b"\xFF\xFB\x90\x00ORIGINAL_CONTENT" + b"\x00" * 25000)
+
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            mock_mp3.info.length = 200.0
+            mock_mp3.info.sample_rate = 44100
+            mock_mp3.info.bitrate = 320000
+            return mock_mp3
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect), \
+             patch("mutagen.id3.ID3"):
+
+            def fake_run(cmd, **kwargs):
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                out_path.write_bytes(b"\xFF\xFB\x90\x00CANDIDATE_CONTENT" + b"\x00" * 30000)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertTrue(res["sucesso"])
+
+            q_dir = self.serato_dir / "Quarentena"
+            manifests = list(q_dir.glob("*_ManifestTrack.mp3.meta.json"))
+            self.assertEqual(len(manifests), 1, "Manifesto .meta.json deve existir na quarentena")
+
+            manifest_content = json.loads(manifests[0].read_text(encoding='utf-8'))
+            self.assertEqual(manifest_content["caminho_original"], str(orig_file))
+            self.assertEqual(manifest_content["arquivo_nome"], "ManifestTrack.mp3")
+            self.assertEqual(manifest_content["duracao_original"], 200.0)
+            self.assertEqual(manifest_content["status"], "substituicao_confirmada")
+
+    def test_audio_health_concurrency_file_lock_rejection(self):
+        """Comprova que duas tarefas tentando reparar o mesmo arquivo simultaneamente são bloqueadas."""
+        from unittest.mock import patch
+        import fcntl
+        orig_file = self.mp3_dir / "ConcurrentTrack.mp3"
+        orig_file.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 25000)
+
+        lock_file = orig_file.parent / f".{orig_file.name}.repair_lock"
+        fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+        try:
+            with patch("audio_health.is_serato_running_py", return_value=(False, "")):
+                res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+                self.assertFalse(res["sucesso"])
+                self.assertIn("já está sendo processado por outra tarefa", res["erro"])
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            if lock_file.exists():
+                lock_file.unlink(missing_ok=True)
+
+    def test_audio_health_id3_critical_tag_loss_aborts_repair(self):
+        """Comprova que se a validação pós-escrita detectar perda de tags Serato GEOB, o processo é abortado."""
+        from unittest.mock import patch, MagicMock
+
+        orig_file = self.mp3_dir / "CriticalTagTrack.mp3"
+        orig_file.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 25000)
+
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            mock_mp3.info.length = 150.0
+            mock_mp3.info.sample_rate = 44100
+            mock_mp3.info.bitrate = 320000
+            return mock_mp3
+
+        # Simula objeto ID3 original contendo GEOB:Serato Markers2
+        orig_mock_id3 = {
+            "GEOB:Serato Markers2": MagicMock(data=b"SERATO_MARKERS2_BINARY_DATA")
+        }
+        # Simula arquivo salvo onde GEOB:Serato Markers2 sumiu ou ficou vazio
+        reopened_mock_id3 = {}
+
+        call_count = 0
+        def mock_id3_call(path_str):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                return MagicMock(__getitem__=lambda s, k: orig_mock_id3[k], keys=lambda: list(orig_mock_id3.keys()))
+            else:
+                # Reabertura pós-salvamento: tag ausente!
+                return MagicMock(__getitem__=lambda s, k: reopened_mock_id3[k], __contains__=lambda s, k: k in reopened_mock_id3)
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect), \
+             patch("mutagen.id3.ID3", side_effect=mock_id3_call):
+
+            def fake_run(cmd, **kwargs):
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                out_path.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 30000)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertIn("Falha ao preservar e comprovar metadados", res["erro"])
+            self.assertTrue(orig_file.exists())
+
+    def test_music_analysis_batch_zero_limit_analyzes_all(self):
+        """Comprova que music_analysis.py com limit=0 analisa todas as faixas da biblioteca."""
+        import music_analysis
+        sub = self.mp3_dir / "Sub"
+        sub.mkdir(parents=True, exist_ok=True)
+        self._create_dummy_mp3(self.mp3_dir / "Track1.mp3")
+        self._create_dummy_mp3(self.mp3_dir / "Track2.mp3")
+        self._create_dummy_mp3(sub / "Track3.mp3")
+
+        res = music_analysis.analyze_batch(str(self.mp3_dir), limit=0, write=False, only_missing=False, emit=False)
+        self.assertEqual(res["total"], 3, "limit=0 deve analisar 100% das faixas encontradas")
+
+    def test_duplicates_tool_single_folder_internal_audit(self):
+        """Comprova que duplicates_tool.py funciona com apenas 1 pasta para auditoria interna."""
+        import duplicates_tool
+        folder = self.mp3_dir / "InternalAudit"
+        sub1 = folder / "SubcrateA"
+        sub2 = folder / "SubcrateB"
+        sub1.mkdir(parents=True, exist_ok=True)
+        sub2.mkdir(parents=True, exist_ok=True)
+
+        audio_data = b"\xFF\xFB\x90\x00DUPLICATE_AUDIO_DATA" + b"\x00" * 60000
+        self._create_dummy_mp3(sub1 / "Track.mp3", audio_content=audio_data)
+        self._create_dummy_mp3(sub2 / "Track.mp3", audio_content=audio_data)
+
+        res = duplicates_tool.scan_roots([str(folder)], include_serato=None, progress=False)
+        self.assertTrue(res["sucesso"])
+        self.assertEqual(res["total_arquivos"], 2)
+        self.assertEqual(res["copias_redundantes"], 1, "Deve identificar 1 cópia redundante na auditoria interna")
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

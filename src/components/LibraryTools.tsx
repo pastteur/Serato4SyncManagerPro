@@ -71,7 +71,6 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
   const [busyHealth, setBusyHealth] = useState(false);
 
   // BPM / tom
-  const [analysisLimit, setAnalysisLimit] = useState<number>(50);
   const [analysisWrite, setAnalysisWrite] = useState<boolean>(false);
   const [analysisIncludeFilled, setAnalysisIncludeFilled] = useState<boolean>(false);
   const [analysisRows, setAnalysisRows] = useState<any[]>([]);
@@ -168,10 +167,10 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
       setBusyAnalysis(true);
       setAnalysisRows([]);
       setAnalysisProgress(null);
-      onAddLog(`🎚️ Análise de BPM/Tom iniciada (limite ${analysisLimit}${analysisWrite ? ', gravando tags' : ', somente leitura'}).`);
+      onAddLog(`🎚️ Análise de BPM/Tom iniciada em toda a biblioteca (${analysisWrite ? 'gravando tags' : 'somente leitura'}).`);
       try {
         const res = await call<any>('analyze_tracks_batch', {
-          mp3Path, limit: analysisLimit, write: analysisWrite, includeFilled: analysisIncludeFilled,
+          mp3Path, limit: 0, write: analysisWrite, includeFilled: analysisIncludeFilled,
         });
         onAddLog(`✅ Análise concluída: ${res.analisadas} analisadas, ${res.gravadas} gravadas, ${res.erros} erros.`);
         loadOps();
@@ -185,7 +184,7 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
       setConfirm({
         open: true,
         title: 'Gravar BPM e tom nas tags?',
-        message: `Serão gravados BPM e tom (Camelot) em até ${analysisLimit} MP3 que ainda não têm esses campos.`,
+        message: 'Serão gravados BPM e tom (Camelot) em todas as faixas MP3 da biblioteca que ainda não têm esses campos.',
         detail: 'Cada alteração fica registrada no journal e pode ser desfeita na seção "Desfazer". Recomendado: rode a análise sem gravar primeiro e confira os resultados.',
         run: () => { setConfirm(c => ({ ...c, open: false })); doRun(); },
       });
@@ -399,13 +398,8 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
       </div>
 
       {/* BPM / Tom */}
-      <Card title="BPM e tonalidade (Camelot)" icon={<Sparkles className="w-4 h-4 text-serato-gold" />} hint="análise local, sem internet">
-        <div className="flex flex-wrap items-end gap-3">
-          <Field label="Limite de faixas">
-            <input type="number" min={1} max={2000} value={analysisLimit}
-              onChange={e => setAnalysisLimit(Math.max(1, Number(e.target.value) || 1))}
-              className={`${inputCls} w-24`} />
-          </Field>
+      <Card title="BPM e tonalidade (Camelot)" icon={<Sparkles className="w-4 h-4 text-serato-gold" />} hint="análise local de toda a biblioteca, sem internet">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="flex items-center gap-2 text-xs text-slate-300">
             <input type="checkbox" checked={analysisWrite} onChange={e => setAnalysisWrite(e.target.checked)} />
             Gravar nas tags (MP3)
@@ -416,7 +410,7 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
           </label>
           <Btn tone="primary" onClick={runAnalysis} disabled={!mp3Path || busyAnalysis}>
             <Play className="w-3.5 h-3.5" />
-            <span>{busyAnalysis ? 'Analisando...' : 'Analisar lote'}</span>
+            <span>{busyAnalysis ? 'Analisando biblioteca toda...' : 'Analisar biblioteca toda'}</span>
           </Btn>
         </div>
         {analysisProgress && (

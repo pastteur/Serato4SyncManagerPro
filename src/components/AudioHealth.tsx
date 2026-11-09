@@ -163,6 +163,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   const [downloadQueue, setDownloadQueue] = useState<DownloadJob[]>([]);
   const [isQueuePaused, setIsQueuePaused] = useState<boolean>(false);
   const [isDrawerOpen, setIsDrawerOpen] = useState<boolean>(false);
+  const activeJobIdsRef = useRef<Set<string>>(new Set());
   const activeJobsCount = useMemo(() => {
     return downloadQueue.filter(j => j.status === 'downloading' || j.status === 'duration_check').length;
   }, [downloadQueue]);
@@ -176,12 +177,21 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     return downloadQueue.filter(j => j.status === 'error').length;
   }, [downloadQueue]);
 
-  // Enfileirar faixas na fila de download
+  // Enfileirar faixas na fila de download com deduplicação estrita de caminho
   const enqueueTracks = (tracksToQueue: any[]) => {
     setDownloadQueue(prev => {
       const existingIds = new Set(prev.map(j => j.id));
+      const existingPaths = new Set(prev.map(j => j.item?.caminho));
+      const seenPaths = new Set<string>();
+
       const newJobs: DownloadJob[] = tracksToQueue
-        .filter(t => !existingIds.has(t.id))
+        .filter(t => {
+          if (!t.caminho || existingIds.has(t.id) || existingPaths.has(t.caminho) || seenPaths.has(t.caminho)) {
+            return false;
+          }
+          seenPaths.add(t.caminho);
+          return true;
+        })
         .map(t => ({
           id: t.id,
           item: t,
@@ -218,14 +228,19 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     const availableSlots = MAX_CONCURRENT - running;
     if (availableSlots <= 0) return;
 
-    const nextJobs = downloadQueue.filter(j => j.status === 'queued').slice(0, availableSlots);
+    const nextJobs = downloadQueue
+      .filter(j => j.status === 'queued' && !activeJobIdsRef.current.has(j.id))
+      .slice(0, availableSlots);
     if (nextJobs.length === 0) return;
+
+    // Registra imediatamente na referência para evitar reentrâncias de render
+    nextJobs.forEach(nj => activeJobIdsRef.current.add(nj.id));
 
     // Marca imediatamente como downloading
     setDownloadQueue(prev =>
       prev.map(j =>
         nextJobs.some(nj => nj.id === j.id)
-          ? { ...j, status: 'downloading', progressPercent: 20, message: 'Buscando e baixando áudio 320k...', startedAt: Date.now() }
+          ? { ...j, status: 'downloading', progressPercent: 25, message: 'Buscando, baixando e validando áudio 320k...', startedAt: Date.now() }
           : j
       )
     );
@@ -235,17 +250,6 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       try {
         if (isTauri) {
           const { invoke } = await import('@tauri-apps/api/core');
-
-          // Atualiza status para duration_check após download começar
-          setTimeout(() => {
-            setDownloadQueue(prev =>
-              prev.map(j =>
-                j.id === job.id && j.status === 'downloading'
-                  ? { ...j, status: 'duration_check', progressPercent: 65, message: 'Validando duração e integridade...' }
-                  : j
-              )
-            );
-          }, 3000);
 
           const resJson = await invoke<string>('repair_track_online', {
             filepath: job.item.caminho,
@@ -296,6 +300,8 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           )
         );
         onAddLog(`❌ [Fila] Exceção em ${job.item.arquivo}: ${err}`);
+      } finally {
+        activeJobIdsRef.current.delete(job.id);
       }
     });
   }, [downloadQueue, isQueuePaused, isTauri, seratoPath, onAddLog]);

@@ -178,17 +178,17 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     localStorage.removeItem('serato_duplicates_custom_roots');
   };
 
-  // Executar a análise lateral multi-pastas
+  // Executar a análise de duplicados (interna de 1 pasta ou lateral multi-pastas)
   const handleRunMultiScan = async () => {
     if (!isTauri) return;
-    const effectiveRoots = [...customRoots];
-    const hasSerato = includeSerato && Boolean(mp3Path);
+    const effectiveRoots = customRoots.length > 0 ? [...customRoots] : (mp3Path ? [mp3Path] : []);
+    const hasSerato = includeSerato && Boolean(mp3Path) && (mp3Path ? !effectiveRoots.includes(mp3Path) : false);
 
     if (effectiveRoots.length === 0 && !hasSerato) {
       setModalConfig({
         isOpen: true,
         title: 'Nenhuma Pasta Informada',
-        message: 'Por favor, adicione ao menos uma pasta ou ative a opção de cruzar com a biblioteca Serato para iniciar a análise lateral.',
+        message: 'Por favor, adicione ao menos uma pasta ou clique em "Usar Biblioteca Padrão" para iniciar a auditoria.',
         confirmText: 'OK',
         variant: 'info',
         onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
@@ -196,22 +196,14 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
       return;
     }
 
-    if (effectiveRoots.length === 1 && !hasSerato) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Apenas 1 Pasta Informada',
-        message: 'A análise lateral compara arquivos entre diferentes pastas ou contra a biblioteca Serato. Adicione uma segunda pasta ou marque a opção de cruzar com o Serato.',
-        confirmText: 'Entendido',
-        variant: 'warning',
-        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
-      });
-      return;
-    }
+    const isInternalAudit = effectiveRoots.length === 1 && !hasSerato;
 
     setIsScanningMulti(true);
     setMultiProgress({
-      fase: 'Iniciando Análise Lateral Cruzada...',
-      detalhe: `Preparando ${effectiveRoots.length} pasta(s) para catalogação e cruzamento...`
+      fase: isInternalAudit ? 'Iniciando Auditoria Interna de Duplicados...' : 'Iniciando Análise Lateral Cruzada...',
+      detalhe: isInternalAudit
+        ? `Auditando ${effectiveRoots[0]} em busca de duplicatas internas...`
+        : `Preparando ${effectiveRoots.length} pasta(s) para catalogação e cruzamento...`
     });
 
     let unlisten: (() => void) | undefined;
@@ -602,6 +594,25 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                   <span>Adicionar Pasta...</span>
                 </button>
 
+                {mp3Path && !customRoots.includes(mp3Path) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomRoots(prev => {
+                        const next = Array.from(new Set([...prev, mp3Path]));
+                        localStorage.setItem('serato_duplicates_custom_roots', JSON.stringify(next));
+                        return next;
+                      });
+                    }}
+                    disabled={isScanningMulti}
+                    className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 border border-emerald-500/50 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    title="Adicionar a pasta padrão da Biblioteca para auditoria interna"
+                  >
+                    <HardDrive className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Usar Biblioteca Padrão</span>
+                  </button>
+                )}
+
                 {customRoots.length > 0 && (
                   <button
                     type="button"
@@ -633,18 +644,18 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
               <button
                 type="button"
                 onClick={handleRunMultiScan}
-                disabled={isScanningMulti || (customRoots.length === 0 && (!includeSerato || !mp3Path))}
+                disabled={isScanningMulti || (customRoots.length === 0 && !mp3Path)}
                 className="text-xs font-bold px-4 py-2 rounded-lg bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-lg shadow-purple-900/40 transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
               >
                 {isScanningMulti ? (
                   <>
                     <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Analisando Lateralmente...</span>
+                    <span>Analisando Duplicados...</span>
                   </>
                 ) : (
                   <>
                     <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>Iniciar Análise Lateral</span>
+                    <span>{customRoots.length <= 1 ? 'Iniciar Auditoria de Duplicados' : 'Iniciar Análise Lateral'}</span>
                   </>
                 )}
               </button>

@@ -545,15 +545,42 @@ def scan_audio_health(
     return res
 
 
+def is_serato_running_py() -> tuple:
+    """
+    Verifica se o Serato DJ Pro / Lite / Scratch Live está em execução no sistema.
+    Seguro por padrão (fail-closed): se a checagem falhar ou houver erro, bloqueia.
+    Retorna (is_running: bool, motivo: str).
+    """
+    for proc_name in ["Serato DJ Pro", "Serato DJ Lite", "Serato DJ"]:
+        try:
+            res = subprocess.run(["pgrep", "-x", proc_name], capture_output=True, timeout=3)
+            if res.returncode == 0:
+                return True, f"Processo '{proc_name}' está em execução ativa no macOS. Encerre o Serato antes de modificar faixas."
+            elif res.returncode not in (0, 1):
+                return True, f"Falha na detecção de processos (pgrep código {res.returncode}). Operação bloqueada preventivamente."
+        except Exception as e:
+            return True, f"Erro ao verificar processos do sistema ({e}). Operação bloqueada preventivamente."
+    return False, ""
+
+
 def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     """
     Substitui a faixa danificada baixando uma versão 320kbps de alta fidelidade (44.100 Hz CBR) via yt-dlp.
-    Utiliza estratégia de busca multi-provedor (YouTube Oficial -> YouTube Geral -> SoundCloud) para contornar
-    restrições de palavras sensíveis ou ausência de catálogo.
-    Preserva 100% dos marcadores Serato (Cue points, Beatgrid, BPM e Key) e contagens de execução do arquivo original.
-    Quarentena no diretório <_Serato_>/Quarentena/.
+    Utiliza estratégia de busca multi-provedor (YouTube Oficial -> YouTube Geral -> SoundCloud).
+    Preserva 100% dos marcadores Serato (Cue points, Beatgrid, BPM e Key) e tags ID3v2.3 do arquivo original.
+    Operação transacional com backup de segurança local, substituição via os.replace e rollback automático em falhas.
+    Quarentena no diretório <_Serato_>/Quarentena/ acompanhada de manifesto JSON (.meta.json).
     Download temporário realizado no diretório de destino da faixa usando padrão .__sync_work_<timestamp>.mp3.
     """
+    # 1. BLOQUEIO OBRIGATÓRIO SERATO LOCK
+    is_running, lock_reason = is_serato_running_py()
+    if is_running:
+        return {
+            "sucesso": False,
+            "bloqueado_serato": True,
+            "erro": f"BLOQUEIO DE SEGURANÇA: {lock_reason}"
+        }
+
     yt_dlp = get_yt_dlp_bin()
     if not yt_dlp:
         return {
@@ -564,6 +591,24 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     file_p = Path(filepath_str)
     if not file_p.exists():
         return {"sucesso": False, "erro": "Arquivo original não encontrado no disco."}
+
+    # 2. BLOQUEIO DE CONCORRÊNCIA SOBRE O MESMO ARQUIVO
+    lock_file = file_p.parent / f".{file_p.name}.repair_lock"
+    lock_fd = None
+    try:
+        lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_RDWR)
+        import fcntl
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        if lock_fd is not None:
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+        return {
+            "sucesso": False,
+            "erro": f"Arquivo já está sendo processado por outra tarefa concorrente: {file_p.name}"
+        }
 
     stem = file_p.stem
     # Limpa sufixos de Crate comum (ex: "Strike - Aquela Historia - Pop Rock" -> "Strike - Aquela Historia")
@@ -587,10 +632,6 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     env = os.environ.copy()
     env["PATH"] = f"{FFMPEG_DIR}:{env.get('PATH', '')}"
 
-    # Estratégia resiliente em cascata:
-    # 1. YouTube Oficial (áudio oficial de alta fidelidade)
-    # 2. YouTube Geral (pesquisa ampla direta)
-    # 3. SoundCloud (excelente para faixas que o YouTube filtra ou bloqueia por palavras restritas)
     search_strategies = [
         ("YouTube Oficial", f"ytsearch3:{clean_query} audio oficial"),
         ("YouTube Geral", f"ytsearch3:{clean_query}"),
@@ -600,50 +641,6 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     downloaded_mp3 = None
     used_provider = ""
     last_err = ""
-
-    for provider_name, search_term in search_strategies:
-        # CRÍTICO PARA DJS:
-        # 1. Força ffmpeg a resamplar para 44.100 Hz e 320 kbps CBR
-        # 2. Filtra vídeos com duração compatível (45s a 720s) e ignora sped up/nightcore
-        # 3. Baixa apenas o primeiro resultado válido
-        cmd = [
-            yt_dlp,
-            search_term,
-            "-x",
-            "--audio-format", "mp3",
-            "--audio-quality", "320K",
-            "--postprocessor-args", "ExtractAudio:-ar 44100 -b:a 320k -id3v2_version 3",
-            "--match-filter", "!is_live & !is_short & duration > 45 & duration < 720 & title !~= '(?i)(sped up|speed up|nightcore|acelerad|pitch|chipmunk)'",
-            "--max-downloads", "1",
-            "-o", out_template,
-            "--no-playlist",
-            "--no-check-certificates",
-            "--quiet",
-            "--no-warnings"
-        ]
-
-        try:
-            proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-            if proc.returncode not in (0, 101):
-                last_err = proc.stderr.decode('utf-8', errors='ignore')
-
-            if temp_target_file.exists() and temp_target_file.stat().st_size > 0:
-                downloaded_mp3 = temp_target_file
-                used_provider = provider_name
-                break
-            else:
-                # Caso yt-dlp tenha salvo com sufixo ou nome alternativo temporário
-                matches = list(file_p.parent.glob(f"{file_p.stem}.__sync_work_{timestamp_str}*.mp3"))
-                if matches and matches[0].stat().st_size > 0:
-                    downloaded_mp3 = matches[0]
-                    used_provider = provider_name
-                    break
-        except subprocess.TimeoutExpired:
-            last_err = f"Timeout na busca ({provider_name})"
-            continue
-        except Exception as e:
-            last_err = str(e)
-            continue
 
     def _cleanup_temp():
         try:
@@ -655,14 +652,53 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
         except Exception:
             pass
 
-    if not downloaded_mp3 or not downloaded_mp3.exists():
-        _cleanup_temp()
-        return {
-            "sucesso": False,
-            "erro": f"Nenhuma versão compatível encontrada no YouTube ou SoundCloud. Detalhes: {last_err[:120]}" if last_err else "Nenhuma versão encontrada no YouTube ou SoundCloud com os filtros de qualidade DJ."
-        }
-
     try:
+        for provider_name, search_term in search_strategies:
+            cmd = [
+                yt_dlp,
+                search_term,
+                "-x",
+                "--audio-format", "mp3",
+                "--audio-quality", "320K",
+                "--postprocessor-args", "ExtractAudio:-ar 44100 -b:a 320k -id3v2_version 3",
+                "--match-filter", "!is_live & !is_short & duration > 45 & duration < 720 & title !~= '(?i)(sped up|speed up|nightcore|acelerad|pitch|chipmunk)'",
+                "--max-downloads", "1",
+                "-o", out_template,
+                "--no-playlist",
+                "--no-check-certificates",
+                "--quiet",
+                "--no-warnings"
+            ]
+
+            try:
+                proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+                if proc.returncode not in (0, 101):
+                    last_err = proc.stderr.decode('utf-8', errors='ignore')
+
+                if temp_target_file.exists() and temp_target_file.stat().st_size > 0:
+                    downloaded_mp3 = temp_target_file
+                    used_provider = provider_name
+                    break
+                else:
+                    matches = list(file_p.parent.glob(f"{file_p.stem}.__sync_work_{timestamp_str}*.mp3"))
+                    if matches and matches[0].stat().st_size > 0:
+                        downloaded_mp3 = matches[0]
+                        used_provider = provider_name
+                        break
+            except subprocess.TimeoutExpired:
+                last_err = f"Timeout na busca ({provider_name})"
+                continue
+            except Exception as e:
+                last_err = str(e)
+                continue
+
+        if not downloaded_mp3 or not downloaded_mp3.exists():
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Nenhuma versão compatível encontrada no YouTube ou SoundCloud. Detalhes: {last_err[:120]}" if last_err else "Nenhuma versão encontrada no YouTube ou SoundCloud com os filtros de qualidade DJ."
+            }
+
         # Checagem estrita de integridade do download
         if downloaded_mp3.stat().st_size < 20480:
             _cleanup_temp()
@@ -675,15 +711,21 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
         try:
             from mutagen.mp3 import MP3
             orig_mp3 = MP3(str(file_p))
-            orig_dur = round(orig_mp3.info.length, 1)
+            if orig_mp3.info:
+                orig_dur = round(orig_mp3.info.length, 1)
         except Exception:
             pass
 
         cand_dur = 0.0
+        cand_sample_rate = 0
+        cand_bitrate = 0
         try:
             from mutagen.mp3 import MP3
             cand_mp3 = MP3(str(downloaded_mp3))
-            cand_dur = round(cand_mp3.info.length, 1)
+            if cand_mp3.info:
+                cand_dur = round(cand_mp3.info.length, 1)
+                cand_sample_rate = getattr(cand_mp3.info, 'sample_rate', 0)
+                cand_bitrate = getattr(cand_mp3.info, 'bitrate', 0)
         except Exception as e:
             _cleanup_temp()
             return {
@@ -691,32 +733,55 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
                 "erro": f"Arquivo baixado possui frames MPEG inválidos: {e}"
             }
 
-        # TRAVA RÍGIDA DE SEGURANÇA POR TEMPO (Tolerância máxima: < 15 segundos)
-        # Protege o DJ contra substituição caso o arquivo esteja com nome trocado
-        # Aplica a trava se o arquivo original tem duração de música normal (> 50s)
-        if orig_dur > 50.0 and cand_dur > 0.0:
-            diff_time = round(abs(cand_dur - orig_dur), 1)
-            if diff_time >= 15.0:
-                _cleanup_temp()
-                return {
-                    "sucesso": False,
-                    "bloqueado_seguranca": True,
-                    "erro": f"Substituição cancelada por segurança: Duração local ({orig_dur}s) difere da versão encontrada ({cand_dur}s) por {diff_time}s (limite de < 15s). Evitou sobrescrever faixa possivelmente com nome trocado.",
-                    "duracao_local": orig_dur,
-                    "duracao_baixada": cand_dur,
-                    "diferenca": diff_time
-                }
+        # TRAVA RÍGIDA DE SEGURANÇA POR TEMPO (Tolerância máxima: <= 10.0 segundos)
+        if orig_dur <= 0.0 or cand_dur <= 0.0:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "bloqueado_seguranca": True,
+                "erro": f"Substituição cancelada por segurança: Duração original ({orig_dur}s) ou do candidato ({cand_dur}s) é inválida ou impossível de determinar.",
+                "duracao_local": orig_dur,
+                "duracao_baixada": cand_dur
+            }
 
-        # Preserva tags Serato e ID3v2.3 do arquivo original (cues, beatgrid, bpm, tom, play counts, etc.)
+        diff_time = round(abs(cand_dur - orig_dur), 1)
+        max_tolerance = 10.0 if orig_dur > 50.0 else min(3.0, round(orig_dur * 0.10, 1))
+        if diff_time > max_tolerance:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "bloqueado_seguranca": True,
+                "erro": f"Substituição cancelada por segurança: Duração local ({orig_dur}s) difere da versão encontrada ({cand_dur}s) por {diff_time}s (limite de <= {max_tolerance}s). Evitou sobrescrever faixa possivelmente com nome trocado.",
+                "duracao_local": orig_dur,
+                "duracao_baixada": cand_dur,
+                "diferenca": diff_time
+            }
+
+        # REVALIDAÇÃO SERATO LOCK ANTES DA GRAVAÇÃO DEFINITIVA
+        is_running_again, lock_reason_again = is_serato_running_py()
+        if is_running_again:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "bloqueado_serato": True,
+                "erro": f"BLOQUEIO DE SEGURANÇA IMEDIATO: {lock_reason_again}"
+            }
+
+        # REGISTRO NO JOURNAL DE ALTERAÇÕES
+        try:
+            import journal
+            journal.record_id3_before_change(str(file_p), action="repair_online")
+        except Exception:
+            pass
+
+        # PRESERVAÇÃO E AUDITORIA COMPROVADA DE METADADOS ID3v2.3 E SERATO
         try:
             from mutagen.id3 import ID3
             orig_id3 = ID3(str(file_p))
             new_id3 = ID3(str(downloaded_mp3))
-            
-            # Copia todas as tags ID3 relevantes do original para o novo
-            # Dando prioridade para marcadores Serato, beatgrid, bpm, tom e playcount
+
+            critical_keys = []
             for k in list(orig_id3.keys()):
-                # Tags críticas que devem sempre ser preservadas
                 is_critical = (
                     k.startswith('GEOB') or
                     k.startswith('TBPM') or
@@ -726,28 +791,92 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
                     k.startswith('TIT2') or
                     k.startswith('TPE1') or
                     k.startswith('TALB') or
-                    k.startswith('TCON')
+                    k.startswith('TCON') or
+                    k.startswith('TRCK') or
+                    k.startswith('TYER') or
+                    k.startswith('TDRC')
                 )
                 if is_critical or k not in new_id3:
                     new_id3[k] = orig_id3[k]
+                    if is_critical:
+                        critical_keys.append(k)
 
             new_id3.save(str(downloaded_mp3), v2_version=3)
-        except Exception:
+
+            # VALIDAÇÃO PÓS-ESCRITA: Comprova que as tags críticas realmente foram salvas
+            reopened_id3 = ID3(str(downloaded_mp3))
+            for ck in critical_keys:
+                if ck not in reopened_id3:
+                    raise ValueError(f"Tag crítica '{ck}' ausente no arquivo pós-gravação.")
+                if ck.startswith('GEOB') and orig_id3[ck].data != reopened_id3[ck].data:
+                    raise ValueError(f"Dados binários de '{ck}' divergentes no arquivo de destino.")
+        except Exception as e:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Cancelado por segurança: Falha ao preservar e comprovar metadados ID3/Serato: {e}"
+            }
+
+        # PROTOCOLO TRANSACIONAL DE SUBSTITUIÇÃO COM ROLLBACK
+        backup_file = file_p.parent / f"{file_p.stem}.__orig_backup_{timestamp_str}.mp3"
+        try:
+            shutil.copy2(str(file_p), str(backup_file))
+        except Exception as e:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Falha ao criar backup temporário de segurança: {e}"
+            }
+
+        try:
+            # os.replace é atômica no mesmo sistema de arquivos
+            os.replace(str(downloaded_mp3), str(file_p))
+
+            # Validação posterior da instalação física
+            if not file_p.exists() or file_p.stat().st_size < 20480:
+                raise IOError("Arquivo final ausente ou com tamanho inválido após os.replace.")
+
+            # Quarentena: coloca backup em <_Serato_>/Quarentena/<timestamp>_<filename>
+            quarantine_dir = get_quarantine_dir(serato_dir_str, file_p)
+            quarantine_file = quarantine_dir / f"{timestamp_str}_{file_p.name}"
+            shutil.move(str(backup_file), str(quarantine_file))
+
+            # Manifesto JSON com metadados de rastreabilidade
+            manifest_file = quarantine_dir / f"{timestamp_str}_{file_p.name}.meta.json"
             try:
-                # Fallback: clona a estrutura ID3 inteira do original
-                from mutagen.id3 import ID3
-                orig_id3 = ID3(str(file_p))
-                orig_id3.save(str(downloaded_mp3), v2_version=3)
+                manifest_data = {
+                    "timestamp": timestamp_str,
+                    "data_iso": datetime.now().isoformat(),
+                    "caminho_original": str(file_p),
+                    "arquivo_nome": file_p.name,
+                    "quarentena_arquivo": quarantine_file.name,
+                    "provedor_download": used_provider,
+                    "duracao_original": orig_dur,
+                    "duracao_candidata": cand_dur,
+                    "diferenca_seg": diff_time,
+                    "bitrate_kbps": round(cand_bitrate / 1000) if cand_bitrate else 320,
+                    "sample_rate_hz": cand_sample_rate,
+                    "status": "substituicao_confirmada"
+                }
+                manifest_file.write_text(json.dumps(manifest_data, indent=2, ensure_ascii=False), encoding='utf-8')
             except Exception:
                 pass
 
-        # Quarentena: coloca em <_Serato_>/Quarentena/<timestamp>_<filename>
-        quarantine_dir = get_quarantine_dir(serato_dir_str, file_p)
-        quarantine_file = quarantine_dir / f"{timestamp_str}_{file_p.name}"
-        shutil.move(str(file_p), str(quarantine_file))
-
-        # Substituição atômica no caminho exato do usuário
-        shutil.move(str(downloaded_mp3), str(file_p))
+        except Exception as err:
+            # ROLLBACK AUTOMÁTICO: Restaura o arquivo original imediatamente
+            try:
+                if backup_file.exists():
+                    os.replace(str(backup_file), str(file_p))
+            except Exception as rb_err:
+                return {
+                    "sucesso": False,
+                    "erro": f"FALHA CRÍTICA NA INSTALAÇÃO E NO ROLLBACK: {err}. Detalhes: {rb_err}"
+                }
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Substituição abortada e revertida com sucesso (Rollback executado). Motivo: {err}"
+            }
 
         _cleanup_temp()
 
@@ -763,6 +892,16 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     except Exception as e:
         _cleanup_temp()
         return {"sucesso": False, "erro": f"Falha ao substituir arquivo: {str(e)}"}
+    finally:
+        if lock_fd is not None:
+            try:
+                import fcntl
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+                if lock_file.exists():
+                    lock_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 def preaudit_track_online(filepath_str: str) -> dict:
@@ -830,7 +969,7 @@ def preaudit_track_online(filepath_str: str) -> dict:
                     if cand_dur:
                         cand_dur = round(float(cand_dur), 1)
                         diff = round(abs(cand_dur - local_dur), 1)
-                        is_comp = diff < 15.0
+                        is_comp = diff <= 10.0
                         return {
                             "status": "compativel" if is_comp else "incompativel",
                             "caminho": str(file_p),
@@ -841,7 +980,7 @@ def preaudit_track_online(filepath_str: str) -> dict:
                             "diferenca": diff,
                             "provedor": prov,
                             "compativel": is_comp,
-                            "mensagem": f"Compatível (Diferença: {diff}s · {prov})" if is_comp else f"Divergência de {diff}s (limite < 15s) · Online: {cand_dur}s"
+                            "mensagem": f"Compatível (Diferença: {diff}s · {prov})" if is_comp else f"Divergência de {diff}s (limite <= 10s) · Online: {cand_dur}s"
                         }
         except Exception:
             continue
@@ -1094,6 +1233,18 @@ def batch_resample_tracks_local(filepaths: list):
 
 def batch_repair_tracks_online(filepaths: list, serato_dir_str: str = ""):
     """Executa reparação online em lote com streaming de progresso."""
+    is_running, lock_reason = is_serato_running_py()
+    if is_running:
+        print(json.dumps({
+            "tipo": "fim",
+            "sucesso": False,
+            "erro": f"BLOQUEIO DE SEGURANÇA: {lock_reason}",
+            "total": len(filepaths),
+            "atualizados": 0,
+            "erros": [f"BLOQUEIO DE SEGURANÇA: {lock_reason}"]
+        }, ensure_ascii=False), flush=True)
+        return
+
     total = len(filepaths)
     print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
 

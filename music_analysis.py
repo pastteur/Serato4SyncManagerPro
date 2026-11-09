@@ -349,7 +349,8 @@ def analyze_batch(folder, limit=50, write=False, only_missing=True, emit=True):
             pending.append(p)
         files = pending
 
-    files = files[: max(1, int(limit))]
+    if limit and int(limit) > 0:
+        files = files[: int(limit)]
     total = len(files)
     resultados = []
     for idx, p in enumerate(files, 1):

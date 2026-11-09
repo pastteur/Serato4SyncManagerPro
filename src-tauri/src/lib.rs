@@ -277,12 +277,25 @@ fn find_python_cmd(app: Option<&AppHandle>, script_name: &str) -> Command {
 
 
 pub fn is_serato_running() -> bool {
-    Command::new("pgrep")
-        .arg("-x")
-        .arg("Serato DJ Pro")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let procs = ["Serato DJ Pro", "Serato DJ Lite", "Serato DJ"];
+    for proc_name in &procs {
+        match Command::new("pgrep").arg("-x").arg(proc_name).output() {
+            Ok(output) => {
+                if output.status.success() {
+                    return true;
+                }
+                if output.status.code().unwrap_or(0) > 1 {
+                    // Erro anômalo no pgrep: fail-closed por segurança
+                    return true;
+                }
+            }
+            Err(_) => {
+                // Falha ao invocar pgrep no sistema: fail-closed por segurança
+                return true;
+            }
+        }
+    }
+    false
 }
 
 extern "C" {
@@ -1665,8 +1678,8 @@ mod commands {
         if write {
             bloqueio_serato("gravar BPM e tom nas tags")?;
         }
-        let script = find_python_script(Some(&app), "music_analysis.py");
-        let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+        let script = find_canonical_python_script(Some(&app), "music_analysis.py")?;
+        let python_bin = find_python_binary()?;
         let mut cmd = Command::new(&python_bin);
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
         cmd.arg(&script).arg("--analyze-batch").arg(&mp3_path);
@@ -2321,6 +2334,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn repair_track_online(app: AppHandle, filepath: String, serato_dir: Option<String>) -> Result<String, String> {
+        bloqueio_serato("reparar faixa online")?;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
@@ -2333,10 +2347,22 @@ mod commands {
                 }
             }
 
-            let res = cmd
-                .output()
-                .map_err(|e| format!("Falha ao reparar áudio online: {}", e))
-                .map(|output| String::from_utf8_lossy(&output.stdout).to_string());
+            let res = match cmd.output() {
+                Ok(output) => {
+                    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+                    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+                    if !output.status.success() && stdout_str.trim().is_empty() {
+                        Err(format!(
+                            "Processo de reparação falhou (código {:?}): {}",
+                            output.status.code(),
+                            stderr_str
+                        ))
+                    } else {
+                        Ok(stdout_str)
+                    }
+                }
+                Err(e) => Err(format!("Falha ao executar motor de reparação: {}", e)),
+            };
             let _ = tx.send(res);
         });
 
@@ -2351,11 +2377,12 @@ mod commands {
         filepaths_json: String,
         serato_dir: Option<String>,
     ) -> Result<(), String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
+        bloqueio_serato("reparar faixas online em lote")?;
+        let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-repair-online");
             cmd.arg(&filepaths_json);
@@ -2372,30 +2399,68 @@ mod commands {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = window_clone.emit("audio-health-batch-finished", serde_json::json!({
+                        "tipo": "fim",
                         "sucesso": false,
-                        "erro": e.to_string()
+                        "erro": e.to_string(),
+                        "total": 0,
+                        "atualizados": 0,
+                        "erros": [e.to_string()]
                     }));
                     return;
                 }
             };
 
+            // Drenagem concorrente de STDERR para prevenir DEADLOCK de pipe cheio
+            let stderr_pipe = child.stderr.take();
+            let err_drain_thread = std::thread::spawn(move || {
+                let mut captured_err = String::new();
+                if let Some(pipe) = stderr_pipe {
+                    let r = BufReader::new(pipe);
+                    for line in r.lines().flatten() {
+                        if !captured_err.is_empty() {
+                            captured_err.push('\n');
+                        }
+                        captured_err.push_str(&line);
+                    }
+                }
+                captured_err
+            });
+
+            let mut finished_emitted = false;
             if let Some(stdout) = child.stdout.take() {
                 let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window_clone.emit("audio-health-batch-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("audio-health-batch-finished", parsed);
-                            }
+                for line_res in reader.lines().flatten() {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line_res) {
+                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                        if tipo == "progresso" {
+                            let _ = window_clone.emit("audio-health-batch-progress", parsed);
+                        } else if tipo == "fim" {
+                            let _ = window_clone.emit("audio-health-batch-finished", parsed);
+                            finished_emitted = true;
                         }
                     }
                 }
             }
 
-            let _ = child.wait();
+            let stderr_output = err_drain_thread.join().unwrap_or_default();
+            let exit_status = child.wait();
+            let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
+
+            if !success && !finished_emitted {
+                let err_msg = if !stderr_output.trim().is_empty() {
+                    stderr_output
+                } else {
+                    format!("Processo Python encerrou com status {:?}", exit_status)
+                };
+                let _ = window_clone.emit("audio-health-batch-finished", serde_json::json!({
+                    "tipo": "fim",
+                    "sucesso": false,
+                    "erro": err_msg,
+                    "total": 0,
+                    "atualizados": 0,
+                    "erros": [err_msg]
+                }));
+            }
         });
 
         Ok(())
