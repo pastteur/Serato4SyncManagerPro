@@ -244,13 +244,31 @@ export const App: React.FC = () => {
           }
         }).then(unlisten => { unlistenLog = unlisten; });
 
-        listen<any>('sync-finished', (event) => {
+        listen<{
+          success: boolean;
+          exit_code: number | null;
+          message: string;
+          summary?: SyncSummary | null;
+          summary_error?: string | null;
+        }>('sync-finished', (event) => {
           setIsRunning(false);
           const data = event.payload;
-          if (data && data.summary) {
+
+          if (data?.summary) {
             setSummary(data.summary);
           }
-          addLog('🎯 Processo de sincronização encerrado pelo sistema.');
+
+          if (!data) {
+            addLog('❌ O backend encerrou a sincronização sem enviar o payload final.');
+          } else if (data.success) {
+            addLog(`🎯 ${data.message || 'Sincronização concluída com sucesso.'} (código ${data.exit_code ?? 'indisponível'}).`);
+          } else {
+            addLog(`❌ ${data.message || 'A sincronização falhou.'} (código ${data.exit_code ?? 'indisponível'}).`);
+          }
+
+          if (data?.summary_error) {
+            addLog(`⚠️ Não foi possível interpretar o resumo da sincronização: ${data.summary_error}`);
+          }
         }).then(unlisten => { unlistenFinish = unlisten; });
 
         listen<string>('operation-in-progress-warning', (event) => {
