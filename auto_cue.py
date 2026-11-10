@@ -186,18 +186,23 @@ def restore_track_cues(filepath_str: str):
 
 
 def backup_track_cues(filepath: str, audio) -> bool:
-    """Salva uma cópia exata das tags de cues antes de qualquer modificação."""
-    if not audio or not hasattr(audio, 'tags') or audio.tags is None:
+    """
+    Salva uma cópia exata das tags de cues antes de qualquer modificação.
+    Garante persistência verificada inclusive quando a faixa não possui tags ou cues existentes.
+    """
+    if audio is None:
         return False
     try:
-        m2 = audio.tags.get('GEOB:Serato Markers2')
-        m1 = audio.tags.get('GEOB:Serato Markers_')
-        m2_bytes = m2.data if m2 else None
-        m1_bytes = m1.data if m1 else None
+        m2_bytes = None
+        m1_bytes = None
+        cues = []
+        if hasattr(audio, 'tags') and audio.tags is not None:
+            m2 = audio.tags.get('GEOB:Serato Markers2')
+            m1 = audio.tags.get('GEOB:Serato Markers_')
+            m2_bytes = m2.data if m2 else None
+            m1_bytes = m1.data if m1 else None
+            cues = extract_cues_from_raw_tag(m2_bytes) if m2_bytes else []
 
-        # Registra também o estado "sem cues": sem isso, a faixa mais comum (a que ainda
-        # não tem nenhum cue) ficaria sem qualquer possibilidade de desfazer a gravação.
-        cues = extract_cues_from_raw_tag(m2_bytes) if m2_bytes else []
         cues_json = json.dumps(cues, ensure_ascii=False)
 
         conn = get_backup_db()
@@ -214,9 +219,14 @@ def backup_track_cues(filepath: str, audio) -> bool:
                 cues_json,
                 datetime.now().isoformat()
             ))
+            # Verificação obrigatória de persistência no banco SQLite
+            row = conn.execute("SELECT 1 FROM cues_backup WHERE filepath = ?", (str(filepath),)).fetchone()
+            if not row:
+                raise IOError("Verificação de persistência do backup de cues falhou.")
         conn.close()
         return True
     except Exception as e:
+        print(f"Erro ao salvar backup de cues para {filepath}: {e}", file=sys.stderr)
         return False
 
 
@@ -366,16 +376,17 @@ def detect_audio_transients(filepath_str: str, duration_sec: float) -> dict:
     """
     Analisa os transientes de áudio via ffmpeg para identificar o início exato
     do primeiro beat audível e o alinhamento de fase de compassos.
+    Usa '-v info' para capturar com fidelidade os eventos de silencedetect.
     """
     ffmpeg_bin = get_ffmpeg_bin()
     if not ffmpeg_bin or not filepath_str or duration_sec < 1.0:
-        return {"first_beat_ms": 500, "has_transient": False}
+        return {"first_beat_ms": 500, "has_transient": False, "confiavel": False}
 
     try:
-        # Detecta silêncio inicial nos primeiros 15 segundos
+        # Detecta silêncio inicial nos primeiros 15 segundos usando '-v info'
         cmd = [
             ffmpeg_bin,
-            "-v", "error",
+            "-v", "info",
             "-ss", "0",
             "-t", "15",
             "-i", str(filepath_str),
@@ -383,35 +394,55 @@ def detect_audio_transients(filepath_str: str, duration_sec: float) -> dict:
             "-f", "null", "-"
         ]
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4, text=True)
+        if proc.returncode != 0:
+            return {"first_beat_ms": 500, "has_transient": False, "confiavel": False, "erro": "ffmpeg falhou na leitura do áudio"}
+
         lines = proc.stderr.splitlines()
 
         first_silence_end = None
         has_initial_silence = False
 
-        for line in lines:
-            if "silence_start: 0" in line or "silence_start: 0.0" in line:
-                has_initial_silence = True
-            if "silence_end:" in line:
-                parts = line.split("silence_end:")
-                if len(parts) > 1:
-                    val_str = parts[1].split("|")[0].strip()
-                    try:
-                        val = float(val_str)
-                        if first_silence_end is None:
-                            first_silence_end = val
-                    except Exception:
-                        pass
+        import re
+        start_re = re.compile(r"silence_start:\s*([0-9.]+)")
+        end_re = re.compile(r"silence_end:\s*([0-9.]+)")
 
+        for line in lines:
+            m_start = start_re.search(line)
+            if m_start:
+                try:
+                    s_val = float(m_start.group(1))
+                    # Silêncio no início absoluto (primeiros 100ms)
+                    if s_val <= 0.10:
+                        has_initial_silence = True
+                except Exception:
+                    pass
+
+            m_end = end_re.search(line)
+            if m_end:
+                try:
+                    e_val = float(m_end.group(1))
+                    if first_silence_end is None and has_initial_silence:
+                        first_silence_end = e_val
+                except Exception:
+                    pass
+
+        # 1. Silêncio inicial detectado e finalizado dentro da janela (primeiro beat encontrado)
         if has_initial_silence and first_silence_end is not None:
             beat_ms = max(50, int(first_silence_end * 1000))
-            return {"first_beat_ms": beat_ms, "has_transient": True}
-        elif not has_initial_silence:
-            return {"first_beat_ms": 100, "has_transient": True}
+            return {"first_beat_ms": beat_ms, "has_transient": True, "confiavel": True}
+
+        # 2. Silêncio inicial contínuo por mais de 15s (sem transiente audível inicial)
+        if has_initial_silence and first_silence_end is None:
+            return {"first_beat_ms": 500, "has_transient": False, "confiavel": False, "motivo": "silencio_continuo"}
+
+        # 3. Sem silêncio inicial: áudio se inicia imediatamente no tempo zero
+        if not has_initial_silence:
+            return {"first_beat_ms": 100, "has_transient": True, "confiavel": True}
 
     except Exception:
         pass
 
-    return {"first_beat_ms": 500, "has_transient": False}
+    return {"first_beat_ms": 500, "has_transient": False, "confiavel": False}
 
 
 def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0, filepath_str: str = ""):
@@ -495,8 +526,9 @@ def repair_track_cues(filepath_str: str) -> dict:
                 except Exception: pass
             existing_cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
 
-        # Salva backup de segurança
-        backup_track_cues(str(file_p), audio)
+        # Salva backup de segurança obrigatório antes de qualquer alteração
+        if not backup_track_cues(str(file_p), audio):
+            return {"sucesso": False, "erro": "Falha na criação ou verificação obrigatória do backup de cues. Gravação abortada por segurança."}
 
         # Constrói o novo payload perfeito
         new_tag_data = build_serato_markers2_tag(existing_cues)
@@ -512,8 +544,20 @@ def repair_track_cues(filepath_str: str) -> dict:
         if 'GEOB:Serato Markers_' in audio.tags:
             del audio.tags['GEOB:Serato Markers_']
 
+        op_id = None
+        try:
+            from journal import record_id3_before_change, record_operation_after
+            op_id = record_id3_before_change(str(file_p), action="repair_cues")
+        except Exception as e:
+            return {"sucesso": False, "erro": "Journal indisponível; gravação cancelada: %s" % e}
+
         # Salva em ID3v2.3 (mandatório Serato)
         audio.save(v2_version=3)
+        if op_id:
+            try:
+                record_operation_after(op_id, str(file_p))
+            except Exception:
+                pass
 
         return {
             "sucesso": True,
@@ -576,7 +620,8 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
         cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
 
         # Salva backup de segurança antes de alterar
-        backup_track_cues(str(file_p), audio)
+        if not backup_track_cues(str(file_p), audio):
+            return {"sucesso": False, "erro": "Falha na criação ou verificação obrigatória do backup de cues. Gravação abortada por segurança."}
 
         # Monta payload binário Serato Markers2 oficial 100% compatível
         serato_data = build_serato_markers2_tag(cues)
@@ -593,13 +638,19 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
                 data=serato_data
             )
             # Registra o estado anterior no journal unificado (undo) antes de gravar
+            op_id = None
             try:
-                from journal import record_id3_before_change
-                record_id3_before_change(str(file_p), action="auto_cue")
+                from journal import record_id3_before_change, record_operation_after
+                op_id = record_id3_before_change(str(file_p), action="auto_cue")
             except Exception as e:
                 return {"sucesso": False, "erro": "Journal indisponível; gravação cancelada: %s" % e}
             # CRÍTICO: Serato DJ Pro requer ID3v2.3, NÃO v2.4
             audio.save(v2_version=3)
+            if op_id:
+                try:
+                    record_operation_after(op_id, str(file_p))
+                except Exception:
+                    pass
 
         return {
             "sucesso": True,
@@ -920,9 +971,11 @@ def batch_repair_crate_cues(
                 "faixa_atual": full_p.name
             }, ensure_ascii=False), flush=True)
 
+    has_errors = len(errors) > 0
     print(json.dumps({
         "tipo": "fim",
-        "sucesso": True,
+        "sucesso": not has_errors,
+        "sucesso_parcial": (has_errors and repaired_count > 0),
         "total": total,
         "atualizados": repaired_count,
         "erros": errors[:10]
@@ -996,9 +1049,11 @@ def batch_apply_crate_cues(
                 "faixa_atual": full_p.name
             }, ensure_ascii=False), flush=True)
 
+    has_errors = len(errors) > 0
     print(json.dumps({
         "tipo": "fim",
-        "sucesso": True,
+        "sucesso": not has_errors,
+        "sucesso_parcial": (has_errors and applied_count > 0),
         "total": total,
         "atualizados": applied_count,
         "erros": errors[:10]
@@ -1033,7 +1088,7 @@ def main():
     if args.preview:
         file_p = Path(args.preview)
         if not file_p.exists():
-            print(json.dumps({"sucesso": False, "erro": "Arquivo não encontrado"}))
+            print(json.dumps({"sucesso": False, "erro": "Arquivo não encontrado"}, ensure_ascii=False), flush=True)
             sys.exit(1)
         try:
             audio = mutagen.File(str(file_p))
@@ -1042,15 +1097,15 @@ def main():
             if audio and 'TBPM' in audio:
                 bpm = float(str(audio['TBPM']).split('.')[0])
             cues = calculate_smart_cues(dur, bpm, filepath_str=str(file_p))
-            print(json.dumps({"sucesso": True, "duracao": dur, "bpm": bpm, "cues": cues}, ensure_ascii=False))
+            print(json.dumps({"sucesso": True, "duracao": dur, "bpm": bpm, "cues": cues}, ensure_ascii=False), flush=True)
             sys.exit(0)
         except Exception as e:
-            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)
 
     if args.repair_file:
         res = repair_track_cues(args.repair_file)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.repair_batch:
@@ -1064,7 +1119,7 @@ def main():
 
     if args.apply:
         res = generate_and_save_serato_cues(args.apply, overwrite_existing=args.overwrite_existing)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.apply_batch:
@@ -1087,10 +1142,10 @@ def main():
                     except Exception:
                         pass
 
-            print(json.dumps({"sucesso": True, "total": len(files), "atualizados": updated}))
+            print(json.dumps({"sucesso": True, "total": len(files), "atualizados": updated}, ensure_ascii=False), flush=True)
             sys.exit(0)
         except Exception as e:
-            print(json.dumps({"sucesso": False, "erro": str(e)}))
+            print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)
 
     if args.audit_crate:
@@ -1100,7 +1155,7 @@ def main():
             subcrate=args.subcrate,
             include_subcrates=not args.no_subcrates
         )
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.scan_crate:
@@ -1112,7 +1167,7 @@ def main():
             limit=args.limit,
             offset=args.offset
         )
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0)
 
     if args.batch_crate:
@@ -1128,12 +1183,12 @@ def main():
 
     if args.list_backups:
         res = list_cue_backups(search=args.list_backups_search)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.restore:
         res = restore_track_cues(args.restore)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     parser.print_help()

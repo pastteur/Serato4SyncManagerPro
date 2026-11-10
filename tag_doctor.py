@@ -1280,6 +1280,71 @@ def scan_audio_tags(mp3_dir_str: str, limit: int = 50, offset: int = 0, search_f
     }
 
 
+def safe_save_tags(file_path: Path, tag_modifier_fn, action: str = "tag_doctor") -> None:
+    """
+    Aplica modificações de tags em uma cópia temporária do arquivo de áudio,
+    valida a integridade física e lógica pós-escrita com mutagen, registra
+    no journal de segurança e substitui atomicamente via os.replace.
+    Em caso de falha durante a escrita ou validação, o arquivo original
+    permanece 100% inalterado (rollback garantido e ausência de mutilação).
+    """
+    import uuid
+    import shutil
+    from journal import record_id3_before_change, record_operation_after
+
+    if not file_path.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {file_path}")
+
+    orig_size = file_path.stat().st_size
+    temp_file = file_path.with_name(f".tmp_tag_{file_path.name}_{uuid.uuid4().hex[:8]}")
+
+    try:
+        shutil.copy2(str(file_path), str(temp_file))
+        if not temp_file.exists() or temp_file.stat().st_size != orig_size:
+            raise IOError("Falha ao criar cópia temporária de trabalho para atualização de tags.")
+
+        temp_audio = mutagen.File(str(temp_file))
+        if temp_audio is None:
+            raise IOError("Formato de áudio não suportado ou arquivo ilegível.")
+
+        # Aplica alterações de tags no arquivo temporário isolado
+        tag_modifier_fn(temp_audio)
+
+        if hasattr(temp_audio, 'tags'):
+            # ID3v2.3 obrigatório para Serato DJ Pro
+            temp_audio.save(v2_version=3)
+        else:
+            temp_audio.save()
+
+        # Validação pós-escrita: reabre o temporário e valida legibilidade integral
+        verified_audio = mutagen.File(str(temp_file))
+        if verified_audio is None or not temp_file.exists() or temp_file.stat().st_size == 0:
+            raise IOError("Validação pós-escrita falhou: arquivo temporário corrompido ou vazio.")
+
+        # Registra o estado original no Journal antes da substituição atômica
+        op_id = None
+        try:
+            op_id = record_id3_before_change(str(file_path), action=action)
+        except Exception as e_j:
+            raise IOError(f"Journal indisponível; gravação cancelada por segurança: {e_j}")
+
+        # Substituição atômica no mesmo sistema de arquivos
+        os.replace(str(temp_file), str(file_path))
+
+        if op_id is not None:
+            try:
+                record_operation_after(op_id, str(file_path))
+            except Exception:
+                pass
+
+    finally:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+
+
 def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False, stream_progress: bool = True):
     """Aplica as tags limpas diretamente nos arquivos preservando tags Serato com streaming de progresso."""
     if not mutagen:
@@ -1306,90 +1371,88 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
         crate_raiz = item.get("crate_raiz", "").strip()
 
         try:
-            audio = mutagen.File(str(file_path))
-            if audio is None:
-                continue
+            def modify_tags(audio):
+                if hasattr(audio, 'tags'):
+                    if audio.tags is None:
+                        audio.add_tags()
 
-            # Se for MP3 (ID3)
-            if hasattr(audio, 'tags'):
-                if audio.tags is None:
-                    audio.add_tags()
+                    if novo_titulo:
+                        audio.tags['TIT2'] = TIT2(encoding=3, text=novo_titulo)
+                    if novo_artista:
+                        audio.tags['TPE1'] = TPE1(encoding=3, text=novo_artista)
+                    if novo_album:
+                        audio.tags['TALB'] = TALB(encoding=3, text=novo_album)
+                    elif 'TALB' in audio.tags and not novo_album:
+                        del audio.tags['TALB']
+                    if crate_raiz:
+                        audio.tags['TCON'] = TCON(encoding=3, text=crate_raiz)
+                else:
+                    if novo_titulo:
+                        audio['title'] = [novo_titulo]
+                    if novo_artista:
+                        audio['artist'] = [novo_artista]
+                    if novo_album:
+                        audio['album'] = [novo_album]
+                    elif 'album' in audio and not novo_album:
+                        del audio['album']
+                    if crate_raiz:
+                        audio['genre'] = [crate_raiz]
 
-                if novo_titulo:
-                    audio.tags['TIT2'] = TIT2(encoding=3, text=novo_titulo)
-                if novo_artista:
-                    audio.tags['TPE1'] = TPE1(encoding=3, text=novo_artista)
-                if novo_album:
-                    audio.tags['TALB'] = TALB(encoding=3, text=novo_album)
-                elif 'TALB' in audio.tags and not novo_album:
-                    del audio.tags['TALB']
-                if crate_raiz:
-                    audio.tags['TCON'] = TCON(encoding=3, text=crate_raiz)
+            safe_save_tags(file_path, modify_tags, action="tag_doctor")
 
-                # Salva preservando tags Serato Markers (ID3v2.3 obrigatório para Serato DJ)
-                from journal import record_id3_before_change
-                record_id3_before_change(audio.filename, action="tag_doctor")
-                audio.save(v2_version=3)
-            else:
-                if novo_titulo:
-                    audio['title'] = [novo_titulo]
-                if novo_artista:
-                    audio['artist'] = [novo_artista]
-                if novo_album:
-                    audio['album'] = [novo_album]
-                elif 'album' in audio and not novo_album:
-                    del audio['album']
-                if crate_raiz:
-                    audio['genre'] = [crate_raiz]
-                audio.save()
-
-            # Renomeação opcional segura no disco contra colisões de caixa APFS
+            # Renomeação opcional segura no disco contra colisões de caixa APFS e travessia (L2)
             if rename_files_on_disk and item.get("arquivo_sugerido"):
-                novo_nome = item["arquivo_sugerido"]
-                novo_caminho = file_path.parent / novo_nome
-                if novo_caminho != file_path:
-                    old_path_str = str(file_path)
-                    is_same_file = False
-                    try:
-                        if novo_caminho.exists():
-                            is_same_file = os.path.samefile(file_path, novo_caminho)
-                    except Exception:
-                        pass
+                raw_sug = item["arquivo_sugerido"]
+                if '..' in raw_sug or '/' in raw_sug or '\\' in raw_sug:
+                    errors.append(f"Renomear {file_path.name}: Tentativa de travessia de diretório detectada ({raw_sug})")
+                else:
+                    novo_nome = raw_sug.strip()
+                    novo_caminho = file_path.parent / novo_nome
+                    if novo_caminho.resolve().parent != file_path.parent.resolve():
+                        errors.append(f"Renomear {file_path.name}: Destino fora do diretório autorizado ({novo_nome})")
+                    elif novo_caminho != file_path:
+                        old_path_str = str(file_path)
+                        is_same_file = False
+                        try:
+                            if novo_caminho.exists():
+                                is_same_file = os.path.samefile(file_path, novo_caminho)
+                        except Exception:
+                            pass
 
-                    if not novo_caminho.exists() or is_same_file:
-                        try:
-                            if is_same_file:
-                                temp_path = file_path.parent / f".tmp_{abs(hash(str(file_path)))}.tmp"
-                                file_path.rename(temp_path)
-                                temp_path.rename(novo_caminho)
-                            else:
-                                file_path.rename(novo_caminho)
-                            sync_sound_seal_rename(old_path_str, str(novo_caminho))
-                            file_path = novo_caminho
-                        except Exception as e_ren:
-                            errors.append(f"Renomear {file_path.name}: {e_ren}")
-                    else:
-                        # Colisão: verifica se é cópia idêntica por Sound Seal SHA-256
-                        is_twin = check_sound_seal_collision(str(file_path), str(novo_caminho))
-                        try:
-                            c = 1
-                            alt_stem = Path(novo_nome).stem
-                            alt_dest = file_path.parent / f"{alt_stem} ({c}){file_path.suffix}"
-                            while alt_dest.exists():
-                                try:
-                                    if os.path.samefile(file_path, alt_dest):
-                                        break
-                                except Exception:
-                                    pass
-                                c += 1
+                        if not novo_caminho.exists() or is_same_file:
+                            try:
+                                if is_same_file:
+                                    temp_path = file_path.parent / f".tmp_{abs(hash(str(file_path)))}.tmp"
+                                    file_path.rename(temp_path)
+                                    temp_path.rename(novo_caminho)
+                                else:
+                                    file_path.rename(novo_caminho)
+                                sync_sound_seal_rename(old_path_str, str(novo_caminho))
+                                file_path = novo_caminho
+                            except Exception as e_ren:
+                                errors.append(f"Renomear {file_path.name}: {e_ren}")
+                        else:
+                            # Colisão: verifica se é cópia idêntica por Sound Seal SHA-256
+                            is_twin = check_sound_seal_collision(str(file_path), str(novo_caminho))
+                            try:
+                                c = 1
+                                alt_stem = Path(novo_nome).stem
                                 alt_dest = file_path.parent / f"{alt_stem} ({c}){file_path.suffix}"
-                            file_path.rename(alt_dest)
-                            sync_sound_seal_rename(old_path_str, str(alt_dest))
-                            file_path = alt_dest
-                            if is_twin:
-                                errors.append(f"Aviso: {file_path.name} é cópia acústica de {novo_caminho.name}.")
-                        except Exception as e_ren:
-                            errors.append(f"Renomear {file_path.name}: {e_ren}")
+                                while alt_dest.exists():
+                                    try:
+                                        if os.path.samefile(file_path, alt_dest):
+                                            break
+                                    except Exception:
+                                        pass
+                                    c += 1
+                                    alt_dest = file_path.parent / f"{alt_stem} ({c}){file_path.suffix}"
+                                file_path.rename(alt_dest)
+                                sync_sound_seal_rename(old_path_str, str(alt_dest))
+                                file_path = alt_dest
+                                if is_twin:
+                                    errors.append(f"Aviso: {file_path.name} é cópia acústica de {novo_caminho.name}.")
+                            except Exception as e_ren:
+                                errors.append(f"Renomear {file_path.name}: {e_ren}")
 
             updated_count += 1
         except Exception as e:
@@ -1406,8 +1469,10 @@ def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False,
                 "faixa_atual": file_path.name
             }, ensure_ascii=False), flush=True)
 
+    has_errors = len(errors) > 0
     res = {
-        "sucesso": True,
+        "sucesso": not has_errors,
+        "sucesso_parcial": (has_errors and updated_count > 0),
         "atualizados": updated_count,
         "total": total,
         "total_solicitados": total,
@@ -1548,9 +1613,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
 
             suggested_filename = f"{suggested_stem}{ext}"
 
-            # Grava tags ID3 com mutagen (preservando GEOB Serato Markers2)
-            audio = mutagen.File(str(full_path))
-            if audio is not None:
+            # Grava tags ID3 com gravação atômica segura (preservando GEOB Serato Markers2)
+            def modify_tags_lote(audio):
                 if hasattr(audio, 'tags'):
                     if audio.tags is None:
                         audio.add_tags()
@@ -1564,17 +1628,14 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
                         del audio.tags['TALB']
                     if clean_res['crate_raiz']:
                         audio.tags['TCON'] = TCON(encoding=3, text=clean_res['crate_raiz'])
-                    # CRÍTICO: ID3v2.3 obrigatório para Serato DJ Pro (v2.4 não é lido)
-                    from journal import record_id3_before_change
-                    record_id3_before_change(audio.filename, action="tag_doctor_lote")
-                    audio.save(v2_version=3)
                 else:
                     if clean_res['title']: audio['title'] = [clean_res['title']]
                     if clean_res['artist']: audio['artist'] = [clean_res['artist']]
                     if clean_res['album']: audio['album'] = [clean_res['album']]
                     elif 'album' in audio and not clean_res['album']: del audio['album']
                     if clean_res['crate_raiz']: audio['genre'] = [clean_res['crate_raiz']]
-                    audio.save()
+
+            safe_save_tags(full_path, modify_tags_lote, action="tag_doctor_lote")
 
             # Renomeação opcional no disco segura contra colisões de caixa APFS
             if rename_files and suggested_filename != filename:
@@ -1636,9 +1697,11 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
             "faixa_atual": filename
         }, ensure_ascii=False), flush=True)
 
+    has_errors = len(errors) > 0
     print(json.dumps({
         "tipo": "fim",
-        "sucesso": True,
+        "sucesso": not has_errors,
+        "sucesso_parcial": (has_errors and updated_count > 0),
         "atualizados": updated_count,
         "total": total,
         "erros": errors[:15]
@@ -1669,24 +1732,24 @@ def main():
 
     if args.backup_db:
         res = backup_master_database()
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.list_backups:
         backups = list_master_backups()
-        print(json.dumps(backups, ensure_ascii=False))
+        print(json.dumps(backups, ensure_ascii=False), flush=True)
         sys.exit(0)
 
     if args.restore_db:
         res = restore_master_database(args.restore_db)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
 
     if args.list_crates:
         res = list_crates_and_subcrates(mp3_dir)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.batch_apply:

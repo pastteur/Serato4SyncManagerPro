@@ -494,6 +494,58 @@ def clear_all_sound_seal_masters():
     return {"sucesso": True}
 
 
+def validate_safe_relative_path(rel_path: str) -> bool:
+    """Verifica se o caminho relativo é seguro e não contém travessia de diretório (../)."""
+    if not rel_path or not isinstance(rel_path, str):
+        return False
+    clean = rel_path.replace('\\', '/')
+    parts = [p.strip() for p in clean.split('/') if p.strip()]
+    if '..' in parts or any(p == '..' for p in parts):
+        return False
+    return True
+
+
+def extract_volume_from_path(rel_path: str) -> str:
+    """Extrai o nome do volume se o caminho referenciar /Volumes/<VolumeName>/..."""
+    if not rel_path or not isinstance(rel_path, str):
+        return ""
+    clean = rel_path.strip().lstrip('/')
+    parts = clean.split('/')
+    if len(parts) >= 2 and parts[0] == 'Volumes':
+        return parts[1]
+    return ""
+
+
+def is_volume_mounted(vol_name: str, volumes_root: Path = Path("/Volumes")) -> bool:
+    """Verifica se o volume especificado está montado no sistema."""
+    if not vol_name:
+        return True
+    vol_path = volumes_root / vol_name
+    return vol_path.exists() and vol_path.is_dir()
+
+
+def is_track_volume_available(rel_path: str, mp3_base: Path, volumes_root: Path = Path("/Volumes")) -> bool:
+    """
+    Verifica se o volume onde a faixa reside está montado e acessível.
+    Retorna False se o caminho apontar para um volume desmontado/desconectado.
+    """
+    vol_name = extract_volume_from_path(rel_path)
+    if vol_name:
+        return is_volume_mounted(vol_name, volumes_root)
+
+    # Se o caminho for relativo ao mp3_base, verifica o volume do mp3_base
+    try:
+        mp3_base_res = mp3_base.resolve()
+        parts = mp3_base_res.parts
+        if len(parts) >= 3 and parts[1] == 'Volumes':
+            base_vol = parts[2]
+            return is_volume_mounted(base_vol, volumes_root)
+    except Exception:
+        pass
+
+    return True
+
+
 def resolve_serato_path(rel_path: str, mp3_base: Path):
     """
     Resolve com precisão o caminho físico de uma faixa registrada no Serato.
@@ -763,9 +815,25 @@ def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
     """
     Restaura ou religa o arquivo de som ao local esperado pela crate do Serato.
     Se a fonte estiver em .Trashes, move de volta; caso contrário, copia.
+    Possui validação estrita contra travessia de diretório (../).
     """
+    if not validate_safe_relative_path(rel_path):
+        return {
+            "sucesso": False,
+            "erro": f"Caminho inseguro rejeitado por segurança (travessia de diretório detectada com '..'): {rel_path}"
+        }
+
     mp3_base = Path(os.path.expanduser(mp3_base_dir)).resolve()
-    target_path = get_serato_target_path(rel_path, mp3_base)
+    try:
+        target_path = get_serato_target_path(rel_path, mp3_base)
+        target_res = target_path.resolve()
+        # Validação contra fuga de diretório autorizado
+        allowed_roots = [mp3_base, Path("/Volumes").resolve(), Path.home().resolve()]
+        if not any(str(target_res).startswith(str(r)) for r in allowed_roots):
+            return {"sucesso": False, "erro": f"Destino fora do diretório autorizado: {target_res}"}
+    except Exception as e:
+        return {"sucesso": False, "erro": f"Caminho inválido: {e}"}
+
     src = Path(source_path_str)
 
     if not src.exists():
@@ -824,8 +892,12 @@ def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
     }, ensure_ascii=False), flush=True)
 
 
-def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: Path = None) -> int:
-    """Remove entradas de faixas de database V2 preservando vrsn e blocos válidos."""
+def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: Path = None, max_pct: float = 0.20) -> int:
+    """
+    Remove entradas de faixas de database V2 preservando vrsn e blocos válidos.
+    Executa verificação obrigatória de volume montado, limite percentual de segurança,
+    backup verificado e escrita atômica via arquivo temporário.
+    """
     if not db_file.exists():
         return 0
     try:
@@ -834,8 +906,8 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
             return 0
         header = data[:72]
         pos = 72
-        kept_blocks = []
-        removed = 0
+        entries = []
+        total_entries = 0
         while pos < len(data):
             tag = data[pos:pos+4]
             if len(tag) < 4:
@@ -845,10 +917,27 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
             block = data[pos:block_end]
 
             p_idx = block.find(b'pfil')
-            should_remove = False
+            rel_p = ""
             if p_idx != -1 and p_idx + 8 <= len(block):
                 p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
                 rel_p = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
+
+            entries.append((rel_p, block))
+            total_entries += 1
+            pos = block_end
+
+        kept_blocks = []
+        removed = 0
+        skipped_unmounted = 0
+        for rel_p, block in entries:
+            should_remove = False
+            # Checagem de volume montado: JAMAIS remover faixas de volumes desmontados
+            if rel_p and not is_track_volume_available(rel_p, mp3_base if mp3_base else Path("/")):
+                skipped_unmounted += 1
+                kept_blocks.append(block)
+                continue
+
+            if rel_p:
                 if target_paths is not None:
                     norm_p = norm_key(rel_p)
                     norm_fname = norm_key(Path(rel_p).name)
@@ -862,33 +951,69 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
                 removed += 1
             else:
                 kept_blocks.append(block)
-            pos = block_end
+
+        # Limite percentual de segurança para database V2 (evita corrupção catastrófica por biblioteca movida)
+        if target_paths is None and total_entries > 0 and (removed / total_entries) > max_pct:
+            print(f"[PROTEÇÃO] Remoção em database V2 abortada: percentual de faixas ausentes ({removed}/{total_entries} = {round(removed/total_entries*100, 1)}%) excede o teto de segurança de {int(max_pct*100)}%.", file=sys.stderr)
+            return 0
 
         if removed > 0:
             ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             bak = db_file.parent / f"database_V2_{ts}.bak"
-            if not bak.exists():
-                try:
-                    import shutil
-                    shutil.copy2(str(db_file), str(bak))
-                except Exception:
-                    pass
-            db_file.write_bytes(header + b''.join(kept_blocks))
+            import shutil
+            shutil.copy2(str(db_file), str(bak))
+            if not bak.exists() or bak.stat().st_size != db_file.stat().st_size:
+                raise IOError("Falha na criação/verificação de backup do database V2")
+
+            import uuid
+            temp_db = db_file.with_name(f".tmp_db_{uuid.uuid4().hex[:8]}")
+            new_db_content = header + b''.join(kept_blocks)
+            try:
+                with open(temp_db, 'wb') as f:
+                    f.write(new_db_content)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                if not temp_db.exists() or temp_db.stat().st_size < len(header):
+                    raise IOError("Arquivo temporário do database V2 incompleto.")
+
+                os.replace(str(temp_db), str(db_file))
+            finally:
+                if temp_db.exists():
+                    try:
+                        temp_db.unlink()
+                    except Exception:
+                        pass
         return removed
     except Exception as e:
         print(f"Erro ao limpar database V2: {e}", file=sys.stderr)
         return 0
 
 
-def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target_path: str = "", target_paths_json: str = ""):
+def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target_path: str = "", target_paths_json: str = "", max_lost_pct: float = 0.20):
     """
     Remove entradas de faixas perdidas (inexistentes no disco ou selecionadas)
     de todas as crates do Serato e também da biblioteca central (database V2).
     Preserva 100% dos cabeçalhos vrsn/ovct e blocos válidos.
-    Cria backup automático (.crate.bak / database_V2.bak) antes de alterar qualquer arquivo.
+    Cria backup automático verificado (.crate.bak / database_V2.bak) antes de alterar qualquer arquivo.
+    Possui travas rigorosas:
+      - Checagem prévia de volume montado (faixas de discos desconectados NUNCA são removidas)
+      - Teto percentual por crate (bloqueia limpeza automática se mais de 20% das faixas forem perdidas)
+      - Gravação temporária atômica com os.replace e os.fsync
     """
     serato_dir = resolve_serato_dir(serato_dir_str)
     mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
+
+    # Validação prévia de montagem do volume base
+    if not is_track_volume_available("", mp3_base):
+        return {
+            "sucesso": False,
+            "erro": f"Volume base da biblioteca de áudio não está montado ou acessível: {mp3_base}",
+            "total_removidas": 0,
+            "crates_removidas": 0,
+            "database_v2_removidas": 0,
+            "crates_afetadas": []
+        }
 
     subcrates_dirs = []
     if (serato_dir / "Subcrates").exists():
@@ -955,10 +1080,19 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                 header_bytes = content[:header_end]
                 kept_blocks = []
                 removed_in_this = 0
+                skipped_unmounted = 0
 
                 # 2. Verifica se a faixa deve ser removida
                 for rel_path, block in otrk_blocks:
                     should_remove = False
+
+                    # CRÍTICO: Checagem de volume montado antes de qualquer deliberação
+                    if not is_track_volume_available(rel_path, mp3_base):
+                        # Faixa reside em volume externo atualmente desconectado: PRESERVAR!
+                        skipped_unmounted += 1
+                        kept_blocks.append(block)
+                        continue
+
                     if target_set is not None:
                         norm_p = norm_key(rel_path)
                         norm_fname = norm_key(Path(rel_path).name)
@@ -974,24 +1108,67 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                     else:
                         kept_blocks.append(block)
 
-                # 3. Se houver faixas removidas, cria backup e reescreve a crate
+                # Trava de segurança: limite percentual por crate (ex: 20%)
+                # Protege contra deleção acidental massiva se a biblioteca foi movida de pasta
+                total_crate_tracks = len(otrk_blocks)
+                if target_set is None and total_crate_tracks > 0 and (removed_in_this / total_crate_tracks) > max_lost_pct:
+                    crates_affected.append({
+                        "crate": crate_file.stem.replace('%%', ' -> '),
+                        "bloqueado_seguranca": True,
+                        "removidas_propostas": removed_in_this,
+                        "total_faixas": total_crate_tracks,
+                        "percentual": round((removed_in_this / total_crate_tracks) * 100, 1),
+                        "puladas_desconectadas": skipped_unmounted,
+                        "motivo": f"Percentual de faixas ausentes ({removed_in_this}/{total_crate_tracks} = {round(removed_in_this/total_crate_tracks*100, 1)}%) excede o teto de segurança de {int(max_lost_pct*100)}%."
+                    })
+                    continue
+
+                # 3. Se houver faixas removidas, cria backup verificado e regrava a crate atomicamente
                 if removed_in_this > 0:
                     new_content = header_bytes + b''.join(kept_blocks)
                     backup_path = crate_file.with_suffix('.crate.bak')
-                    if not backup_path.exists():
-                        try:
-                            import shutil
-                            shutil.copy2(str(crate_file), str(backup_path))
-                        except Exception:
-                            pass
-                    crate_file.write_bytes(new_content)
+                    try:
+                        import shutil
+                        shutil.copy2(str(crate_file), str(backup_path))
+                        if not backup_path.exists() or backup_path.stat().st_size != crate_file.stat().st_size:
+                            raise IOError("Falha na criação ou validação de tamanho do backup .crate.bak")
+                    except Exception as e_bak:
+                        crates_affected.append({
+                            "crate": crate_file.name,
+                            "erro": f"Backup prévio obrigatório falhou: {e_bak}. Alteração abortada."
+                        })
+                        continue
 
-                    total_removed += removed_in_this
-                    crates_affected.append({
-                        "crate": crate_file.stem.replace('%%', ' -> '),
-                        "removidas": removed_in_this,
-                        "restantes": len(kept_blocks)
-                    })
+                    import uuid
+                    temp_crate = crate_file.with_name(f".tmp_{crate_file.name}_{uuid.uuid4().hex[:8]}")
+                    try:
+                        with open(temp_crate, 'wb') as f:
+                            f.write(new_content)
+                            f.flush()
+                            os.fsync(f.fileno())
+
+                        if not temp_crate.exists() or temp_crate.stat().st_size < len(header_bytes):
+                            raise IOError("Arquivo temporário da crate gerado incompleto.")
+
+                        if not temp_crate.read_bytes().startswith(b'vrsn'):
+                            raise IOError("Arquivo temporário da crate não possui cabeçalho vrsn válido.")
+
+                        os.replace(str(temp_crate), str(crate_file))
+
+                        total_removed += removed_in_this
+                        crates_affected.append({
+                            "crate": crate_file.stem.replace('%%', ' -> '),
+                            "removidas": removed_in_this,
+                            "restantes": len(kept_blocks),
+                            "puladas_desconectadas": skipped_unmounted,
+                            "backup": str(backup_path)
+                        })
+                    finally:
+                        if temp_crate.exists():
+                            try:
+                                temp_crate.unlink()
+                            except Exception:
+                                pass
 
             except Exception as e:
                 crates_affected.append({
@@ -1013,7 +1190,7 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
     total_db_removed = 0
     for db_cand in db_candidates:
         if db_cand.exists():
-            cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None)
+            cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None, max_pct=max_lost_pct)
             total_db_removed += cnt
 
     # Também remove do banco SQLite de Sound Seals para manter o cache sincronizado
@@ -1062,40 +1239,40 @@ def main():
 
     if args.clear_masters:
         res = clear_all_sound_seal_masters()
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0)
 
     if args.batch_set_masters:
         try:
             masters_data = json.loads(args.batch_set_masters)
             res = batch_set_sound_seal_masters(masters_data)
-            print(json.dumps(res, ensure_ascii=False))
+            print(json.dumps(res, ensure_ascii=False), flush=True)
             sys.exit(0)
         except Exception as e:
-            print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False))
+            print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)
 
     if args.set_master:
         seal, fp = args.set_master
         res = set_sound_seal_master(seal, fp)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.status:
         res = get_sound_seal_status()
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0)
 
     if args.duplicates:
         res = get_sound_seal_duplicates(strategy=args.strategy)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0)
 
     mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
 
     if args.relink:
         res = relink_track(mp3_dir, args.rel_path, args.source_path)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.batch_relink:
@@ -1108,7 +1285,7 @@ def main():
             batch_relink_tracks(mp3_dir, items)
             sys.exit(0)
         except Exception as e:
-            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}), flush=True)
             sys.exit(1)
 
     if args.scan:
@@ -1128,7 +1305,7 @@ def main():
             target_path=args.target_path,
             target_paths_json=args.target_paths
         )
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     parser.print_help()

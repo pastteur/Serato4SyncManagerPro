@@ -18,6 +18,7 @@ logs/.serato_sync_summary.json
 *.sqlite-wal
 *.sqlite-shm
 *.db
+.backups_audit/
 
 # macOS System Files
 .DS_Store

@@ -693,9 +693,26 @@ def export_matched_to_serato_crate(crate_name: str, matched_items: list, serato_
 
         track_entries.extend(track_block)
 
-    with open(crate_path, 'wb') as f:
-        f.write(header)
-        f.write(track_entries)
+    bak = crate_path.with_suffix('.bak')
+    if crate_path.exists():
+        import shutil as _sh
+        _sh.copy2(crate_path, bak)
+
+    import uuid
+    tmp = crate_path.with_name(f".tmp_{crate_path.name}_{uuid.uuid4().hex[:8]}")
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(header)
+            f.write(track_entries)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, crate_path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
     return {
         "sucesso": True,

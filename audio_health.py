@@ -656,15 +656,19 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
     used_provider = ""
     last_err = ""
 
-    def _cleanup_temp():
+    def _cleanup_temp(all_stems: bool = False):
         try:
-            for f in file_p.parent.glob(f"{file_p.stem}.__sync_work_{timestamp_str}*"):
+            pattern = f"{file_p.stem}.__sync_work_*" if all_stems else f"{file_p.stem}.__sync_work_{timestamp_str}*"
+            for f in file_p.parent.glob(pattern):
                 try:
                     f.unlink(missing_ok=True)
                 except Exception:
                     pass
         except Exception:
             pass
+
+    # Limpeza prévia de temporários órfãos de tentativas anteriores (L1)
+    _cleanup_temp(all_stems=True)
 
     try:
         for provider_name, search_term in search_strategies:
@@ -1116,11 +1120,21 @@ def rename_audio_track(filepath_str: str, new_name_str: str) -> dict:
     if not file_p.exists():
         return {"sucesso": False, "erro": "Arquivo original não encontrado no disco."}
 
-    new_name = new_name_str.strip()
+    # Validação rigorosa contra travessia de diretório (L2)
+    clean_name = new_name_str.strip().replace('\\', '/')
+    if '/' in clean_name or '..' in clean_name:
+        return {"sucesso": False, "erro": "Tentativa de travessia de diretório detectada no nome do arquivo."}
+
+    new_name = Path(clean_name).name.strip()
+    if not new_name:
+        return {"sucesso": False, "erro": "Nome de arquivo inválido ou vazio."}
+
     if not new_name.lower().endswith(file_p.suffix.lower()):
         new_name += file_p.suffix
 
     new_file_p = file_p.parent / new_name
+    if new_file_p.resolve().parent != file_p.parent.resolve():
+        return {"sucesso": False, "erro": "Destino fora do diretório autorizado."}
     if new_file_p == file_p:
         return {"sucesso": True, "novo_caminho": str(file_p), "novo_nome": file_p.name, "mensagem": "Nome inalterado."}
 
@@ -1377,17 +1391,17 @@ def main():
 
     if args.rename_track and args.new_name:
         res = rename_audio_track(args.rename_track, args.new_name)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.spectrogram:
         res = generate_audio_spectrogram(Path(args.spectrogram))
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.preaudit_online:
         res = preaudit_track_online(args.preaudit_online)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0)
 
     if args.batch_preaudit_online:
@@ -1400,12 +1414,12 @@ def main():
             batch_preaudit_tracks_online(fps)
             sys.exit(0)
         except Exception as e:
-            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}), flush=True)
             sys.exit(1)
 
     if args.repair_online:
         res = repair_track_online(args.repair_online, serato_dir_str=serato_dir)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.batch_repair_online:
@@ -1418,12 +1432,12 @@ def main():
             batch_repair_tracks_online(fps, serato_dir_str=serato_dir)
             sys.exit(0)
         except Exception as e:
-            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}))
+            print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}), flush=True)
             sys.exit(1)
 
     if args.resample_local:
         res = resample_track_local(args.resample_local)
-        print(json.dumps(res, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
     if args.batch_resample_local:
