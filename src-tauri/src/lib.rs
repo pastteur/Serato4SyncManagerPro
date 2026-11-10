@@ -126,6 +126,7 @@ fn find_python_binary() -> Result<PathBuf, String> {
     }
     candidates.push(PathBuf::from("/opt/homebrew/bin/python3"));
     candidates.push(PathBuf::from("/usr/local/bin/python3"));
+    candidates.push(PathBuf::from("/usr/bin/python3"));
 
     // Descoberta pelo PATH é permitida, mas cada candidato é validado antes de uso.
     if let Some(path_env) = std::env::var_os("PATH") {
