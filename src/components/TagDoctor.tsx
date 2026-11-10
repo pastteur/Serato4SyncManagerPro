@@ -1275,7 +1275,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
 
                       {/* Seta indicadora */}
                       <td className="py-2 px-3 text-center text-serato-cyan">
-                        <ArrowRight className="w-3.5 h-3.5 mx-auto opacity-70" />
+                        <ArrowRight className="w-3.5 h-3.5 mx-auto opacity-70" aria-hidden="true" />
                       </td>
 
                       {/* Como Vai Ficar (Com Visualizador Diff Antes vs Depois) */}
@@ -1356,7 +1356,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                               </span>
                             )}
                           </div>
-                          {onPlayTrack && (
+                          {onPlayTrack && item.caminho && (
                             <button
                               type="button"
                               onClick={(e) => {
@@ -1366,13 +1366,13 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                                   nome: item.arquivo_atual,
                                   artista: item.artista_atual || item.artista_sugerido,
                                   titulo: item.titulo_atual || item.titulo_sugerido,
-                                  bpm: item.bpm ? parseFloat(item.bpm) : undefined
+                                  bpm: item.bpm ? (isNaN(parseFloat(item.bpm)) ? undefined : parseFloat(item.bpm)) : undefined
                                 });
                               }}
                               className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white transition cursor-pointer shrink-0"
                               title="Tocar no Player nativo"
                             >
-                              <Play className="w-3.5 h-3.5 fill-current" />
+                              <Play className="w-3.5 h-3.5 fill-current" aria-hidden="true" />
                             </button>
                           )}
                         </div>
@@ -1388,7 +1388,15 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
                   <td colSpan={7} className="text-center py-3 bg-serato-dark/40 border-t border-serato-cardBorder">
                     <button
                       type="button"
-                      onClick={() => setVisibleCount(prev => Math.min(prev + 200, filteredAndSortedItems.length))}
+                      onClick={() => {
+                        setVisibleCount(prev => {
+                          const next = Math.min(prev + 200, filteredAndSortedItems.length);
+                          if (next < filteredAndSortedItems.length) {
+                            document.getElementById('scroller')?.scrollIntoView({ behavior: 'smooth' });
+                          }
+                          return next;
+                        });
+                      }}
                       className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs text-serato-cyan border border-slate-700 font-medium cursor-pointer transition shadow-sm"
                     >
                       ⬇️ Carregar mais faixas (+200) ou continue rolando a tela... (exibindo {visibleItems.length.toLocaleString()} de {filteredAndSortedItems.length.toLocaleString()})
