@@ -38,3 +38,6 @@ __pycache__/
 *.swp
 *.swo
 dist_old_root/
+
+# Agent Workspaces
+.agents/teamwork/

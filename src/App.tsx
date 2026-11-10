@@ -735,10 +735,10 @@ export const App: React.FC = () => {
                 duplicates={summary?.duplicados || []}
                 csvPath={summary?.csv_duplicados || null}
                 onOpenLogsFolder={handleOpenLogsFolder}
-                onExportCsv={handleOpenLogsFolder}
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onMoveToTrash={handleMoveToTrash}
                 onPlayTrack={(track) => setActivePlayingTrack(track)}
+                onAddLog={addLog}
               />
             </div>
 

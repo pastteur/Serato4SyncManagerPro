@@ -21,6 +21,7 @@ interface DuplicatesAuditProps {
   onPlayTrack?: (track: PlayingTrackInfo) => void;
   mp3Path?: string;
   seratoPath?: string;
+  onAddLog?: (message: string) => void;
 }
 
 export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
@@ -32,7 +33,8 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   onMoveToTrash,
   onPlayTrack,
   mp3Path,
-  seratoPath
+  seratoPath,
+  onAddLog
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedFolderFilter, setSelectedFolderFilter] = useState<string>('all');
@@ -41,6 +43,8 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
   const [selectedBatchIds, setSelectedBatchIds] = useState<Set<string>>(new Set());
   const [isBatchDeleting, setIsBatchDeleting] = useState<boolean>(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(null);
+  const [isExportingCsv, setIsExportingCsv] = useState<boolean>(false);
+  const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
 
   // Estados da Varredura Lateral Multi-Pastas
   const [showMultiScanner, setShowMultiScanner] = useState<boolean>(() => duplicates.length === 0);
@@ -422,6 +426,115 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     });
   };
 
+  // Exportador de CSV com delimitador ';' e suporte UTF-8 BOM
+  const handleExportCsv = async () => {
+    if (onExportCsv) {
+      onExportCsv();
+      return;
+    }
+
+    const listToExport = filteredDuplicates.length > 0 ? filteredDuplicates : activeDuplicates;
+    if (listToExport.length === 0) {
+      if (onAddLog) onAddLog('⚠️ Nenhuma duplicata encontrada para exportar.');
+      return;
+    }
+
+    setIsExportingCsv(true);
+    try {
+      const escapeCsv = (val: any) => {
+        if (val === undefined || val === null) return '""';
+        const s = String(val);
+        return `"${s.replace(/"/g, '""')}"`;
+      };
+
+      const headers = [
+        'Nome da Faixa',
+        'Localização da Cópia (Redundante)',
+        'Localização da Original (Preservada)',
+        'Tamanho (Bytes)',
+        'Tamanho Formatado',
+        'Grau de Certeza',
+        'Motivo',
+        'Hash de Áudio SHA-256'
+      ];
+
+      const rows = listToExport.map((item) => {
+        const copyPath = item.caminho_copia || `${item.copia}/${item.nome}`;
+        const originalPath = item.caminho_original || `${item.original}/${item.nome}`;
+        return [
+          escapeCsv(item.nome),
+          escapeCsv(copyPath),
+          escapeCsv(originalPath),
+          item.tamanho || 0,
+          escapeCsv(formatSize(item.tamanho)),
+          escapeCsv(item.grau_certeza || 'POSSIVEL_DUPLICADO'),
+          escapeCsv(item.motivo || ''),
+          escapeCsv(item.hash_audio || '')
+        ].join(';');
+      });
+
+      // UTF-8 BOM (\uFEFF) para compatibilidade perfeita com Excel no Windows e Mac com separador ';'
+      const csvContent = '\uFEFF' + [headers.join(';'), ...rows].join('\r\n');
+
+      const now = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const timestamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+      const filename = `relatorio_duplicados_${timestamp}.csv`;
+      const targetRelPath = `~/SeratoSync/logs/${filename}`;
+
+      let savedPath: string | null = null;
+
+      // 1. Salvar no disco via comando nativo Tauri em ~/SeratoSync/logs/
+      if (isTauri) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          savedPath = await invoke<string>('save_text_file', {
+            path: targetRelPath,
+            content: csvContent
+          });
+        } catch (tauriErr) {
+          console.warn('Falha ao salvar via comando save_text_file:', tauriErr);
+        }
+      }
+
+      // 2. Download via Blob no navegador / webview (garante arquivo salvo mesmo em caso de restrição de escrita direta)
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.setAttribute('href', url);
+      link.setAttribute('download', filename);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      // 3. Se salvou no disco via Tauri, revela o arquivo exato no Finder nativo
+      if (savedPath && onOpenFileInFinder) {
+        onOpenFileInFinder(savedPath);
+      } else if (savedPath && isTauri) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          await invoke('open_file_in_finder', { path: savedPath });
+        } catch {}
+      }
+
+      const logMsg = `📊 Relatório CSV exportado com sucesso: ${filename} (${listToExport.length} itens)`;
+      if (onAddLog) {
+        onAddLog(logMsg);
+      }
+      setExportSuccessMsg(`CSV exportado (${listToExport.length} itens): ${filename}`);
+      setTimeout(() => setExportSuccessMsg(null), 6000);
+    } catch (err: any) {
+      console.error('Erro ao exportar CSV:', err);
+      if (onAddLog) {
+        onAddLog(`❌ Erro ao exportar CSV: ${err.message || err}`);
+      }
+    } finally {
+      setIsExportingCsv(false);
+    }
+  };
+
   const isAllVisibleSelected = filteredDuplicates.length > 0 &&
     filteredDuplicates.every(d => selectedBatchIds.has(d.id));
 
@@ -503,15 +616,22 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
             </button>
           )}
 
-          {onExportCsv && (
-            <button
-              type="button"
-              onClick={onExportCsv}
-              className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-serato-gold/10 hover:bg-serato-gold/20 text-serato-gold border border-serato-gold/30 transition flex items-center gap-1.5 cursor-pointer"
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5" />
-              <span>Exportar CSV (;)</span>
-            </button>
+          <button
+            type="button"
+            onClick={handleExportCsv}
+            disabled={activeDuplicates.length === 0 || isExportingCsv}
+            className="text-xs font-semibold px-2.5 py-1.5 rounded-lg bg-serato-gold/10 hover:bg-serato-gold/20 text-serato-gold border border-serato-gold/30 transition flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
+            title="Exportar todas as faixas duplicadas para arquivo CSV formatado com ponto e vírgula (;)"
+          >
+            <FileSpreadsheet className="w-3.5 h-3.5" />
+            <span>{isExportingCsv ? 'Exportando CSV...' : 'Exportar CSV (;)'}</span>
+          </button>
+
+          {exportSuccessMsg && (
+            <span className="text-[11px] text-emerald-300 font-mono flex items-center gap-1 bg-emerald-950/60 border border-emerald-700/60 px-2 py-1 rounded-md animate-in fade-in">
+              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+              <span>{exportSuccessMsg}</span>
+            </span>
           )}
 
           <button
@@ -922,6 +1042,16 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                             <span className="text-slate-300 truncate max-w-[190px]" title={copyPath}>
                               {copyPath.split('/').slice(-2).join('/')}
                             </span>
+                            {onOpenFileInFinder && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenFileInFinder(copyPath)}
+                                className="p-1 rounded bg-serato-dark/70 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700/50 transition cursor-pointer shrink-0"
+                                title={`Revelar arquivo de Cópia no Finder:\n${copyPath}`}
+                              >
+                                <Eye className="w-3 h-3 text-amber-400" />
+                              </button>
+                            )}
                           </div>
                         </td>
 
@@ -934,6 +1064,16 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                             <span className="text-slate-400 truncate max-w-[190px]" title={originalPath}>
                               {originalPath.split('/').slice(-2).join('/')}
                             </span>
+                            {onOpenFileInFinder && (
+                              <button
+                                type="button"
+                                onClick={() => onOpenFileInFinder(originalPath)}
+                                className="p-1 rounded bg-serato-dark/70 hover:bg-slate-700 text-slate-400 hover:text-emerald-300 border border-slate-700/50 transition cursor-pointer shrink-0"
+                                title={`Revelar arquivo Original no Finder:\n${originalPath}`}
+                              >
+                                <Eye className="w-3 h-3 text-emerald-400" />
+                              </button>
+                            )}
                           </div>
                         </td>
 
@@ -960,14 +1100,24 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                             )}
 
                             {onOpenFileInFinder && (
-                              <button
-                                type="button"
-                                onClick={() => onOpenFileInFinder(copyPath)}
-                                className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 hover:text-white border border-serato-cardBorder transition cursor-pointer"
-                                title="Revelar arquivo de cópia no Finder"
-                              >
-                                <Eye className="w-3.5 h-3.5 text-serato-cyan" />
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenFileInFinder(originalPath)}
+                                  className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 hover:text-white border border-serato-cardBorder transition cursor-pointer"
+                                  title={`Revelar arquivo Original preservado no Finder:\n${originalPath}`}
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-emerald-400" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenFileInFinder(copyPath)}
+                                  className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 hover:text-white border border-serato-cardBorder transition cursor-pointer"
+                                  title={`Revelar arquivo de Cópia redundante no Finder:\n${copyPath}`}
+                                >
+                                  <Eye className="w-3.5 h-3.5 text-serato-cyan" />
+                                </button>
+                              </>
                             )}
 
                             {onMoveToTrash && (

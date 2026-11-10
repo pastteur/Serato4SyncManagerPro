@@ -723,6 +723,28 @@ mod commands {
     }
 
     #[tauri::command]
+    pub async fn save_text_file(path: String, content: String) -> Result<String, String> {
+        let expanded = if path.starts_with("~/") {
+            if let Some(home) = dirs_home() {
+                home.join(&path[2..])
+            } else {
+                PathBuf::from(&path)
+            }
+        } else {
+            PathBuf::from(&path)
+        };
+
+        if let Some(parent) = expanded.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
+        std::fs::write(&expanded, content.as_bytes())
+            .map_err(|e| format!("Erro ao salvar arquivo em {}: {}", expanded.display(), e))?;
+
+        Ok(expanded.to_string_lossy().to_string())
+    }
+
+    #[tauri::command]
     pub async fn move_to_trash(path: String) -> Result<(), String> {
         let mut file_path = PathBuf::from(&path);
 
@@ -3031,6 +3053,7 @@ pub fn run() {
             commands::start_sync,
             commands::open_in_finder,
             commands::open_file_in_finder,
+            commands::save_text_file,
             commands::move_to_trash,
             commands::list_crates_tag_doctor,
             commands::scan_tags_doctor,
