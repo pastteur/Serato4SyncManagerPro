@@ -167,7 +167,7 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
       setBusyAnalysis(true);
       setAnalysisRows([]);
       setAnalysisProgress(null);
-      onAddLog(`🎚️ Análise de BPM/Tom iniciada em toda a biblioteca (${analysisWrite ? 'gravando tags' : 'somente leitura'}).`);
+      onAddLog(`🎚️ Análise de BPM/Tom iniciada em toda a biblioteca (${analysisWrite ? 'gravando tags' : 'somente leitura'}, ${analysisIncludeFilled ? 'reanalisando todas as faixas' : 'apenas faixas sem BPM/tom'}).`);
       try {
         const res = await call<any>('analyze_tracks_batch', {
           mp3Path, limit: 0, write: analysisWrite, includeFilled: analysisIncludeFilled,
@@ -184,7 +184,9 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
       setConfirm({
         open: true,
         title: 'Gravar BPM e tom nas tags?',
-        message: 'Serão gravados BPM e tom (Camelot) em todas as faixas MP3 da biblioteca que ainda não têm esses campos.',
+        message: analysisIncludeFilled
+          ? 'Serão regravados BPM e tom (Camelot) em 100% das faixas da biblioteca (inclusive faixas com tags já preenchidas).'
+          : 'Serão gravados BPM e tom (Camelot) apenas nas faixas MP3 da biblioteca que ainda não têm esses campos preenchidos.',
         detail: 'Cada alteração fica registrada no journal e pode ser desfeita na seção "Desfazer". Recomendado: rode a análise sem gravar primeiro e confira os resultados.',
         run: () => { setConfirm(c => ({ ...c, open: false })); doRun(); },
       });
@@ -404,9 +406,9 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
             <input type="checkbox" checked={analysisWrite} onChange={e => setAnalysisWrite(e.target.checked)} />
             Gravar nas tags (MP3)
           </label>
-          <label className="flex items-center gap-2 text-xs text-slate-300">
+          <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer" title="Regrava BPM e tom inclusive nas faixas que já possuem essas tags preenchidas">
             <input type="checkbox" checked={analysisIncludeFilled} onChange={e => setAnalysisIncludeFilled(e.target.checked)} />
-            Incluir já preenchidas
+            <span>Reanalisar todas (incluir já preenchidas)</span>
           </label>
           <Btn tone="primary" onClick={runAnalysis} disabled={!mp3Path || busyAnalysis}>
             <Play className="w-3.5 h-3.5" />

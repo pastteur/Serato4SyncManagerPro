@@ -16,6 +16,7 @@ Auditoria profunda de integridade e reparação de faixas:
 
 import sys
 import os
+import hashlib
 
 sys.dont_write_bytecode = True
 import json
@@ -588,9 +589,22 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
             "erro": "yt-dlp não localizado em /opt/homebrew/bin/yt-dlp. Instale com 'brew install yt-dlp ffmpeg'."
         }
 
-    file_p = Path(filepath_str)
+    file_p = Path(filepath_str).resolve()
     if not file_p.exists():
         return {"sucesso": False, "erro": "Arquivo original não encontrado no disco."}
+
+    # Cálculo do hash SHA-256 inicial do arquivo original para garantia de integridade transacional
+    def _calc_sha256(path_to_hash: Path) -> str:
+        h = hashlib.sha256()
+        with open(path_to_hash, 'rb') as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
+    try:
+        initial_orig_hash = _calc_sha256(file_p)
+    except Exception as e:
+        return {"sucesso": False, "erro": f"Falha ao computar hash de integridade inicial: {e}"}
 
     # 2. BLOQUEIO DE CONCORRÊNCIA SOBRE O MESMO ARQUIVO
     lock_file = file_p.parent / f".{file_p.name}.repair_lock"
@@ -757,7 +771,7 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
                 "diferenca": diff_time
             }
 
-        # REVALIDAÇÃO SERATO LOCK ANTES DA GRAVAÇÃO DEFINITIVA
+        # REVALIDAÇÃO SERATO LOCK IMEDIATAMENTE ANTES DA GRAVAÇÃO DEFINITIVA
         is_running_again, lock_reason_again = is_serato_running_py()
         if is_running_again:
             _cleanup_temp()
@@ -767,12 +781,33 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
                 "erro": f"BLOQUEIO DE SEGURANÇA IMEDIATO: {lock_reason_again}"
             }
 
-        # REGISTRO NO JOURNAL DE ALTERAÇÕES
+        # REVALIDAÇÃO DO HASH DO ORIGINAL: Comprova que o arquivo não foi alterado durante o download
+        try:
+            current_orig_hash = _calc_sha256(file_p)
+            if current_orig_hash != initial_orig_hash:
+                _cleanup_temp()
+                return {
+                    "sucesso": False,
+                    "bloqueado_seguranca": True,
+                    "erro": "Substituição cancelada por segurança: o arquivo original foi modificado externamente durante o download."
+                }
+        except Exception as e:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Falha ao revalidar integridade do arquivo original: {e}"
+            }
+
+        # REGISTRO NO JOURNAL DE ALTERAÇÕES (MANDATÓRIO: fail-closed)
         try:
             import journal
             journal.record_id3_before_change(str(file_p), action="repair_online")
-        except Exception:
-            pass
+        except Exception as j_err:
+            _cleanup_temp()
+            return {
+                "sucesso": False,
+                "erro": f"Cancelado por segurança: Falha obrigatória no Journal de auditoria: {j_err}"
+            }
 
         # PRESERVAÇÃO E AUDITORIA COMPROVADA DE METADADOS ID3v2.3 E SERATO
         try:
@@ -803,13 +838,23 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
 
             new_id3.save(str(downloaded_mp3), v2_version=3)
 
-            # VALIDAÇÃO PÓS-ESCRITA: Comprova que as tags críticas realmente foram salvas
+            # VALIDAÇÃO PÓS-ESCRITA COMPROVADA: Comprova presença E igualdade integral de valores
             reopened_id3 = ID3(str(downloaded_mp3))
             for ck in critical_keys:
                 if ck not in reopened_id3:
                     raise ValueError(f"Tag crítica '{ck}' ausente no arquivo pós-gravação.")
-                if ck.startswith('GEOB') and orig_id3[ck].data != reopened_id3[ck].data:
-                    raise ValueError(f"Dados binários de '{ck}' divergentes no arquivo de destino.")
+                if ck.startswith('GEOB'):
+                    if orig_id3[ck].data != reopened_id3[ck].data:
+                        raise ValueError(f"Dados binários de '{ck}' divergentes no arquivo de destino.")
+                else:
+                    # Compara o valor textual/dados de tags críticas (TBPM, TKEY, TIT2, etc.)
+                    orig_val = getattr(orig_id3[ck], 'text', None)
+                    reopened_val = getattr(reopened_id3[ck], 'text', None)
+                    if orig_val is not None and reopened_val is not None:
+                        if orig_val != reopened_val:
+                            raise ValueError(f"Valor da tag crítica '{ck}' divergente: esperado {orig_val}, gravado {reopened_val}.")
+                    elif str(orig_id3[ck]) != str(reopened_id3[ck]):
+                        raise ValueError(f"Conteúdo da tag crítica '{ck}' divergente no arquivo final.")
         except Exception as e:
             _cleanup_temp()
             return {
@@ -828,6 +873,7 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
                 "erro": f"Falha ao criar backup temporário de segurança: {e}"
             }
 
+        quarantine_file = None
         try:
             # os.replace é atômica no mesmo sistema de arquivos
             os.replace(str(downloaded_mp3), str(file_p))
@@ -841,32 +887,33 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
             quarantine_file = quarantine_dir / f"{timestamp_str}_{file_p.name}"
             shutil.move(str(backup_file), str(quarantine_file))
 
-            # Manifesto JSON com metadados de rastreabilidade
+            # Manifesto JSON com metadados de rastreabilidade (MANDATÓRIO: fail-closed)
             manifest_file = quarantine_dir / f"{timestamp_str}_{file_p.name}.meta.json"
-            try:
-                manifest_data = {
-                    "timestamp": timestamp_str,
-                    "data_iso": datetime.now().isoformat(),
-                    "caminho_original": str(file_p),
-                    "arquivo_nome": file_p.name,
-                    "quarentena_arquivo": quarantine_file.name,
-                    "provedor_download": used_provider,
-                    "duracao_original": orig_dur,
-                    "duracao_candidata": cand_dur,
-                    "diferenca_seg": diff_time,
-                    "bitrate_kbps": round(cand_bitrate / 1000) if cand_bitrate else 320,
-                    "sample_rate_hz": cand_sample_rate,
-                    "status": "substituicao_confirmada"
-                }
-                manifest_file.write_text(json.dumps(manifest_data, indent=2, ensure_ascii=False), encoding='utf-8')
-            except Exception:
-                pass
+            manifest_data = {
+                "timestamp": timestamp_str,
+                "data_iso": datetime.now().isoformat(),
+                "caminho_original": str(file_p),
+                "arquivo_nome": file_p.name,
+                "quarentena_arquivo": quarantine_file.name,
+                "provedor_download": used_provider,
+                "duracao_original": orig_dur,
+                "duracao_candidata": cand_dur,
+                "diferenca_seg": diff_time,
+                "bitrate_kbps": round(cand_bitrate / 1000) if cand_bitrate else 320,
+                "sample_rate_hz": cand_sample_rate,
+                "status": "substituicao_confirmada"
+            }
+            manifest_file.write_text(json.dumps(manifest_data, indent=2, ensure_ascii=False), encoding='utf-8')
+            if not manifest_file.exists() or manifest_file.stat().st_size == 0:
+                raise IOError("Falha na geração obrigatória do manifesto de quarentena.")
 
         except Exception as err:
-            # ROLLBACK AUTOMÁTICO: Restaura o arquivo original imediatamente
+            # ROLLBACK AUTOMÁTICO COMPLETO: Restaura o arquivo original imediatamente
             try:
                 if backup_file.exists():
                     os.replace(str(backup_file), str(file_p))
+                elif quarantine_file and quarantine_file.exists():
+                    os.replace(str(quarantine_file), str(file_p))
             except Exception as rb_err:
                 return {
                     "sucesso": False,
@@ -897,11 +944,17 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
             try:
                 import fcntl
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                os.close(lock_fd)
-                if lock_file.exists():
-                    lock_file.unlink(missing_ok=True)
             except Exception:
                 pass
+            try:
+                os.close(lock_fd)
+            except Exception:
+                pass
+            # NOTA DE SEGURANÇA CONTRA CONCORRÊNCIA DA AUDITORIA:
+            # O arquivo de lock NÃO é desvinculado (unlink) no finally.
+            # Em sistemas POSIX, o unlink criaria uma janela de corrida onde um terceiro processo
+            # poderia criar um novo arquivo enquanto outro processo ainda aguarda a exclusividade.
+            # O fechamento de descritores libera automaticamente as travas do kernel com total segurança.
 
 
 def preaudit_track_online(filepath_str: str) -> dict:
@@ -1222,9 +1275,12 @@ def batch_resample_tracks_local(filepaths: list):
             "ultimo_sucesso": res.get("sucesso", False)
         }, ensure_ascii=False), flush=True)
 
+    all_success_resample = (len(errors) == 0 and updated_count == total)
+    has_partial_resample = (updated_count > 0 and len(errors) > 0)
     print(json.dumps({
         "tipo": "fim",
-        "sucesso": True,
+        "sucesso": all_success_resample,
+        "sucesso_parcial": has_partial_resample,
         "total": total,
         "atualizados": updated_count,
         "erros": errors[:10]
@@ -1281,9 +1337,12 @@ def batch_repair_tracks_online(filepaths: list, serato_dir_str: str = ""):
             "ultimo_sucesso": res.get("sucesso", False)
         }, ensure_ascii=False), flush=True)
 
+    all_success_repair = (len(errors) == 0 and updated_count == total)
+    has_partial_repair = (updated_count > 0 and len(errors) > 0)
     print(json.dumps({
         "tipo": "fim",
-        "sucesso": True,
+        "sucesso": all_success_repair,
+        "sucesso_parcial": has_partial_repair,
         "total": total,
         "atualizados": updated_count,
         "erros": errors[:10]

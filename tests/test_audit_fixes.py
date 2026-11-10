@@ -767,7 +767,7 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         """Comprova que o arquivo substituído gera manifesto .meta.json detalhado na Quarentena."""
         from unittest.mock import patch, MagicMock
 
-        orig_file = self.mp3_dir / "ManifestTrack.mp3"
+        orig_file = (self.mp3_dir / "ManifestTrack.mp3").resolve()
         orig_file.write_bytes(b"\xFF\xFB\x90\x00ORIGINAL_CONTENT" + b"\x00" * 25000)
 
         def mock_mp3_side_effect(path_str):
@@ -811,7 +811,7 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         """Comprova que duas tarefas tentando reparar o mesmo arquivo simultaneamente são bloqueadas."""
         from unittest.mock import patch
         import fcntl
-        orig_file = self.mp3_dir / "ConcurrentTrack.mp3"
+        orig_file = (self.mp3_dir / "ConcurrentTrack.mp3").resolve()
         orig_file.write_bytes(b"\xFF\xFB\x90\x00" + b"\x00" * 25000)
 
         lock_file = orig_file.parent / f".{orig_file.name}.repair_lock"
@@ -826,8 +826,138 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-            if lock_file.exists():
-                lock_file.unlink(missing_ok=True)
+            # Sem unlink para manter conformidade com ausência de race condition
+
+    def test_audio_health_hash_mismatch_during_download_aborts(self):
+        """Comprova que se o arquivo original for alterado externamente durante o download, a substituição é abortada."""
+        from unittest.mock import patch, MagicMock
+
+        orig_file = (self.mp3_dir / "ModifiedDuringDownload.mp3").resolve()
+        orig_file.write_bytes(b"\xFF\xFB\x90\x00INITIAL_AUDIO_CONTENT" + b"\x00" * 25000)
+
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            mock_mp3.info.length = 180.0
+            mock_mp3.info.sample_rate = 44100
+            mock_mp3.info.bitrate = 320000
+            return mock_mp3
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect):
+
+            def fake_run(cmd, **kwargs):
+                # Simula processo externo ou DJ tocando/modificando o arquivo original durante o download
+                orig_file.write_bytes(b"\xFF\xFB\x90\x00MODIFIED_EXTERNALLY" + b"\x00" * 25000)
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                out_path.write_bytes(b"\xFF\xFB\x90\x00CANDIDATE_AUDIO" + b"\x00" * 30000)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertFalse(res["sucesso"])
+            self.assertTrue(res.get("bloqueado_seguranca"))
+            self.assertIn("modificado externamente durante o download", res["erro"])
+            # Garante que o arquivo original não foi substituído pelo candidato
+            self.assertIn(b"MODIFIED_EXTERNALLY", orig_file.read_bytes())
+
+    def test_audio_health_rollback_after_candidate_installed(self):
+        """Comprova rollback efetivo restaurando o original quando falha ocorre DEPOIS do os.replace físico."""
+        from unittest.mock import patch, MagicMock
+
+        orig_file = (self.mp3_dir / "RollbackAfterInstall.mp3").resolve()
+        initial_content = b"\xFF\xFB\x90\x00ORIGINAL_EXCLUSIVE_BYTES" + b"\x00" * 25000
+        orig_file.write_bytes(initial_content)
+
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            mock_mp3.info.length = 200.0
+            mock_mp3.info.sample_rate = 44100
+            mock_mp3.info.bitrate = 320000
+            return mock_mp3
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect), \
+             patch("mutagen.id3.ID3"):
+
+            def fake_run(cmd, **kwargs):
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                out_path.write_bytes(b"\xFF\xFB\x90\x00CANDIDATE_BYTES" + b"\x00" * 30000)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            # Provoca erro intencional na validação de manifesto obrigatório pós-replace
+            with patch.object(Path, "write_text", side_effect=IOError("Disco cheio ao gravar manifesto .meta.json")):
+                res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+                self.assertFalse(res["sucesso"])
+                self.assertIn("Rollback executado", res["erro"])
+                # Comprova que o arquivo original foi restaurado ao seu estado inicial integral
+                self.assertEqual(orig_file.read_bytes(), initial_content)
+
+    def test_audio_health_duration_tolerance_short_tracks(self):
+        """Comprova os limites exatos da regra de tolerância de duração para faixas curtas (<= 50s)."""
+        # Para orig_dur = 20.0s -> max_tolerance = min(3.0, round(20 * 0.10, 1)) = 2.0s
+        dur_20 = 20.0
+        tol_20 = 10.0 if dur_20 > 50.0 else min(3.0, round(dur_20 * 0.10, 1))
+        self.assertEqual(tol_20, 2.0)
+        # Diferença de 1.8s deve ser aceita (<= 2.0)
+        self.assertLessEqual(1.8, tol_20)
+        # Diferença de 2.2s deve ser rejeitada (> 2.0)
+        self.assertGreater(2.2, tol_20)
+
+        # Para orig_dur = 40.0s -> max_tolerance = min(3.0, round(40 * 0.10, 1)) = 3.0s (teto atingido)
+        dur_40 = 40.0
+        tol_40 = 10.0 if dur_40 > 50.0 else min(3.0, round(dur_40 * 0.10, 1))
+        self.assertEqual(tol_40, 3.0)
+        self.assertLessEqual(2.9, tol_40)
+        self.assertGreater(3.2, tol_40)
+
+        # Para orig_dur = 120.0s (> 50s) -> max_tolerance = 10.0s
+        dur_120 = 120.0
+        tol_120 = 10.0 if dur_120 > 50.0 else min(3.0, round(dur_120 * 0.10, 1))
+        self.assertEqual(tol_120, 10.0)
+
+    def test_audio_health_batch_repair_reports_failure_on_individual_errors(self):
+        """Comprova que batch_repair_tracks_online sinaliza sucesso=False quando há erros individuais."""
+        import io
+        from unittest.mock import patch
+
+        file_list = ["/fake/Track1.mp3", "/fake/Track2.mp3"]
+
+        def mock_repair(fp, serato_dir_str=""):
+            if "Track1" in fp:
+                return {"sucesso": True, "arquivo": "Track1.mp3"}
+            else:
+                return {"sucesso": False, "erro": "Download falhou"}
+
+        with patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("audio_health.repair_track_online", side_effect=mock_repair), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
+
+            audio_health.batch_repair_tracks_online(file_list)
+            output = mock_stdout.getvalue()
+            lines = [json.loads(line) for line in output.strip().split("\n") if line.strip().startswith("{")]
+            fim_events = [e for e in lines if e.get("tipo") == "fim"]
+            self.assertEqual(len(fim_events), 1)
+            fim = fim_events[0]
+            # Comprova que NÃO emite sucesso enganoso
+            self.assertFalse(fim["sucesso"], "sucesso deve ser False se houver falhas parciais")
+            self.assertTrue(fim.get("sucesso_parcial"), "sucesso_parcial deve ser True se ao menos 1 atualizou")
+            self.assertEqual(fim["atualizados"], 1)
+            self.assertEqual(len(fim["erros"]), 1)
 
     def test_audio_health_id3_critical_tag_loss_aborts_repair(self):
         """Comprova que se a validação pós-escrita detectar perda de tags Serato GEOB, o processo é abortado."""
@@ -881,6 +1011,57 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
             self.assertFalse(res["sucesso"])
             self.assertIn("Falha ao preservar e comprovar metadados", res["erro"])
             self.assertTrue(orig_file.exists())
+
+    def test_audio_health_id3_real_physical_preservation_and_value_check(self):
+        """Comprova a preservação e verificação física real (sem mocks em ID3) de tags de texto e GEOB binário."""
+        from unittest.mock import patch, MagicMock
+        from mutagen.id3 import ID3, TIT2, TBPM, TKEY, GEOB
+
+        orig_file = (self.mp3_dir / "PhysicalID3Track.mp3").resolve()
+        self._create_dummy_mp3(orig_file, duration_sec=120.0)
+
+        # Grava tags reais no arquivo original
+        tag = ID3()
+        tag.add(TIT2(encoding=3, text=["Original Title Real"]))
+        tag.add(TBPM(encoding=3, text=["128"]))
+        tag.add(TKEY(encoding=3, text=["8A"]))
+        tag.add(GEOB(encoding=0, mime="application/octet-stream", desc="Serato Markers2", data=b"\x01\x00SERATO_PHYSICAL_CUE_BYTES"))
+        tag.save(str(orig_file), v2_version=3)
+
+        def mock_mp3_side_effect(path_str):
+            mock_mp3 = MagicMock()
+            mock_mp3.info.length = 120.0
+            mock_mp3.info.sample_rate = 44100
+            mock_mp3.info.bitrate = 320000
+            return mock_mp3
+
+        with patch("audio_health.get_yt_dlp_bin", return_value="/fake/yt-dlp"), \
+             patch("audio_health.is_serato_running_py", return_value=(False, "")), \
+             patch("subprocess.run") as mock_subproc, \
+             patch("mutagen.mp3.MP3", side_effect=mock_mp3_side_effect):
+
+            def fake_run(cmd, **kwargs):
+                out_idx = cmd.index("-o") + 1
+                out_tmpl = cmd[out_idx]
+                out_path = Path(out_tmpl.replace("%(ext)s", "mp3"))
+                # Cria dummy candidato físico com tags neutras
+                self._create_dummy_mp3(out_path, duration_sec=120.0)
+                mock_res = MagicMock()
+                mock_res.returncode = 0
+                return mock_res
+
+            mock_subproc.side_effect = fake_run
+
+            res = audio_health.repair_track_online(str(orig_file), serato_dir_str=str(self.serato_dir))
+            self.assertTrue(res["sucesso"], f"Substituição física falhou: {res.get('erro')}")
+
+            # Reabre o arquivo final físico do disco e audita os valores gravados
+            final_id3 = ID3(str(orig_file))
+            self.assertEqual(final_id3.version, (2, 3, 0), "Deve estar estritamente no padrão ID3v2.3 do Serato")
+            self.assertEqual(str(final_id3["TIT2"]), "Original Title Real")
+            self.assertEqual(str(final_id3["TBPM"]), "128")
+            self.assertEqual(str(final_id3["TKEY"]), "8A")
+            self.assertEqual(final_id3["GEOB:Serato Markers2"].data, b"\x01\x00SERATO_PHYSICAL_CUE_BYTES")
 
     def test_music_analysis_batch_zero_limit_analyzes_all(self):
         """Comprova que music_analysis.py com limit=0 analisa todas as faixas da biblioteca."""

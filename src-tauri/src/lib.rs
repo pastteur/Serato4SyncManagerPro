@@ -281,16 +281,14 @@ pub fn is_serato_running() -> bool {
     for proc_name in &procs {
         match Command::new("pgrep").arg("-x").arg(proc_name).output() {
             Ok(output) => {
-                if output.status.success() {
-                    return true;
-                }
-                if output.status.code().unwrap_or(0) > 1 {
-                    // Erro anômalo no pgrep: fail-closed por segurança
-                    return true;
+                match output.status.code() {
+                    Some(0) => return true, // Processo Serato detectado em execução ativa
+                    Some(1) => {},          // Nenhum processo ativo detectado com esse nome
+                    _ => return true,       // Fail-closed: código != 1 ou None (processo morto por sinal)
                 }
             }
             Err(_) => {
-                // Falha ao invocar pgrep no sistema: fail-closed por segurança
+                // Falha ao invocar pgrep no sistema operacional: fail-closed por segurança
                 return true;
             }
         }
@@ -1693,6 +1691,23 @@ mod commands {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar análise: {}", e))?;
+
+        // Drenagem concorrente de STDERR para prevenir DEADLOCK de pipe buffer do SO
+        let stderr_pipe = child.stderr.take();
+        let err_drain_thread = std::thread::spawn(move || {
+            let mut captured_err = String::new();
+            if let Some(pipe) = stderr_pipe {
+                let r = BufReader::new(pipe);
+                for line in r.lines().flatten() {
+                    if !captured_err.is_empty() {
+                        captured_err.push('\n');
+                    }
+                    captured_err.push_str(&line);
+                }
+            }
+            captured_err
+        });
+
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
             for line_res in BufReader::new(stdout).lines() {
@@ -1705,9 +1720,19 @@ mod commands {
                 }
             }
         }
+
+        let stderr_output = err_drain_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar análise: {}", e))?;
-        if !status.success() && final_json.is_empty() {
-            return Err("Erro na execução da análise de BPM/tom".into());
+        if !status.success() {
+            let msg = if !stderr_output.trim().is_empty() {
+                format!("Falha na execução da análise de BPM/tom: {}", stderr_output)
+            } else {
+                format!("Processo de análise encerrou com código anômalo {:?}", status.code())
+            };
+            return Err(msg);
+        }
+        if final_json.is_empty() {
+            return Err("Nenhum resultado retornado pelo processo de análise de BPM/tom".into());
         }
         Ok(final_json)
     }
