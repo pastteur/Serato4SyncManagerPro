@@ -1429,6 +1429,7 @@ mod commands {
         window: Window,
         mp3_path: String,
         batch: Option<usize>,
+        force: Option<bool>,
     ) -> Result<String, String> {
         let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
         cmd.arg("--scan");
@@ -1437,6 +1438,9 @@ mod commands {
         if let Some(b) = batch {
             cmd.arg("--batch");
             cmd.arg(b.to_string());
+        }
+        if let Some(true) = force {
+            cmd.arg("--force");
         }
 
         cmd.stdout(Stdio::piped());
@@ -2996,6 +3000,153 @@ mod commands {
     pub fn is_operation_active(state: tauri::State<'_, AppSecurityState>) -> bool {
         state.is_operation_active.load(Ordering::SeqCst)
     }
+
+    #[tauri::command]
+    pub async fn audit_serato_v4(app: AppHandle, library_path: Option<String>) -> Result<String, String> {
+        let mut args = vec!["--audit".into(), "--json".into()];
+        if let Some(p) = library_path {
+            if !p.trim().is_empty() {
+                args.push("--dir".into());
+                args.push(p);
+            }
+        }
+        run_py_json(&app, "serato_v4_engine.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn extract_apple_music_library(app: AppHandle) -> Result<String, String> {
+        run_py_json(&app, "music_library_helper.py", &["--json".into()])
+    }
+
+    #[tauri::command]
+    pub async fn search_fts_library(app: AppHandle, query: String, limit: Option<i32>) -> Result<String, String> {
+        let lim = limit.unwrap_or(40).to_string();
+        run_py_json(&app, "fts_library_cache.py", &[
+            "--search".into(), query,
+            "--limit".into(), lim
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn sync_fts_library(app: AppHandle, mp3_path: String) -> Result<String, String> {
+        run_py_json(&app, "fts_library_cache.py", &[
+            "--sync".into(), mp3_path
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn export_pioneer_usb(
+        app: AppHandle,
+        usb_path: String,
+        crate_name: String,
+        tracks_json: String,
+        copy_audio: bool,
+        dry_run: bool
+    ) -> Result<String, String> {
+        // Grava tracks_json em arquivo temporário para evitar estouro de buffer de linha de comando
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("pioneer_tracks_{}.json", std::process::id()));
+        std::fs::write(&temp_file, tracks_json).map_err(|e| format!("Falha ao gravar arquivo temporário: {}", e))?;
+
+        let mut args = vec![
+            "--usb".into(), usb_path,
+            "--crate".into(), crate_name,
+            "--tracks".into(), temp_file.to_string_lossy().to_string()
+        ];
+        if !copy_audio {
+            args.push("--no-copy".into());
+        }
+        if dry_run {
+            args.push("--dry-run".into());
+        }
+
+        let res = run_py_json(&app, "pioneer_usb_exporter.py", &args);
+        let _ = std::fs::remove_file(temp_file);
+        res
+    }
+
+    #[tauri::command]
+    pub async fn scan_unused_files(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
+        run_py_json(&app, "scan_unused_files.py", &[
+            "--mp3".into(), mp3_path,
+            "--serato".into(), serato_path,
+            "--json".into()
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn scan_beatshift(app: AppHandle, filepath: String) -> Result<String, String> {
+        run_py_json(&app, "beatshift_scanner.py", &[
+            "--file".into(), filepath,
+            "--json".into()
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn convert_key(app: AppHandle, key_str: String, target_format: String) -> Result<String, String> {
+        run_py_json(&app, "key_converter.py", &[
+            "--key".into(), key_str,
+            "--to".into(), target_format
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn clean_taxonomy_file(app: AppHandle, filepath: String, dry_run: bool) -> Result<String, String> {
+        let mut args = vec!["--file".into(), filepath];
+        if dry_run {
+            args.push("--dry-run".into());
+        }
+        run_py_json(&app, "taxonomy_cleaner.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn apply_recipe(app: AppHandle, recipe_name: String, files: Vec<String>) -> Result<String, String> {
+        let mut args = vec!["--recipe".into(), recipe_name, "--files".into()];
+        for f in files {
+            args.push(f);
+        }
+        run_py_json(&app, "recipe_engine.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn undo_recipe(app: AppHandle) -> Result<String, String> {
+        run_py_json(&app, "recipe_engine.py", &["--undo".into()])
+    }
+
+    #[tauri::command]
+    pub async fn get_deckwatch(app: AppHandle, serato_path: Option<String>) -> Result<String, String> {
+        let mut args = vec!["--json".into()];
+        if let Some(p) = serato_path {
+            if !p.trim().is_empty() {
+                args.push("--serato".into());
+                args.push(p);
+            }
+        }
+        run_py_json(&app, "deckwatch_monitor.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn update_mytags(
+        app: AppHandle,
+        filepath: String,
+        add_tags: Vec<String>,
+        remove_tags: Vec<String>
+    ) -> Result<String, String> {
+        let mut args = vec!["--file".into(), filepath];
+        if !add_tags.is_empty() {
+            args.push("--add".into());
+            for t in add_tags {
+                args.push(t);
+            }
+        }
+        if !remove_tags.is_empty() {
+            args.push("--remove".into());
+            for t in remove_tags {
+                args.push(t);
+            }
+        }
+        run_py_json(&app, "smart_tags.py", &args)
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3116,7 +3267,20 @@ pub fn run() {
             commands::stop_watching_folder,
             commands::detect_dj_volumes,
             commands::set_operation_active,
-            commands::is_operation_active
+            commands::is_operation_active,
+            commands::audit_serato_v4,
+            commands::extract_apple_music_library,
+            commands::search_fts_library,
+            commands::sync_fts_library,
+            commands::export_pioneer_usb,
+            commands::scan_unused_files,
+            commands::scan_beatshift,
+            commands::convert_key,
+            commands::clean_taxonomy_file,
+            commands::apply_recipe,
+            commands::undo_recipe,
+            commands::get_deckwatch,
+            commands::update_mytags
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");

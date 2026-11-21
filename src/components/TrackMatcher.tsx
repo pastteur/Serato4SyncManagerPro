@@ -4,9 +4,10 @@ import {
   Music, Search, Sparkles, Download, CheckCircle2, AlertTriangle,
   ExternalLink, ArrowRight, FolderPlus, FileText, Globe, Folder, Zap,
   CheckSquare, Square, RefreshCw, X, Layers, PlusCircle, Check,
-  Clock, ShieldAlert, ShieldCheck, Hash, Play
+  Clock, ShieldAlert, ShieldCheck, Hash, Play, Music2
 } from 'lucide-react';
 import { PlayingTrackInfo } from './AudioPlayerBar';
+import { AppleMusicModal } from './AppleMusicModal';
 
 interface TrackMatcherProps {
   mp3Path: string;
@@ -80,6 +81,8 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
     itemsToUpgrade: [],
     isProcessing: false
   });
+
+  const [isAppleMusicOpen, setIsAppleMusicOpen] = useState<boolean>(false);
 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 
@@ -589,6 +592,16 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
             >
               <Globe className="w-3.5 h-3.5" />
               <span>Spotify URL</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsAppleMusicOpen(true)}
+              className="px-2.5 py-1 text-xs rounded transition flex items-center gap-1.5 cursor-pointer bg-gradient-to-r from-rose-500/20 to-pink-500/20 hover:from-rose-500/30 hover:to-pink-500/30 text-rose-300 border border-rose-500/40 font-semibold"
+              title="Importa playlists diretamente do app Música nativo do macOS"
+            >
+              <Music2 className="w-3.5 h-3.5 text-rose-400" />
+              <span>🍎 Apple Music (macOS)</span>
             </button>
           </div>
 
@@ -1341,6 +1354,19 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal de Importação Apple Music */}
+      <AppleMusicModal
+        isOpen={isAppleMusicOpen}
+        onClose={() => setIsAppleMusicOpen(false)}
+        onImportTracks={(tracks, playlistName) => {
+          setCrateName(playlistName || 'Apple Music Pack');
+          setInputType('text');
+          setInputData(tracks.map(t => `${t.artist} - ${t.title}`).join('\n'));
+          if (onAddLog) onAddLog(`🍎 Importadas ${tracks.length} faixas da playlist '${playlistName}' do Apple Music.`);
+        }}
+        onAddLog={onAddLog}
+      />
     </div>
   );
 };

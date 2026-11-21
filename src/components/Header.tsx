@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio, BookOpen, FileText } from 'lucide-react';
+import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio, BookOpen, FileText, Database } from 'lucide-react';
+import { SeratoV4AuditModal } from './SeratoV4AuditModal';
 
 interface HeaderProps {
   isRunning: boolean;
@@ -24,6 +25,7 @@ interface SystemTelemetry {
 export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, onOpenGuide, onAddLog }) => {
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const [isExportingReport, setIsExportingReport] = useState<boolean>(false);
+  const [isV4ModalOpen, setIsV4ModalOpen] = useState<boolean>(false);
   
   const [telemetry, setTelemetry] = useState<SystemTelemetry>({
     cpu_percent: 0,
@@ -198,12 +200,26 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, 
           <Cpu className="w-3.5 h-3.5 text-serato-cyan" />
           <span>macOS Tahoe / Silicon</span>
         </div>
+        <button
+          type="button"
+          onClick={() => setIsV4ModalOpen(true)}
+          className="flex items-center space-x-1.5 text-[11px] text-serato-cyan bg-serato-cyan/10 hover:bg-serato-cyan/20 px-2.5 py-1.5 rounded-lg border border-serato-cyan/30 font-sans font-semibold transition cursor-pointer"
+          title="Inspeciona a integridade física e o status de migração do banco SQLite do Serato 4"
+        >
+          <Database className="w-3.5 h-3.5 text-serato-cyan" />
+          <span>Serato v4 Doctor</span>
+        </button>
         <div className="flex items-center space-x-1.5 text-[11px] text-serato-neonGreen bg-serato-neonGreen/10 px-2.5 py-1.5 rounded-lg border border-serato-neonGreen/30 font-sans font-semibold">
           <ShieldCheck className="w-3.5 h-3.5 text-serato-neonGreen" />
           <span>SQLite Blindado</span>
         </div>
       </div>
 
+      <SeratoV4AuditModal
+        isOpen={isV4ModalOpen}
+        onClose={() => setIsV4ModalOpen(false)}
+        seratoPath={seratoPath}
+      />
     </header>
   );
 };

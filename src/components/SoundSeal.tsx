@@ -259,22 +259,27 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     return result;
   }, [relocateResults, relocateSearch, relocateFilter]);
 
-  // Iniciar varredura do Sound Seal
-  const handleStartSealScan = async () => {
+  // Iniciar varredura do Sound Seal (com suporte a verificação rápida ou re-auditoria forçada)
+  const handleStartSealScan = async (forceRecheck: boolean = false) => {
     if (!mp3Path) {
       onAddLog('⚠️ Selecione a pasta MP3 antes de iniciar.');
       return;
     }
     setIsScanning(true);
     setSealScanProgress(null);
-    onAddLog(`🧬 Sound Seal: Extraindo assinaturas acústicas SHA-256 em ${mp3Path}...`);
+    if (forceRecheck) {
+      onAddLog(`🔄 Sound Seal: Forçando re-auditoria completa (recalculando SHA-256 de cada arquivo sem cache)...`);
+    } else {
+      onAddLog(`🧬 Sound Seal: Verificando integridade acústica em ${mp3Path}...`);
+    }
 
     try {
       if (isTauri) {
         const { invoke } = await import('@tauri-apps/api/core');
         const res = await invoke<string>('scan_sound_seals', {
           mp3Path,
-          batch: 0
+          batch: 0,
+          force: forceRecheck
         });
         if (!res || !res.trim()) throw new Error('O motor retornou resposta vazia.');
         let parsed: any;
@@ -286,7 +291,13 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
         setStatus(parsed);
         loadDuplicatesBySound(true);
         const totalSel = parsed.total_selados ?? parsed.total_processados ?? 0;
-        onAddLog(`✅ Sound Seal: Varredura concluída. ${Number(totalSel).toLocaleString()} faixas seladas com sucesso.`);
+        const novos = parsed.novos_selados ?? 0;
+
+        if (novos === 0 && (parsed.total_processados || 0) > 0) {
+          onAddLog(`⚡ Sound Seal: 100% da biblioteca já indexada! ${Number(parsed.total_processados).toLocaleString()} faixas validadas pelo cache de integridade em ~1s (0 arquivos alterados no disco).`);
+        } else {
+          onAddLog(`✅ Sound Seal: Varredura concluída. ${novos} novos selos acústicos gerados (${Number(totalSel).toLocaleString()} faixas no total).`);
+        }
       }
     } catch (e) {
       onAddLog(`❌ Erro no Sound Seal: ${e}`);
@@ -1094,12 +1105,24 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
 
               <button
                 type="button"
-                onClick={handleStartSealScan}
+                onClick={() => handleStartSealScan(false)}
                 disabled={isScanning || isTrashingBatch}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan hover:bg-cyan-300 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-40 cursor-pointer"
+                title="Valida a integridade da biblioteca usando cache inteligente (executa rápido se os arquivos não foram modificados)"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isScanning ? 'animate-spin' : ''}`} />
                 <span>{isScanning ? 'Ouvindo faixas...' : '🧬 Iniciar Sound Seal'}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => handleStartSealScan(true)}
+                disabled={isScanning || isTrashingBatch}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition disabled:opacity-40 cursor-pointer"
+                title="Força o recálculo do SHA-256 de todas as faixas direto do disco, ignorando o cache local"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-serato-gold" />
+                <span>Forçar Re-auditoria</span>
               </button>
             </>
           ) : (

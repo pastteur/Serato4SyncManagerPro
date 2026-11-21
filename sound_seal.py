@@ -135,11 +135,12 @@ def get_track_metadata(filepath_str: str):
     return bpm, key, duration
 
 
-def scan_sound_seals(mp3_base_dir: str, batch_size: int = 0, stream_json: bool = True):
+def scan_sound_seals(mp3_base_dir: str, batch_size: int = 0, stream_json: bool = True, force: bool = False):
     """
     Varre a pasta de MP3 e gera os Sound Seals de forma incremental e resiliente.
     batch_size = 0 significa varrer toda a biblioteca sem interrupção.
     Continua exatamente de onde parou após reinicialização.
+    force = True ignora o cache e recalcula os hashes de áudio puro do zero.
     """
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     if not base_path.exists():
@@ -187,7 +188,7 @@ def scan_sound_seals(mp3_base_dir: str, batch_size: int = 0, stream_json: bool =
 
         # Verifica cache
         is_cached = False
-        if path_str in cached:
+        if not force and path_str in cached:
             c_size, c_mtime, c_seal = cached[path_str]
             if c_size == size and abs(c_mtime - mtime) < 0.1 and c_seal:
                 is_cached = True
@@ -235,6 +236,7 @@ def scan_sound_seals(mp3_base_dir: str, batch_size: int = 0, stream_json: bool =
             "total_processados": processed_count,
             "total_arquivos": total_files,
             "novos_selados": new_computed,
+            "cache_reaproveitado": total_files - new_computed,
             **st
         }, ensure_ascii=False), flush=True)
     return st
@@ -1217,6 +1219,7 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
 def main():
     parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Sound Seal & Relocate")
     parser.add_argument("--scan", action="store_true", help="Gera Sound Seals na pasta MP3")
+    parser.add_argument("--force", action="store_true", help="Força recálculo completo de SHA-256 ignorando o cache")
     parser.add_argument("--mp3", type=str, default="", help="Caminho da pasta MP3")
     parser.add_argument("--serato", type=str, default="", help="Caminho da pasta Serato")
     parser.add_argument("--status", action="store_true", help="Retorna status do banco de Sound Seals")
@@ -1289,7 +1292,7 @@ def main():
             sys.exit(1)
 
     if args.scan:
-        scan_sound_seals(mp3_dir, batch_size=args.batch, stream_json=True)
+        scan_sound_seals(mp3_dir, batch_size=args.batch, stream_json=True, force=args.force)
         sys.exit(0)
 
     if args.relocate:

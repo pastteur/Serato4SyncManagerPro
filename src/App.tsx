@@ -13,12 +13,14 @@ import { BackupManager } from './components/BackupManager';
 import { AudioHealth } from './components/AudioHealth';
 import { AutoCueGenerator } from './components/AutoCueGenerator';
 import { LibraryTools } from './components/LibraryTools';
+import { LexiconSuite } from './components/LexiconSuite';
+import { PioneerExportModal } from './components/PioneerExportModal';
 import { AudioPlayerBar, PlayingTrackInfo } from './components/AudioPlayerBar';
 import { LogEntry, SyncSummary } from './types';
-import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2, X, Library, Sun, Moon } from 'lucide-react';
+import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2, X, Library, Sun, Moon, Zap } from 'lucide-react';
 
 
-type TabId = 'logs' | 'duplicates' | 'tree' | 'library' | 'matcher' | 'soundSeal' | 'tagDoctor' | 'health' | 'autoCue' | 'backups';
+type TabId = 'logs' | 'duplicates' | 'tree' | 'library' | 'matcher' | 'soundSeal' | 'tagDoctor' | 'health' | 'autoCue' | 'backups' | 'lexiconSuite';
 
 const TAB_META: Record<TabId, { label: string; icon: React.ComponentType<{ className?: string }>; iconClass: string }> = {
   logs: { label: 'Terminal & Sync', icon: Terminal, iconClass: '' },
@@ -27,6 +29,7 @@ const TAB_META: Record<TabId, { label: string; icon: React.ComponentType<{ class
   library: { label: 'Biblioteca', icon: Library, iconClass: '' },
   matcher: { label: 'Track Matcher', icon: Music, iconClass: '' },
   soundSeal: { label: 'Sound Seal & Relocate', icon: Shield, iconClass: '' },
+  lexiconSuite: { label: 'Universal DJ Tools', icon: Zap, iconClass: 'text-amber-400' },
   tagDoctor: { label: 'Tag Doctor', icon: Sparkles, iconClass: '' },
   health: { label: 'Audio Health', icon: Activity, iconClass: '' },
   autoCue: { label: 'Auto-Cue', icon: Target, iconClass: '' },
@@ -35,7 +38,7 @@ const TAB_META: Record<TabId, { label: string; icon: React.ComponentType<{ class
 
 const TAB_GROUPS: { label: string; tabs: TabId[] }[] = [
   { label: 'Sincronização', tabs: ['logs', 'duplicates', 'tree'] },
-  { label: 'Biblioteca', tabs: ['library', 'matcher', 'soundSeal'] },
+  { label: 'Biblioteca & Tools', tabs: ['library', 'matcher', 'soundSeal', 'lexiconSuite'] },
   { label: 'Tags e áudio', tabs: ['tagDoctor', 'health', 'autoCue'] },
   { label: 'Segurança', tabs: ['backups'] },
 ];
@@ -77,6 +80,7 @@ export const App: React.FC = () => {
   const [summary, setSummary] = useState<SyncSummary | null>(null);
   const [activeTab, setActiveTab] = useState<TabId>('logs');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
+  const [isPioneerModalOpen, setIsPioneerModalOpen] = useState<boolean>(false);
   const [seratoRunning, setSeratoRunning] = useState<boolean>(false);
   const [fsNotification, setFsNotification] = useState<{ count: number; extensions: string[] } | null>(null);
   const [activePlayingTrack, setActivePlayingTrack] = useState<PlayingTrackInfo | null>(null);
@@ -814,6 +818,16 @@ export const App: React.FC = () => {
                 onOpenLogsFolder={handleOpenLogsFolder}
               />
             </div>
+
+            <div className={activeTab === 'lexiconSuite' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+              <LexiconSuite
+                mp3Path={mp3Path}
+                seratoPath={seratoPath}
+                onPlayTrack={(track) => setActivePlayingTrack({ caminho: track.url, nome: track.nome, artista: track.artista })}
+                onAddLog={addLog}
+                onOpenPioneerExport={() => setIsPioneerModalOpen(true)}
+              />
+            </div>
           </div>
         </div>
       </main>
@@ -851,6 +865,14 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Modal de Exportação para CDJ Pioneer USB */}
+      <PioneerExportModal
+        isOpen={isPioneerModalOpen}
+        onClose={() => setIsPioneerModalOpen(false)}
+        availableCrates={Object.keys(summary?.crates_arvore || {})}
+        onAddLog={addLog}
+      />
     </div>
   );
 };

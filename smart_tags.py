@@ -1,0 +1,153 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+================================================================================
+SERATO 4 SYNC MANAGER PRO - SMART TAGS / MYTAGS (smart_tags.py)
+================================================================================
+Injeção e gerenciamento de MyTags estruturadas através do campo ID3 COMM (Comment)
+utilizando formato padronizado com hashtags (#PeakTime, #Vocal, #WarmUp).
+Permite filtragem instantânea pela barra de busca nativa do Serato DJ Pro.
+================================================================================
+"""
+
+import sys
+import os
+import re
+import json
+import argparse
+from pathlib import Path
+from typing import Dict, Any, List, Set, Optional
+
+sys.dont_write_bytecode = True
+
+try:
+    import mutagen
+    from mutagen.id3 import ID3, COMM
+except ImportError:
+    mutagen = None
+
+DEFAULT_CATEGORIES = {
+    "Energia": ["#WarmUp", "#BuildUp", "#PeakTime", "#AfterHours"],
+    "Vibe": ["#Dark", "#Happy", "#Melodic", "#Groove", "#Tribal", "#Banger"],
+    "Formato": ["#Vocal", "#Dub", "#Instrumental", "#Acapella", "#Extended"],
+    "Situação": ["#IntroSet", "#PistaCheia", "#Transição", "#FimDeFesta"]
+}
+
+
+class SmartTagManager:
+    """Gerencia tags com hashtag no campo Comment de arquivos de áudio."""
+
+    @staticmethod
+    def parse_comments(filepath: str) -> Dict[str, Any]:
+        """Extrai texto livre e lista de tags (#Tag) do campo Comment."""
+        path = Path(filepath).resolve()
+        if not path.is_file():
+            return {"sucesso": False, "erro": "Arquivo não encontrado"}
+
+        if not mutagen:
+            return {"sucesso": False, "erro": "Mutagen não instalado"}
+
+        try:
+            audio = ID3(str(path))
+            raw_comment = ""
+            for frame in audio.values():
+                if frame.FrameID == "COMM":
+                    raw_comment = str(frame)
+                    break
+
+            # Extrai hashtags
+            tags = re.findall(r'#\w+', raw_comment)
+            clean_text = re.sub(r'#\w+', '', raw_comment).strip()
+            clean_text = re.sub(r'\s+', ' ', clean_text)
+
+            return {
+                "sucesso": True,
+                "filepath": str(path),
+                "raw_comment": raw_comment,
+                "free_text": clean_text,
+                "tags": tags
+            }
+        except Exception as e:
+            return {"sucesso": False, "erro": str(e)}
+
+    @staticmethod
+    def update_tags(filepath: str, tags_to_add: List[str] = None, tags_to_remove: List[str] = None, replace_all: Optional[List[str]] = None) -> Dict[str, Any]:
+        """
+        Adiciona, remove ou substitui tags #Tag no comentário do arquivo,
+        preservando anotações livres pré-existentes do DJ.
+        """
+        path = Path(filepath).resolve()
+        if not path.is_file():
+            return {"sucesso": False, "erro": "Arquivo não encontrado"}
+
+        parsed = SmartTagManager.parse_comments(str(path))
+        if not parsed.get("sucesso"):
+            return parsed
+
+        free_text = parsed.get("free_text", "")
+        current_tags = set(parsed.get("tags", []))
+
+        if replace_all is not None:
+            new_tags = set(t if t.startswith("#") else f"#{t}" for t in replace_all if t.strip())
+        else:
+            new_tags = set(current_tags)
+            if tags_to_add:
+                for t in tags_to_add:
+                    clean = t.strip()
+                    if clean:
+                        new_tags.add(clean if clean.startswith("#") else f"#{clean}")
+            if tags_to_remove:
+                for t in tags_to_remove:
+                    clean = t.strip()
+                    tag_norm = clean if clean.startswith("#") else f"#{clean}"
+                    new_tags.discard(tag_norm)
+
+        # Monta novo comentário mantendo texto livre
+        sorted_tags = " ".join(sorted(new_tags))
+        new_comment = f"{free_text} {sorted_tags}".strip() if free_text else sorted_tags
+
+        try:
+            try:
+                audio = ID3(str(path))
+            except Exception:
+                audio = ID3()
+
+            audio["COMM"] = COMM(encoding=3, lang="eng", desc="", text=new_comment)
+            audio.save(str(path), v2_version=3)
+
+            return {
+                "sucesso": True,
+                "filepath": str(path),
+                "new_comment": new_comment,
+                "tags": sorted(list(new_tags))
+            }
+        except Exception as e:
+            return {"sucesso": False, "erro": f"Falha ao salvar tags no arquivo: {e}"}
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Smart Tags / MyTags Manager")
+    parser.add_argument("--read", type=str, help="Lê tags do arquivo")
+    parser.add_argument("--add", nargs="+", help="Tags para adicionar (ex: #PeakTime #Vocal)")
+    parser.add_argument("--remove", nargs="+", help="Tags para remover")
+    parser.add_argument("--file", type=str, help="Arquivo a ser modificado")
+    parser.add_argument("--categories", action="store_true", help="Lista categorias padrão de MyTags")
+
+    args = parser.parse_args()
+
+    if args.categories:
+        print(json.dumps(DEFAULT_CATEGORIES, indent=2, ensure_ascii=False))
+        return
+
+    if args.read:
+        print(json.dumps(SmartTagManager.parse_comments(args.read), indent=2, ensure_ascii=False))
+        return
+
+    if args.file and (args.add or args.remove):
+        res = SmartTagManager.update_tags(args.file, tags_to_add=args.add, tags_to_remove=args.remove)
+        print(json.dumps(res, indent=2, ensure_ascii=False))
+        return
+
+
+if __name__ == "__main__":
+    main()

@@ -35,6 +35,11 @@ try:
 except ImportError:
     mutagen = None
 
+try:
+    from fts_library_cache import FTSLibraryCache
+except ImportError:
+    FTSLibraryCache = None
+
 # Garante flushing imediato
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
