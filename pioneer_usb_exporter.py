@@ -12,6 +12,7 @@ Opus Quad) via banco SQLite Rekordbox 6/7 (exportLibrary.db).
 
 import sys
 import os
+import json
 import uuid
 import shutil
 import sqlite3

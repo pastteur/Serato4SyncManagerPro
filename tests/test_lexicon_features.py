@@ -313,6 +313,66 @@ class TestLexiconFeatures(unittest.TestCase):
         locations = engine.resolve_track_locations()
         self.assertEqual(locations[101], '/Novo/Music/Faixa.mp3')
 
+    # --------------------------------------------------------------------------
+    # 13. TESTE CLI JSON EXECUTION (SUBPROCESS)
+    # --------------------------------------------------------------------------
+    def test_cli_json_execution(self):
+        """Testa que os utilitários de CLI retornam JSON válido sem erro de import."""
+        import subprocess
+
+        # 1. fts_library_cache.py --sync
+        sync_dir = self.test_root / "fts_sync_test"
+        sync_dir.mkdir(parents=True, exist_ok=True)
+        res_sync = subprocess.run(
+            [sys.executable, str(ROOT_DIR / "fts_library_cache.py"), "--sync", str(sync_dir)],
+            capture_output=True, text=True
+        )
+        self.assertEqual(res_sync.returncode, 0, f"fts_library_cache.py failed: {res_sync.stderr}")
+        data_sync = json.loads(res_sync.stdout.strip())
+        self.assertTrue(data_sync.get("sucesso"))
+
+        # 2. fts_library_cache.py --search
+        res_search = subprocess.run(
+            [sys.executable, str(ROOT_DIR / "fts_library_cache.py"), "--search", "test"],
+            capture_output=True, text=True
+        )
+        self.assertEqual(res_search.returncode, 0, f"fts_library_cache.py search failed: {res_search.stderr}")
+        data_search = json.loads(res_search.stdout.strip())
+        self.assertIsInstance(data_search, list)
+
+        # 3. pioneer_usb_exporter.py --dry-run
+        tracks_file = self.test_root / "tracks.json"
+        with open(tracks_file, "w", encoding="utf-8") as f:
+            json.dump([{"caminho": "/tmp/fake.mp3", "title": "Fake", "artist": "DJ", "bpm": 128}], f)
+
+        res_pioneer = subprocess.run(
+            [
+                sys.executable, str(ROOT_DIR / "pioneer_usb_exporter.py"),
+                "--usb", str(self.test_root),
+                "--crate", "TestCrate",
+                "--tracks", str(tracks_file),
+                "--dry-run"
+            ],
+            capture_output=True, text=True
+        )
+        self.assertEqual(res_pioneer.returncode, 0, f"pioneer_usb_exporter.py failed: {res_pioneer.stderr}")
+        data_pioneer = json.loads(res_pioneer.stdout.strip())
+        self.assertEqual(data_pioneer.get("crate_name"), "TestCrate")
+
+        # 4. scan_unused_files.py --json
+        res_scan = subprocess.run(
+            [
+                sys.executable, str(ROOT_DIR / "scan_unused_files.py"),
+                "--mp3", str(sync_dir),
+                "--serato", str(sync_dir),
+                "--json"
+            ],
+            capture_output=True, text=True
+        )
+        self.assertEqual(res_scan.returncode, 0, f"scan_unused_files.py failed: {res_scan.stderr}")
+        data_scan = json.loads(res_scan.stdout.strip())
+        self.assertTrue(data_scan.get("sucesso"))
+
 
 if __name__ == "__main__":
     unittest.main()

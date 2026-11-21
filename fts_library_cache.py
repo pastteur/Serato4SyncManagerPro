@@ -13,6 +13,7 @@ em acervos de 30.000+ faixas.
 import sys
 import os
 import re
+import json
 import sqlite3
 import unicodedata
 from pathlib import Path
