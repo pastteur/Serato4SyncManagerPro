@@ -22,6 +22,10 @@ from typing import Dict, Any, List, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 try:
     import mutagen
     from mutagen.id3 import ID3, TIT2, TPE1
@@ -228,12 +232,12 @@ def main():
 
     if args.undo:
         res = engine.undo_last()
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False))
         return
 
     if args.recipe and args.files:
         res = engine.apply_recipe(args.recipe, args.files)
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False))
         return
 
 

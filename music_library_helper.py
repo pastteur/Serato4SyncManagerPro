@@ -20,6 +20,10 @@ from typing import Dict, Any, List, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 BIN_PATH = Path(__file__).resolve().parent / "bin" / "musiclibrary-helper"
 SOURCE_M_PATH = Path(__file__).resolve().parent / "tools" / "musiclibrary_helper.m"
 
@@ -143,12 +147,12 @@ def main():
     if args.list_playlists:
         data = MusicLibraryHelper.extract_library()
         if not data.get("sucesso"):
-            print(json.dumps(data, indent=2, ensure_ascii=False) if args.json else f"Erro: {data.get('erro')}")
+            print(json.dumps(data, ensure_ascii=False) if args.json else f"Erro: {data.get('erro')}")
             sys.exit(1)
 
         playlists = data.get("playlists", [])
         if args.json:
-            print(json.dumps({"sucesso": True, "playlists": playlists}, indent=2, ensure_ascii=False))
+            print(json.dumps({"sucesso": True, "playlists": playlists}, ensure_ascii=False))
         else:
             print(f"Total de Playlists: {len(playlists)}")
             for pl in playlists:
@@ -158,7 +162,7 @@ def main():
     if args.playlist:
         tracks = MusicLibraryHelper.get_playlist_tracks(args.playlist)
         if args.json:
-            print(json.dumps({"sucesso": True, "playlist": args.playlist, "total": len(tracks), "tracks": tracks}, indent=2, ensure_ascii=False))
+            print(json.dumps({"sucesso": True, "playlist": args.playlist, "total": len(tracks), "tracks": tracks}, ensure_ascii=False))
         else:
             print(f"Faixas na playlist '{args.playlist}': {len(tracks)}")
             for t in tracks:
@@ -170,7 +174,7 @@ def main():
     if args.out:
         print(f"Biblioteca Apple Music salva com sucesso em: {args.out}")
     else:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":

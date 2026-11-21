@@ -20,6 +20,10 @@ from typing import Dict, Any, List, Set, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 try:
     import mutagen
     from mutagen.id3 import ID3, COMM
@@ -136,16 +140,16 @@ def main():
     args = parser.parse_args()
 
     if args.categories:
-        print(json.dumps(DEFAULT_CATEGORIES, indent=2, ensure_ascii=False))
+        print(json.dumps(DEFAULT_CATEGORIES, ensure_ascii=False))
         return
 
     if args.read:
-        print(json.dumps(SmartTagManager.parse_comments(args.read), indent=2, ensure_ascii=False))
+        print(json.dumps(SmartTagManager.parse_comments(args.read), ensure_ascii=False))
         return
 
     if args.file and (args.add or args.remove):
         res = SmartTagManager.update_tags(args.file, tags_to_add=args.add, tags_to_remove=args.remove)
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False))
         return
 
 

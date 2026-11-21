@@ -19,6 +19,10 @@ from typing import Dict, Any, List, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 try:
     import mutagen
     from mutagen.id3 import ID3, TBPM
@@ -126,7 +130,7 @@ def main():
     report = BeatshiftScanner.inspect_track(args.file)
 
     if args.json:
-        print(json.dumps(report, indent=2, ensure_ascii=False))
+        print(json.dumps(report, ensure_ascii=False))
     else:
         print(f"Faixa:       {report.get('filename')}")
         print(f"BPM:         {report.get('bpm')}")

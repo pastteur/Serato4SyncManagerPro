@@ -20,6 +20,10 @@ from typing import Dict, Any, List, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 try:
     import mutagen
     from mutagen.id3 import ID3, TCON, TPE1
@@ -132,16 +136,16 @@ def main():
     args = parser.parse_args()
 
     if args.genre:
-        print(json.dumps({"original": args.genre, "cleaned": TaxonomyCleaner.clean_genre(args.genre)}, indent=2))
+        print(json.dumps({"original": args.genre, "cleaned": TaxonomyCleaner.clean_genre(args.genre)}, ensure_ascii=False))
         return
 
     if args.artist:
-        print(json.dumps({"original": args.artist, "cleaned": TaxonomyCleaner.clean_artist(args.artist)}, indent=2))
+        print(json.dumps({"original": args.artist, "cleaned": TaxonomyCleaner.clean_artist(args.artist)}, ensure_ascii=False))
         return
 
     if args.file:
         res = TaxonomyCleaner.process_file(args.file, dry_run=args.dry_run)
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False))
         return
 
 

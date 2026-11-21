@@ -1527,32 +1527,93 @@ mod commands {
     // Ferramentas de biblioteca: BPM/tom, journal de desfazer, crates
     // ------------------------------------------------------------------
 
-    /// Executa um script Python e devolve a última linha JSON da saída.
+    /// Executa um script Python e devolve a resposta JSON de forma robusta e resiliente.
     fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
         let path = find_canonical_python_script(Some(app), script)?;
         let python_bin = find_python_binary()?;
         let mut cmd = Command::new(&python_bin);
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+
+        // Define diretório de trabalho onde o script reside e configura PYTHONPATH
+        if let Some(parent) = path.parent() {
+            cmd.current_dir(parent);
+            let mut py_path_parts = vec![parent.to_string_lossy().to_string()];
+            let vendor_dir = parent.join("vendor");
+            if vendor_dir.is_dir() {
+                py_path_parts.push(vendor_dir.to_string_lossy().to_string());
+            }
+            if let Ok(existing) = std::env::var("PYTHONPATH") {
+                py_path_parts.push(existing);
+            }
+            cmd.env("PYTHONPATH", py_path_parts.join(":"));
+        }
+
         cmd.arg(&path);
         for a in args {
             cmd.arg(a);
         }
+
         let output = cmd
             .output()
             .map_err(|e| format!("Falha ao executar {}: {}", script, e))?;
+
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .last()
-            .unwrap_or("")
-            .to_string();
-        if result.starts_with('{') {
-            return Ok(result);
+        let stdout_trim = stdout.trim();
+
+        // 1. Tenta verificar se o stdout completo é um JSON válido (objeto ou array, mono ou multi-linha)
+        if (stdout_trim.starts_with('{') && stdout_trim.ends_with('}'))
+            || (stdout_trim.starts_with('[') && stdout_trim.ends_with(']'))
+        {
+            if serde_json::from_str::<serde_json::Value>(stdout_trim).is_ok() {
+                return Ok(stdout_trim.to_string());
+            }
         }
+
+        // 2. Procura pela última linha que seja um JSON válido (caso haja logs antes)
+        for line in stdout.lines().rev() {
+            let line_trim = line.trim();
+            if (line_trim.starts_with('{') && line_trim.ends_with('}'))
+                || (line_trim.starts_with('[') && line_trim.ends_with(']'))
+            {
+                if serde_json::from_str::<serde_json::Value>(line_trim).is_ok() {
+                    return Ok(line_trim.to_string());
+                }
+            }
+        }
+
+        // 3. Procura por bloco JSON contido entre o primeiro '{'/'[' e o último '}'/']'
+        if let Some(first_brace) = stdout.find('{') {
+            if let Some(last_brace) = stdout.rfind('}') {
+                if last_brace > first_brace {
+                    let slice = &stdout[first_brace..=last_brace];
+                    if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
+                        return Ok(slice.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some(first_bracket) = stdout.find('[') {
+            if let Some(last_bracket) = stdout.rfind(']') {
+                if last_bracket > first_bracket {
+                    let slice = &stdout[first_bracket..=last_bracket];
+                    if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
+                        return Ok(slice.to_string());
+                    }
+                }
+            }
+        }
+
+        // Se falhou ao extrair JSON, relata erro com o stderr ou stdout detalhado
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
-        Err(format!("Erro em {}: {}", script, msg))
+        let msg = if !stderr.trim().is_empty() {
+            stderr.to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.to_string()
+        } else {
+            "Execução falhou (processo retornou vazio sem saída)".to_string()
+        };
+        Err(format!("Erro em {}: {}", script, msg.trim()))
     }
 
     /// Duplicados multi-pasta, com progresso emitido em "duplicates-progress".

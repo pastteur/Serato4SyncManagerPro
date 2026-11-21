@@ -19,6 +19,10 @@ from typing import Dict, Any, List, Optional, Tuple
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 # Caminhos padrão do Serato no macOS e Windows
 DEFAULT_MACOS_SERATO_V4 = Path.home() / "Library" / "Application Support" / "Serato" / "Library"
 DEFAULT_WIN_SERATO_V4 = Path(os.environ.get("LOCALAPPDATA", "")) / "Serato" / "Library" if os.environ.get("LOCALAPPDATA") else None
@@ -29,7 +33,11 @@ class SeratoV4Engine:
 
     def __init__(self, library_dir: Optional[str] = None):
         if library_dir:
-            self.library_dir = Path(os.path.expanduser(library_dir)).resolve()
+            cand = Path(os.path.expanduser(library_dir)).resolve()
+            if self._safe_exists(cand / "Library"):
+                self.library_dir = cand / "Library"
+            else:
+                self.library_dir = cand
         else:
             if sys.platform == "darwin":
                 self.library_dir = DEFAULT_MACOS_SERATO_V4
@@ -308,7 +316,7 @@ def main():
     if args.containers:
         containers = engine.list_containers()
         if args.json:
-            print(json.dumps({"sucesso": True, "containers": containers}, indent=2, ensure_ascii=False))
+            print(json.dumps({"sucesso": True, "containers": containers}, ensure_ascii=False))
         else:
             print(f"Containers encontrados: {len(containers)}")
             for c in containers:
@@ -318,7 +326,7 @@ def main():
     # Padrão: auditoria
     report = engine.audit_library()
     if args.json:
-        print(json.dumps(report, indent=2, ensure_ascii=False))
+        print(json.dumps(report, ensure_ascii=False))
     else:
         print("=" * 70)
         print("SERATO DJ PRO v4 - AUDITORIA DE BIBLIOTECA SQLITE")

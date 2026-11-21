@@ -22,6 +22,10 @@ from typing import Dict, Any, List, Optional, Tuple
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 # Tenta carregar o parser de Cues do Serato existente no projeto
 try:
     from auto_cue import extract_serato_cues_from_file
@@ -305,7 +309,7 @@ def main():
     exporter = PioneerUsbExporter(Path(args.usb))
     res = exporter.export_crate(args.crate, tracks, copy_audio=not args.no_copy, dry_run=args.dry_run)
 
-    print(json.dumps(res, indent=2, ensure_ascii=False))
+    print(json.dumps(res, ensure_ascii=False))
 
 
 if __name__ == "__main__":

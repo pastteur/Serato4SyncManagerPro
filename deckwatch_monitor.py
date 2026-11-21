@@ -21,6 +21,10 @@ from typing import Dict, Any, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 
 class DeckWatchMonitor:
     """Monitor de reprodução em tempo real para o Serato DJ Pro."""
@@ -135,12 +139,12 @@ def main():
 
     if args.obs_dir:
         res = monitor.export_obs_files(Path(args.obs_dir))
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False))
         return
 
     track = monitor.get_latest_played_track()
     if args.json:
-        print(json.dumps(track, indent=2, ensure_ascii=False))
+        print(json.dumps(track, ensure_ascii=False))
     else:
         status = "🔴 AO VIVO" if track.get("is_live") else "⚪ Inativo"
         print(f"Status Serato: {status}")

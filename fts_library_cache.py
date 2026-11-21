@@ -20,6 +20,10 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 DEFAULT_CACHE_PATH = Path.home() / ".serato_library_cache.sqlite"
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
@@ -348,15 +352,12 @@ def main():
     cache = FTSLibraryCache()
 
     if args.sync:
-        print(f"Indexando diretório: {args.sync} ...")
         stats = cache.sync_directory(Path(args.sync))
-        print(f"Indexação concluída: {stats}")
+        print(json.dumps({"sucesso": True, **stats}, ensure_ascii=False))
 
     elif args.search:
         results = cache.search_fts(args.search, limit=args.limit)
-        print(f"Resultados para '{args.search}' ({len(results)} encontrados):")
-        for r in results:
-            print(f" - [{r.get('id')}] {r.get('artist')} - {r.get('title')} ({r.get('filename')}) [Rank: {r.get('rank', 0):.2f}]")
+        print(json.dumps(results, ensure_ascii=False))
 
 
 if __name__ == "__main__":

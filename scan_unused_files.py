@@ -20,6 +20,10 @@ from typing import Dict, Any, List, Set, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
 try:
@@ -77,12 +81,24 @@ class UnusedFilesScanner:
 
         # 2. Serato v4 SQLite (location.sqlite)
         if SeratoV4Engine:
-            engine = SeratoV4Engine(str(self.serato_dir / "Library"))
-            locations = engine.resolve_track_locations()
-            for p_str in locations.values():
-                p = Path(p_str)
-                used_paths.add(p.name.lower())
-                used_paths.add(str(p).lower())
+            # Tenta diferentes caminhos para a biblioteca v4
+            v4_candidates = [
+                self.serato_dir / "Library",
+                self.serato_dir,
+                Path.home() / "Library" / "Application Support" / "Serato" / "Library"
+            ]
+            for v4_cand in v4_candidates:
+                try:
+                    engine = SeratoV4Engine(str(v4_cand))
+                    if engine.is_v4_present():
+                        locations = engine.resolve_track_locations()
+                        for p_str in locations.values():
+                            p = Path(p_str)
+                            used_paths.add(p.name.lower())
+                            used_paths.add(str(p).lower())
+                        break
+                except Exception:
+                    pass
 
         return used_paths
 
@@ -173,7 +189,7 @@ def main():
     report = scanner.scan()
 
     if args.json:
-        print(json.dumps(report, indent=2, ensure_ascii=False))
+        print(json.dumps(report, ensure_ascii=False))
     else:
         print(f"Total escaneado: {report.get('total_scanned')}")
         print(f"Total órfãos:    {report.get('total_unused')} faixas ({report.get('total_unused_gb')} GB)")

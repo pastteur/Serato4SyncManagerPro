@@ -20,6 +20,10 @@ from typing import Dict, Any, Optional
 
 sys.dont_write_bytecode = True
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
 try:
     import mutagen
     from mutagen.id3 import ID3, TKEY
@@ -151,12 +155,12 @@ def main():
 
     if args.key:
         converted = KeyConverter.convert(args.key, args.to)
-        print(json.dumps({"original": args.key, "target_format": args.to, "converted": converted}, indent=2))
+        print(json.dumps({"original": args.key, "target_format": args.to, "converted": converted}, ensure_ascii=False))
         return
 
     if args.file:
         res = KeyConverter.update_file_key(args.file, args.to)
-        print(json.dumps(res, indent=2, ensure_ascii=False))
+        print(json.dumps(res, ensure_ascii=False))
         return
 
 
