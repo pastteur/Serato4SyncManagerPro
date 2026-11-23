@@ -3,7 +3,7 @@ import {
   Copy, Search, FileSpreadsheet, FolderOpen, BarChart3, Database,
   Eye, Trash2, CheckCircle2, CheckSquare, Square, AlertTriangle,
   FolderPlus, Layers, Play, RefreshCw, X, ChevronDown, ChevronUp,
-  HardDrive, Laptop, Sparkles, ShieldCheck
+  HardDrive, Laptop, Sparkles, ShieldCheck, ArrowLeftRight, Volume2, Music
 } from 'lucide-react';
 import { DuplicateItem } from '../types';
 import { ConfirmModal } from './ConfirmModal';
@@ -82,7 +82,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     onConfirm: () => {}
   });
 
-  const [statusQuickFilter, setStatusQuickFilter] = useState<'all' | 'suffix' | 'selected'>('all');
+  const [statusQuickFilter, setStatusQuickFilter] = useState<'all' | 'confirmed' | 'possible' | 'suffix' | 'selected'>('all');
 
   // Fonte de dados ativa: customizada (multi-pastas) ou a sincronização padrão
   const currentDuplicates = customDuplicates !== null ? customDuplicates : duplicates;
@@ -92,28 +92,57 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     return currentDuplicates.filter(d => !deletedIds.has(d.id));
   }, [currentDuplicates, deletedIds]);
 
-  // Lista de pastas únicas
+  // Contagens dos filtros rápidos
+  const filterCounts = useMemo(() => {
+    let confirmed = 0;
+    let possible = 0;
+    let suffix = 0;
+    activeDuplicates.forEach(d => {
+      if (d.grau_certeza === 'IDENTICO_COMPROVADO') confirmed++;
+      else possible++;
+      if (/\(\d+\)|-\s*cópia/i.test(d.nome)) suffix++;
+    });
+    return {
+      all: activeDuplicates.length,
+      confirmed,
+      possible,
+      suffix,
+      selected: selectedBatchIds.size
+    };
+  }, [activeDuplicates, selectedBatchIds]);
+
+  // Lista de pastas únicas com contagem
   const uniqueFolders = useMemo(() => {
-    const folders = new Set<string>();
+    const folders = new Map<string, number>();
     activeDuplicates.forEach(d => {
       const folderName = d.copia.split('/').pop() || 'Desconhecida';
-      folders.add(folderName);
+      folders.set(folderName, (folders.get(folderName) || 0) + 1);
     });
-    return Array.from(folders).sort();
+    return Array.from(folders.entries()).sort((a, b) => b[1] - a[1]);
   }, [activeDuplicates]);
 
   const filteredDuplicates = useMemo(() => {
     return activeDuplicates.filter(d => {
       const matchesSearch = !searchTerm.trim() ||
         d.nome.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (d.nome_original && d.nome_original.toLowerCase().includes(searchTerm.toLowerCase())) ||
         d.copia.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        d.original.toLowerCase().includes(searchTerm.toLowerCase());
+        d.original.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        (d.caminho_copia && d.caminho_copia.toLowerCase().includes(searchTerm.toLowerCase())) ||
+        (d.caminho_original && d.caminho_original.toLowerCase().includes(searchTerm.toLowerCase()));
 
       const folderName = d.copia.split('/').pop() || '';
-      const matchesFolder = selectedFolderFilter === 'all' || folderName === selectedFolderFilter;
+      const matchesFolder = selectedFolderFilter === 'all' ||
+        folderName === selectedFolderFilter ||
+        d.copia === selectedFolderFilter ||
+        Boolean(d.caminho_copia && d.caminho_copia.includes(selectedFolderFilter));
 
       let matchesQuick = true;
-      if (statusQuickFilter === 'suffix') {
+      if (statusQuickFilter === 'confirmed') {
+        matchesQuick = d.grau_certeza === 'IDENTICO_COMPROVADO';
+      } else if (statusQuickFilter === 'possible') {
+        matchesQuick = d.grau_certeza !== 'IDENTICO_COMPROVADO';
+      } else if (statusQuickFilter === 'suffix') {
         matchesQuick = /\(\d+\)|-\s*cópia/i.test(d.nome);
       } else if (statusQuickFilter === 'selected') {
         matchesQuick = selectedBatchIds.has(d.id);
@@ -144,6 +173,58 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
     const mb = bytes / (1024 * 1024);
     if (mb > 1024) return `${(mb / 1024).toFixed(2)} GB`;
     return `${mb.toFixed(1)} MB`;
+  };
+
+  const formatDuration = (sec?: number) => {
+    if (!sec || sec <= 0) return '';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  // Inverter qual arquivo é o preservado e qual é a cópia
+  const handleSwapKeeper = (itemId: string) => {
+    const swap = (item: DuplicateItem): DuplicateItem => {
+      if (item.id !== itemId) return item;
+      return {
+        ...item,
+        nome: item.nome_original || item.nome,
+        nome_original: item.nome,
+        copia: item.original,
+        original: item.copia,
+        caminho_copia: item.caminho_original,
+        caminho_original: item.caminho_copia,
+        tamanho: item.tamanho_original || item.tamanho,
+        tamanho_original: item.tamanho,
+        bitrate_copia: item.bitrate_original,
+        bitrate_original: item.bitrate_copia,
+        duracao_copia: item.duracao_original,
+        duracao_original: item.duracao_copia,
+        has_serato_markers_copia: item.has_serato_markers_original,
+        has_serato_markers_original: item.has_serato_markers_copia,
+      };
+    };
+
+    if (customDuplicates !== null) {
+      setCustomDuplicates(prev => (prev ? prev.map(swap) : null));
+    } else {
+      setCustomDuplicates(duplicates.map(swap));
+    }
+  };
+
+  // Auto-selecionar cópias de qualidade inferior (menor bitrate ou menor tamanho)
+  const handleSelectLowerQuality = () => {
+    setSelectedBatchIds(prev => {
+      const next = new Set(prev);
+      filteredDuplicates.forEach(d => {
+        if (d.bitrate_copia && d.bitrate_original && d.bitrate_copia < d.bitrate_original) {
+          next.add(d.id);
+        } else if (d.tamanho < (d.tamanho_original || d.tamanho)) {
+          next.add(d.id);
+        }
+      });
+      return next;
+    });
   };
 
   // Gerenciamento de pastas da varredura lateral
@@ -257,14 +338,22 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
               if (a.caminho !== keeper.caminho) {
                 mapped.push({
                   id: `${g.id || gIdx}-${aIdx}`,
-                  nome: g.nome,
+                  nome: a.nome || g.nome,
+                  nome_original: keeper.nome || g.nome,
                   copia: a.raiz,
                   original: keeper.raiz,
                   caminho_copia: a.caminho,
                   caminho_original: keeper.caminho,
                   tamanho: a.tamanho,
+                  tamanho_original: keeper.tamanho,
+                  bitrate_copia: a.bitrate_kbps,
+                  bitrate_original: keeper.bitrate_kbps,
+                  duracao_copia: a.duration,
+                  duracao_original: keeper.duration,
+                  has_serato_markers_copia: a.has_serato_markers,
+                  has_serato_markers_original: keeper.has_serato_markers,
                   grau_certeza: g.grau_certeza,
-                  motivo: `${g.motivo || 'Duplicata lateral identificada'} (Bitrate: ${a.bitrate_kbps || '?'} kbps vs Original: ${keeper.bitrate_kbps || '?'} kbps)`,
+                  motivo: g.motivo || 'Duplicata lateral identificada',
                   hash_audio: g.hash_audio,
                 });
               }
@@ -864,25 +953,40 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[10px] font-semibold text-serato-muted uppercase flex items-center gap-1 tracking-wider">
                   <BarChart3 className="w-3 h-3 text-serato-cyan" />
-                  Top Pastas com Duplicatas
+                  Top Pastas com Duplicatas (Clique para Filtrar)
                 </span>
                 <span className="text-[10px] text-serato-muted font-mono">{uniqueFolders.length} pastas afetadas</span>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-                {folderStats.map(([folder, count]) => (
-                  <div key={folder} className="bg-black/30 p-1.5 rounded border border-white/5">
-                    <div className="text-[10px] text-slate-300 truncate" title={folder}>{folder}</div>
-                    <div className="text-xs font-mono font-bold text-serato-cyan">{count} cópias</div>
-                  </div>
-                ))}
+                {folderStats.map(([folder, count]) => {
+                  const isSelected = selectedFolderFilter === folder;
+                  return (
+                    <button
+                      key={folder}
+                      type="button"
+                      onClick={() => setSelectedFolderFilter(prev => prev === folder ? 'all' : folder)}
+                      className={`p-1.5 rounded border transition text-left cursor-pointer ${
+                        isSelected
+                          ? 'bg-serato-cyan/20 border-serato-cyan shadow-sm ring-1 ring-serato-cyan/50'
+                          : 'bg-black/30 hover:bg-black/50 border-white/5 hover:border-serato-cyan/40'
+                      }`}
+                      title={isSelected ? 'Clique para remover filtro de pasta' : `Filtrar apenas pela pasta: ${folder}`}
+                    >
+                      <div className={`text-[10px] truncate ${isSelected ? 'text-serato-cyan font-bold' : 'text-slate-300'}`} title={folder}>
+                        {folder}
+                      </div>
+                      <div className="text-xs font-mono font-bold text-serato-cyan">{count} cópias</div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           </div>
 
           {/* Filters & Batch Controls Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2 shrink-0 bg-serato-card/60 p-2 rounded-lg border border-serato-cardBorder">
-            <div className="flex items-center gap-2 flex-1 min-w-[280px]">
-              <div className="relative flex-1">
+            <div className="flex items-center gap-2 flex-1 min-w-[280px] flex-wrap">
+              <div className="relative flex-1 min-w-[200px]">
                 <Search className="w-3.5 h-3.5 text-serato-muted absolute left-2.5 top-2.5" />
                 <input
                   type="text"
@@ -893,58 +997,99 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                 />
               </div>
 
+              {/* Seletor de Pasta */}
               <select
                 value={selectedFolderFilter}
                 onChange={(e) => setSelectedFolderFilter(e.target.value)}
-                className="bg-serato-card border border-serato-cardBorder rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-serato-cyan cursor-pointer"
+                className="bg-serato-card border border-serato-cardBorder rounded-lg px-2.5 py-1.5 text-xs text-slate-300 focus:outline-none focus:border-serato-cyan cursor-pointer max-w-[220px]"
               >
                 <option value="all">Todas as Pastas ({activeDuplicates.length})</option>
-                {uniqueFolders.map(folder => (
-                  <option key={folder} value={folder}>{folder}</option>
+                {uniqueFolders.map(([folder, count]) => (
+                  <option key={folder} value={folder}>{folder} ({count})</option>
                 ))}
               </select>
 
               {/* Pílulas de Filtro Rápido */}
-              <div className="flex items-center gap-1 bg-serato-dark p-0.5 rounded-lg border border-serato-cardBorder">
+              <div className="flex items-center gap-1 bg-serato-dark p-0.5 rounded-lg border border-serato-cardBorder flex-wrap">
                 <button
                   type="button"
                   onClick={() => setStatusQuickFilter('all')}
-                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                  className={`text-[11px] px-2.5 py-1 rounded font-medium transition cursor-pointer ${
                     statusQuickFilter === 'all'
-                      ? 'bg-serato-card text-white shadow-sm'
+                      ? 'bg-serato-card text-white shadow-sm font-semibold'
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  Todas
+                  Todas ({filterCounts.all})
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStatusQuickFilter('confirmed')}
+                  className={`text-[11px] px-2.5 py-1 rounded font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    statusQuickFilter === 'confirmed'
+                      ? 'bg-emerald-950/80 text-emerald-300 border border-emerald-600/70 shadow-sm font-semibold'
+                      : 'text-slate-400 hover:text-emerald-300'
+                  }`}
+                  title="Filtra duplicatas 100% idênticas comprovadas por hash de áudio SHA-256"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Confirmadas ({filterCounts.confirmed})</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStatusQuickFilter('possible')}
+                  className={`text-[11px] px-2.5 py-1 rounded font-medium transition cursor-pointer flex items-center gap-1.5 ${
+                    statusQuickFilter === 'possible'
+                      ? 'bg-amber-950/80 text-amber-300 border border-amber-600/70 shadow-sm font-semibold'
+                      : 'text-slate-400 hover:text-amber-300'
+                  }`}
+                  title="Filtra duplicatas possíveis por correspondência de título e duração"
+                >
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Possíveis ({filterCounts.possible})</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setStatusQuickFilter('suffix')}
-                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                  className={`text-[11px] px-2 py-1 rounded font-medium transition cursor-pointer ${
                     statusQuickFilter === 'suffix'
-                      ? 'bg-amber-950/60 text-amber-300 border border-amber-600/50 shadow-sm'
-                      : 'text-slate-400 hover:text-white'
+                      ? 'bg-purple-950/80 text-purple-300 border border-purple-600/70 shadow-sm font-semibold'
+                      : 'text-slate-400 hover:text-purple-300'
                   }`}
-                  title="Filtra cópias com sufixo (1) ou - cópia"
+                  title="Filtra cópias com sufixo numérico (1), (2) ou '- cópia'"
                 >
-                  (1) / cópia
+                  (1) / cópia ({filterCounts.suffix})
                 </button>
+
                 <button
                   type="button"
                   onClick={() => setStatusQuickFilter('selected')}
-                  className={`text-[11px] px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                  className={`text-[11px] px-2 py-1 rounded font-medium transition cursor-pointer ${
                     statusQuickFilter === 'selected'
-                      ? 'bg-serato-card text-serato-cyan shadow-sm'
+                      ? 'bg-serato-card text-serato-cyan border border-serato-cyan/50 shadow-sm font-semibold'
                       : 'text-slate-400 hover:text-white'
                   }`}
                 >
-                  Selecionadas ({selectedBatchIds.size})
+                  Selecionadas ({filterCounts.selected})
                 </button>
               </div>
             </div>
 
-            {/* Ações Rápidas de Seleção */}
-            <div className="flex items-center gap-2">
+            {/* Ações Rápidas de Seleção e Regras Inteligentes */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleSelectLowerQuality}
+                className="text-xs px-2.5 py-1 rounded bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 border border-amber-700/50 transition cursor-pointer flex items-center gap-1"
+                title="Auto-seleciona para exclusão todas as cópias com qualidade inferior (menor bitrate ou tamanho menor)"
+              >
+                <Sparkles className="w-3 h-3 text-amber-400" />
+                <span>Marcar Pior Qualidade</span>
+              </button>
+
               <button
                 type="button"
                 onClick={handleSelectCurrentFolder}
@@ -952,11 +1097,12 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
               >
                 Selecionar Todas ({filteredDuplicates.length})
               </button>
+
               {selectedBatchIds.size > 0 && (
                 <button
                   type="button"
                   onClick={() => setSelectedBatchIds(new Set())}
-                  className="text-xs px-2 py-1 text-slate-400 hover:text-white"
+                  className="text-xs px-2 py-1 text-slate-400 hover:text-white transition cursor-pointer"
                 >
                   Limpar Seleção
                 </button>
@@ -979,8 +1125,9 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                         title="Selecionar todos os visíveis"
                       />
                     </th>
-                    <th className="py-2 px-3">Faixa e Detalhes</th>
+                    <th className="py-2 px-3">Faixa e Diagnóstico</th>
                     <th className="py-2 px-3">Localização da Cópia (Redundante)</th>
+                    <th className="py-2 px-1 text-center w-8" title="Inverter quem é preservado e quem é excluído">Trocar</th>
                     <th className="py-2 px-3">Localização da Original (Preservada)</th>
                     <th className="py-2 px-3 text-right">Tamanho</th>
                     <th className="py-2 px-3 text-center">Ações</th>
@@ -998,7 +1145,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                         className={`hover:bg-serato-card/80 transition ${isSelected ? 'bg-orange-950/15' : ''}`}
                       >
                         {/* Checkbox de seleção */}
-                        <td className="py-2 px-3 text-center">
+                        <td className="py-2 px-3 text-center align-middle">
                           <input
                             type="checkbox"
                             checked={isSelected}
@@ -1008,10 +1155,10 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                         </td>
 
                         {/* Nome da Faixa e Tags */}
-                        <td className="py-2 px-3 text-white font-sans font-medium">
+                        <td className="py-2 px-3 text-white font-sans font-medium align-middle">
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="w-2 h-2 rounded-full bg-serato-orange shrink-0" />
-                            <span className="truncate max-w-[220px] font-semibold text-slate-100" title={item.nome}>
+                            <span className="truncate max-w-[200px] font-semibold text-slate-100" title={item.nome}>
                               {item.nome}
                             </span>
                             {item.grau_certeza && (
@@ -1022,7 +1169,7 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                                   ? 'bg-yellow-950/70 text-yellow-300 border-yellow-700/60'
                                   : 'bg-orange-950/70 text-orange-300 border-orange-700/60'
                               }`} title={item.motivo || ''}>
-                                {item.grau_certeza === 'IDENTICO_COMPROVADO' ? '✅ SHA-256 IDÊNTICO' : item.grau_certeza === 'POSSIVEL_DUPLICADO' ? '⚠️ POSSÍVEL' : 'ℹ️ SEMELHANTE'}
+                                {item.grau_certeza === 'IDENTICO_COMPROVADO' ? '✅ SHA-256 IDÊNTICO' : '⚠️ POSSÍVEL'}
                               </span>
                             )}
                           </div>
@@ -1034,91 +1181,156 @@ export const DuplicatesAudit: React.FC<DuplicatesAuditProps> = ({
                         </td>
 
                         {/* Localização da Cópia */}
-                        <td className="py-2 px-3">
-                          <div className="flex items-center space-x-1.5">
-                            <span className="text-[10px] bg-amber-950/50 text-amber-300 px-1.5 py-0.2 rounded border border-amber-800/40 shrink-0 font-sans">
-                              Cópia
-                            </span>
-                            <span className="text-slate-300 truncate max-w-[190px]" title={copyPath}>
-                              {copyPath.split('/').slice(-2).join('/')}
-                            </span>
-                            {onOpenFileInFinder && (
-                              <button
-                                type="button"
-                                onClick={() => onOpenFileInFinder(copyPath)}
-                                className="p-1 rounded bg-serato-dark/70 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700/50 transition cursor-pointer shrink-0"
-                                title={`Revelar arquivo de Cópia no Finder:\n${copyPath}`}
-                              >
-                                <Eye className="w-3 h-3 text-amber-400" />
-                              </button>
-                            )}
+                        <td className="py-2 px-3 align-middle">
+                          <div className="space-y-1">
+                            <div className="flex items-center space-x-1.5">
+                              <span className="text-[10px] bg-amber-950/50 text-amber-300 px-1.5 py-0.2 rounded border border-amber-800/40 shrink-0 font-sans font-semibold">
+                                Cópia
+                              </span>
+                              <span className="text-slate-200 truncate max-w-[170px]" title={item.nome}>
+                                {item.nome}
+                              </span>
+                              {onPlayTrack && (
+                                <button
+                                  type="button"
+                                  onClick={() => onPlayTrack({
+                                    caminho: copyPath,
+                                    nome: `[Cópia] ${item.nome}`
+                                  })}
+                                  className="p-1 rounded bg-amber-950/40 hover:bg-amber-900/60 text-amber-300 hover:text-white border border-amber-700/50 transition cursor-pointer shrink-0"
+                                  title={`Tocar arquivo de Cópia no Mini-Player:\n${copyPath}`}
+                                >
+                                  <Play className="w-3 h-3 fill-current" />
+                                </button>
+                              )}
+                              {onOpenFileInFinder && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenFileInFinder(copyPath)}
+                                  className="p-1 rounded bg-serato-dark/70 hover:bg-slate-700 text-slate-400 hover:text-amber-300 border border-slate-700/50 transition cursor-pointer shrink-0"
+                                  title={`Revelar arquivo de Cópia no Finder:\n${copyPath}`}
+                                >
+                                  <Eye className="w-3 h-3 text-amber-400" />
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                              <span className="truncate max-w-[150px] text-slate-500" title={copyPath}>
+                                {copyPath.split('/').slice(-2, -1)[0] || 'Raiz'}
+                              </span>
+                              {item.bitrate_copia ? (
+                                <span className={`px-1 py-0.2 rounded text-[9px] ${
+                                  item.bitrate_original && item.bitrate_copia < item.bitrate_original
+                                    ? 'bg-rose-950/60 text-rose-300 border border-rose-800/40 font-bold'
+                                    : 'bg-black/40 text-slate-300'
+                                }`}>
+                                  {item.bitrate_copia} kbps
+                                </span>
+                              ) : null}
+                              {item.duracao_copia ? (
+                                <span className="text-slate-400">
+                                  {formatDuration(item.duracao_copia)}
+                                </span>
+                              ) : null}
+                              {item.has_serato_markers_copia && (
+                                <span className="bg-purple-950/60 text-purple-300 border border-purple-800/40 px-1 rounded text-[9px]" title="Contém Hot Cues / Serato Markers">
+                                  🎯 Cues
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </td>
 
+                        {/* Botão Trocar (Swap Keeper) */}
+                        <td className="py-2 px-1 text-center align-middle">
+                          <button
+                            type="button"
+                            onClick={() => handleSwapKeeper(item.id)}
+                            className="p-1.5 rounded bg-slate-800 hover:bg-purple-900/60 text-slate-400 hover:text-purple-300 border border-slate-700 hover:border-purple-600 transition cursor-pointer"
+                            title="Inverter: Manter este arquivo e marcar o outro como cópia para exclusão"
+                          >
+                            <ArrowLeftRight className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+
                         {/* Localização da Original */}
-                        <td className="py-2 px-3">
-                          <div className="flex items-center space-x-1.5">
-                            <span className="text-[10px] bg-emerald-950/50 text-emerald-300 px-1.5 py-0.2 rounded border border-emerald-800/40 shrink-0 font-sans">
-                              Original
-                            </span>
-                            <span className="text-slate-400 truncate max-w-[190px]" title={originalPath}>
-                              {originalPath.split('/').slice(-2).join('/')}
-                            </span>
-                            {onOpenFileInFinder && (
-                              <button
-                                type="button"
-                                onClick={() => onOpenFileInFinder(originalPath)}
-                                className="p-1 rounded bg-serato-dark/70 hover:bg-slate-700 text-slate-400 hover:text-emerald-300 border border-slate-700/50 transition cursor-pointer shrink-0"
-                                title={`Revelar arquivo Original no Finder:\n${originalPath}`}
-                              >
-                                <Eye className="w-3 h-3 text-emerald-400" />
-                              </button>
-                            )}
+                        <td className="py-2 px-3 align-middle">
+                          <div className="space-y-1">
+                            <div className="flex items-center space-x-1.5">
+                              <span className="text-[10px] bg-emerald-950/50 text-emerald-300 px-1.5 py-0.2 rounded border border-emerald-800/40 shrink-0 font-sans font-semibold">
+                                Original
+                              </span>
+                              <span className="text-slate-300 truncate max-w-[170px]" title={item.nome_original || item.nome}>
+                                {item.nome_original || item.nome}
+                              </span>
+                              {onPlayTrack && (
+                                <button
+                                  type="button"
+                                  onClick={() => onPlayTrack({
+                                    caminho: originalPath,
+                                    nome: `[Original] ${item.nome_original || item.nome}`
+                                  })}
+                                  className="p-1 rounded bg-emerald-950/40 hover:bg-emerald-900/60 text-emerald-300 hover:text-white border border-emerald-700/50 transition cursor-pointer shrink-0"
+                                  title={`Tocar arquivo Original no Mini-Player:\n${originalPath}`}
+                                >
+                                  <Play className="w-3 h-3 fill-current" />
+                                </button>
+                              )}
+                              {onOpenFileInFinder && (
+                                <button
+                                  type="button"
+                                  onClick={() => onOpenFileInFinder(originalPath)}
+                                  className="p-1 rounded bg-serato-dark/70 hover:bg-slate-700 text-slate-400 hover:text-emerald-300 border border-slate-700/50 transition cursor-pointer shrink-0"
+                                  title={`Revelar arquivo Original no Finder:\n${originalPath}`}
+                                >
+                                  <Eye className="w-3 h-3 text-emerald-400" />
+                                </button>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
+                              <span className="truncate max-w-[150px] text-slate-500" title={originalPath}>
+                                {originalPath.split('/').slice(-2, -1)[0] || 'Raiz'}
+                              </span>
+                              {item.bitrate_original ? (
+                                <span className={`px-1 py-0.2 rounded text-[9px] ${
+                                  item.bitrate_copia && item.bitrate_original > item.bitrate_copia
+                                    ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800/40 font-bold'
+                                    : 'bg-black/40 text-slate-300'
+                                }`}>
+                                  {item.bitrate_original} kbps
+                                </span>
+                              ) : null}
+                              {item.duracao_original ? (
+                                <span className="text-slate-400">
+                                  {formatDuration(item.duracao_original)}
+                                </span>
+                              ) : null}
+                              {item.has_serato_markers_original && (
+                                <span className="bg-purple-950/60 text-purple-300 border border-purple-800/40 px-1 rounded text-[9px]" title="Contém Hot Cues / Serato Markers">
+                                  🎯 Cues
+                                </span>
+                              )}
+                            </div>
                           </div>
                         </td>
 
                         {/* Tamanho */}
-                        <td className="py-2 px-3 text-right text-serato-muted">
+                        <td className="py-2 px-3 text-right text-serato-muted align-middle">
                           {formatSize(item.tamanho)}
                         </td>
 
                         {/* Ações */}
-                        <td className="py-2 px-3">
+                        <td className="py-2 px-3 align-middle">
                           <div className="flex items-center justify-center space-x-1.5">
-                            {onPlayTrack && (
-                              <button
-                                type="button"
-                                onClick={() => onPlayTrack({
-                                  caminho: copyPath,
-                                  nome: item.nome
-                                })}
-                                className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-serato-gold hover:text-white border border-serato-cardBorder transition cursor-pointer"
-                                title="Tocar cópia no Player nativo"
-                              >
-                                <Play className="w-3.5 h-3.5 fill-current" />
-                              </button>
-                            )}
-
-                            {onOpenFileInFinder && (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => onOpenFileInFinder(originalPath)}
-                                  className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 hover:text-white border border-serato-cardBorder transition cursor-pointer"
-                                  title={`Revelar arquivo Original preservado no Finder:\n${originalPath}`}
-                                >
-                                  <Eye className="w-3.5 h-3.5 text-emerald-400" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => onOpenFileInFinder(copyPath)}
-                                  className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-300 hover:text-white border border-serato-cardBorder transition cursor-pointer"
-                                  title={`Revelar arquivo de Cópia redundante no Finder:\n${copyPath}`}
-                                >
-                                  <Eye className="w-3.5 h-3.5 text-serato-cyan" />
-                                </button>
-                              </>
-                            )}
+                            {/* Botão Inverter */}
+                            <button
+                              type="button"
+                              onClick={() => handleSwapKeeper(item.id)}
+                              className="p-1 rounded bg-serato-dark hover:bg-purple-950/50 text-slate-400 hover:text-purple-300 border border-serato-cardBorder transition cursor-pointer"
+                              title="Inverter original e cópia"
+                            >
+                              <ArrowLeftRight className="w-3.5 h-3.5" />
+                            </button>
 
                             {onMoveToTrash && (
                               <button

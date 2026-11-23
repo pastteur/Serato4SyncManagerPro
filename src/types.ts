@@ -1,11 +1,19 @@
 export interface DuplicateItem {
   id: string;
   nome: string;
+  nome_original?: string;
   copia: string;
   original: string;
   caminho_copia?: string;
   caminho_original?: string;
   tamanho: number;
+  tamanho_original?: number;
+  bitrate_copia?: number;
+  bitrate_original?: number;
+  duracao_copia?: number;
+  duracao_original?: number;
+  has_serato_markers_copia?: boolean;
+  has_serato_markers_original?: boolean;
   grau_certeza?: 'IDENTICO_COMPROVADO' | 'POSSIVEL_DUPLICADO' | 'NOMES_SEMELHANTES';
   motivo?: string;
   hash_audio?: string;

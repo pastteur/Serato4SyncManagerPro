@@ -24,13 +24,13 @@ Nada é alterado no disco por este módulo, exceto as ações explícitas
 
 import os
 import sys
-
-sys.dont_write_bytecode = True
+import re
 import csv
 import json
 import shutil
 import argparse
 import hashlib
+import unicodedata
 from pathlib import Path
 
 _THIS_DIR = str(Path(__file__).resolve().parent)
@@ -93,9 +93,33 @@ def compute_content_hash(filepath):
         return ""
 
 
+def clean_audio_name(filename):
+    """
+    Normaliza o nome do arquivo para matching semântico/musical:
+    - Remove números de faixa no início (ex: '01 - ', '01. ', '1-01 ')
+    - Remove sufixos de cópia (ex: '(1)', '[2]', ' - Cópia', ' - copy')
+    - Remove pontuação, normaliza diacríticos (NFC) e caixa baixa.
+    """
+    stem = Path(filename).stem
+    s = unicodedata.normalize('NFC', stem).lower().strip()
+    s = re.sub(r'^\d+[\s\.\-_]+', '', s)
+    s = re.sub(r'[\(\[\{]\s*\d+\s*[\)\]\}]', ' ', s)
+    s = re.sub(r'[\-_]?\s*\b(cópia|copia|copy)\b\s*(\d+)?', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(r'[^\w\s]', ' ', s)
+    return ' '.join(s.split())
+
+
 def read_meta(filepath):
-    """BPM, tom, duração e bitrate, quando disponíveis."""
-    meta = {"bpm": "", "key": "", "duration": 0.0, "bitrate_kbps": 0}
+    """BPM, tom, duração, bitrate, artista, título e marcadores Serato."""
+    meta = {
+        "bpm": "",
+        "key": "",
+        "duration": 0.0,
+        "bitrate_kbps": 0,
+        "artist": "",
+        "title": "",
+        "has_serato_markers": False
+    }
     if mutagen is None:
         return meta
     try:
@@ -106,9 +130,9 @@ def read_meta(filepath):
         return meta
     info = getattr(audio, "info", None)
     if info is not None:
-        meta["duration"] = float(getattr(info, "length", 0) or 0)
+        meta["duration"] = round(float(getattr(info, "length", 0) or 0), 2)
         meta["bitrate_kbps"] = int(round((getattr(info, "bitrate", 0) or 0) / 1000.0))
-    tags = audio.tags
+    tags = getattr(audio, "tags", None)
     if tags is not None:
         try:
             if "TBPM" in tags:
@@ -120,6 +144,27 @@ def read_meta(filepath):
         try:
             if "TKEY" in tags:
                 meta["key"] = str(tags["TKEY"]).strip()
+        except Exception:
+            pass
+        try:
+            if "TPE1" in tags:
+                meta["artist"] = str(tags["TPE1"]).strip()
+            elif "artist" in tags:
+                meta["artist"] = str(tags["artist"][0]).strip()
+        except Exception:
+            pass
+        try:
+            if "TIT2" in tags:
+                meta["title"] = str(tags["TIT2"]).strip()
+            elif "title" in tags:
+                meta["title"] = str(tags["title"][0]).strip()
+        except Exception:
+            pass
+        try:
+            for k in tags.keys():
+                if "GEOB:Serato" in k or str(k).startswith("GEOB:Serato"):
+                    meta["has_serato_markers"] = True
+                    break
         except Exception:
             pass
     return meta
@@ -186,6 +231,7 @@ def scan_roots(roots, serato_root=None, include_serato=None, progress=True):
                 "caminho": str(p),
                 "nome": p.name,
                 "nome_norm": normalize_name(p.name),
+                "clean_name": clean_audio_name(p.name),
                 "tamanho": st.st_size,
                 "mtime": st.st_mtime,
                 "raiz": raiz["path"],
@@ -196,102 +242,244 @@ def scan_roots(roots, serato_root=None, include_serato=None, progress=True):
     if progress:
         _emit({"tipo": "progresso", "fase": "comparacao", "total_arquivos": len(entradas)})
 
-    # 1. Agrupa por (nome normalizado, tamanho) e por tamanho exato (captura nomes divergentes)
-    por_chave = {}
-    por_tam = {}
+    # 1. Pré-seleção inteligente para cálculo de hash acústico (Sound Seal SHA-256)
+    # Arquivos só necessitam de hash se tiverem mesmo tamanho (>50KB) ou mesmo nome limpo
+    tam_grupos = {}
+    clean_grupos = {}
     for e in entradas:
-        por_chave.setdefault((e["nome_norm"], e["tamanho"]), []).append(e)
         if e["tamanho"] > 50 * 1024:
-            por_tam.setdefault(e["tamanho"], []).append(e)
+            tam_grupos.setdefault(e["tamanho"], []).append(e)
+        if len(e["clean_name"]) >= 3:
+            clean_grupos.setdefault(e["clean_name"], []).append(e)
 
-    candidatos = {}
-    for k, v in por_chave.items():
-        if len(v) > 1:
-            candidatos[k] = v
+    precisa_hash = set()
+    for itens in tam_grupos.values():
+        if len(itens) > 1:
+            for it in itens:
+                precisa_hash.add(it["caminho"])
+    for itens in clean_grupos.values():
+        if len(itens) > 1:
+            for it in itens:
+                precisa_hash.add(it["caminho"])
 
-    for tam, v in por_tam.items():
-        if len(v) > 1:
-            caminhos_v = set(item["caminho"] for item in v)
-            ja_coberto = any(caminhos_v.issubset(set(ci["caminho"] for ci in g)) for g in candidatos.values())
-            if not ja_coberto:
-                candidatos[(f"match_tamanho_{tam}", tam)] = v
+    total_hash = len(precisa_hash)
+    hash_cache = {}
+    for idx, fpath in enumerate(precisa_hash, 1):
+        if progress and (idx % 25 == 0 or idx == total_hash):
+            _emit({"tipo": "progresso", "fase": "hash", "grupo": idx,
+                   "total_grupos": total_hash, "arquivo": Path(fpath).name})
+        h = compute_content_hash(fpath)
+        if h:
+            hash_cache[fpath] = h
 
-    # 2. Hash por grupo
+    for e in entradas:
+        e["hash"] = hash_cache.get(e["caminho"], "")
+
     grupos = []
-    total_cand = len(candidatos)
-    for gi, ((nome, tamanho), itens) in enumerate(candidatos.items(), 1):
-        hashes = {}
-        for it in itens:
-            h = compute_content_hash(it["caminho"]) if it["ext"] in HASHABLE_EXTENSIONS else ""
-            it["hash"] = h
-            if h:
-                hashes.setdefault(h, []).append(it)
-        if progress and (gi % 5 == 0 or gi == total_cand):
-            _emit({"tipo": "progresso", "fase": "hash", "grupo": gi,
-                   "total_grupos": total_cand, "arquivo": nome})
+    processados = set()
 
-        if len(hashes) == 1 and all(it["hash"] for it in itens):
-            grau = "IDENTICO_COMPROVADO"
-            motivo = "Bytes idênticos (mesmo SHA-256), ignorando tags ID3."
-        elif len(hashes) > 1:
-            grau = "POSSIVEL_DUPLICADO"
-            motivo = "Mesmo nome e tamanho, mas o conteúdo diverge."
-        else:
-            grau = "POSSIVEL_DUPLICADO"
-            motivo = "Mesmo nome e tamanho; conteúdo não pôde ser confirmado."
+    # FASE 1: IDENTICO_COMPROVADO (Mesmo Hash SHA-256 do fluxo de áudio)
+    por_hash = {}
+    for e in entradas:
+        if e["hash"]:
+            por_hash.setdefault(e["hash"], []).append(e)
 
-        grupos.append({
-            "id": "grp-%d" % len(grupos),
-            "nome": itens[0]["nome"],
-            "tamanho": tamanho,
-            "grau_certeza": grau,
-            "motivo": motivo,
-            "hash_audio": next((it["hash"] for it in itens if it["hash"]), ""),
-            "arquivos": [{
-                "caminho": it["caminho"],
-                "raiz": it["raiz"],
-                "origem": it["origem"],
-                "tamanho": it["tamanho"],
-                "mtime": it["mtime"],
-                "hash": it.get("hash", ""),
-                **read_meta(it["caminho"]),
-            } for it in itens],
-        })
+    for h, itens in por_hash.items():
+        if len(itens) > 1:
+            for it in itens:
+                processados.add(it["caminho"])
 
-    grupos.sort(key=lambda g: (-g["tamanho"], g["nome"].lower()))
-    for g in grupos:
-        for a in g["arquivos"]:
-            a["sugerido_manter"] = False
-        manter = _choose_keeper(g["arquivos"])
-        if manter:
-            manter["sugerido_manter"] = True
+            arquivos_meta = []
+            for it in itens:
+                meta = read_meta(it["caminho"])
+                arquivos_meta.append({
+                    "caminho": it["caminho"],
+                    "nome": it["nome"],
+                    "raiz": it["raiz"],
+                    "origem": it["origem"],
+                    "tamanho": it["tamanho"],
+                    "mtime": it["mtime"],
+                    "hash": it["hash"],
+                    **meta,
+                })
+
+            for a in arquivos_meta:
+                a["sugerido_manter"] = False
+            manter = _choose_keeper(arquivos_meta)
+            if manter:
+                manter["sugerido_manter"] = True
+
+            grupos.append({
+                "id": "grp-%d" % (len(grupos) + 1),
+                "nome": manter["nome"] if manter else itens[0]["nome"],
+                "tamanho": manter["tamanho"] if manter else itens[0]["tamanho"],
+                "grau_certeza": "IDENTICO_COMPROVADO",
+                "motivo": "Conteúdo de áudio 100% idêntico (mesmo hash SHA-256 do fluxo de som, independente de tags ID3).",
+                "hash_audio": h,
+                "arquivos": arquivos_meta,
+            })
+
+    # FASE 2: POSSIVEL_DUPLICADO (Mesmo Clean Name e duração compatível)
+    # NOTA CRÍTICA: Arquivos com nomes divergentes NUNCA são agrupados aqui,
+    # mesmo que coincidam no tamanho em bytes.
+    por_clean = {}
+    for e in entradas:
+        if e["caminho"] not in processados and len(e["clean_name"]) >= 3:
+            por_clean.setdefault(e["clean_name"], []).append(e)
+
+    for cname, itens in por_clean.items():
+        if len(itens) > 1:
+            meta_itens = []
+            for it in itens:
+                meta = read_meta(it["caminho"])
+                meta_itens.append({
+                    "caminho": it["caminho"],
+                    "nome": it["nome"],
+                    "raiz": it["raiz"],
+                    "origem": it["origem"],
+                    "tamanho": it["tamanho"],
+                    "mtime": it["mtime"],
+                    "hash": it.get("hash", ""),
+                    **meta,
+                })
+
+            # Sub-agrupamento por duração (delta <= 3.5 segundos)
+            clusters = []
+            for m in meta_itens:
+                dur = m.get("duration", 0.0)
+                matched_cl = None
+                for cl in clusters:
+                    ref_dur = cl[0].get("duration", 0.0)
+                    if dur == 0.0 or ref_dur == 0.0 or abs(dur - ref_dur) <= 3.5:
+                        matched_cl = cl
+                        break
+                if matched_cl is not None:
+                    matched_cl.append(m)
+                else:
+                    clusters.append([m])
+
+            for cl in clusters:
+                if len(cl) > 1:
+                    for it in cl:
+                        processados.add(it["caminho"])
+
+                    for a in cl:
+                        a["sugerido_manter"] = False
+                    manter = _choose_keeper(cl)
+                    if manter:
+                        manter["sugerido_manter"] = True
+
+                    durs = [int(it.get("duration", 0)) for it in cl if it.get("duration", 0) > 0]
+                    bitrates = [it.get("bitrate_kbps", 0) for it in cl if it.get("bitrate_kbps", 0) > 0]
+                    dur_str = f"Duração: {' / '.join(f'{d}s' for d in durs)}" if durs else ""
+                    bitrate_str = f"Bitrates: {' vs '.join(f'{b} kbps' for b in bitrates)}" if bitrates else ""
+                    detalhes = [s for s in (dur_str, bitrate_str) if s]
+                    motivo = f"Mesmo título normalizado ('{cname}') com master/bitrate divergente ({'; '.join(detalhes)})."
+
+                    grupos.append({
+                        "id": "grp-%d" % (len(grupos) + 1),
+                        "nome": manter["nome"] if manter else cl[0]["nome"],
+                        "tamanho": manter["tamanho"] if manter else cl[0]["tamanho"],
+                        "grau_certeza": "POSSIVEL_DUPLICADO",
+                        "motivo": motivo,
+                        "hash_audio": cl[0].get("hash", ""),
+                        "arquivos": cl,
+                    })
+
+    # FASE 3: POSSIVEL_DUPLICADO por Tags ID3 (Artista + Título idênticos)
+    por_art_tit = {}
+    for e in entradas:
+        if e["caminho"] not in processados:
+            meta = read_meta(e["caminho"])
+            art = meta.get("artist", "").strip().lower()
+            tit = meta.get("title", "").strip().lower()
+            if len(art) >= 2 and len(tit) >= 2:
+                art_n = ' '.join(re.sub(r'[^\w\s]', '', art).split())
+                tit_n = ' '.join(re.sub(r'[^\w\s]', '', tit).split())
+                if art_n and tit_n:
+                    por_art_tit.setdefault((art_n, tit_n), []).append((e, meta))
+
+    for (art_n, tit_n), pairs in por_art_tit.items():
+        if len(pairs) > 1:
+            cl_meta = []
+            for e, meta in pairs:
+                cl_meta.append({
+                    "caminho": e["caminho"],
+                    "nome": e["nome"],
+                    "raiz": e["raiz"],
+                    "origem": e["origem"],
+                    "tamanho": e["tamanho"],
+                    "mtime": e["mtime"],
+                    "hash": e.get("hash", ""),
+                    **meta,
+                })
+            durs = [m.get("duration", 0.0) for m in cl_meta if m.get("duration", 0.0) > 0]
+            if len(durs) >= 2 and max(durs) - min(durs) > 4.0:
+                continue
+
+            for it in cl_meta:
+                processados.add(it["caminho"])
+
+            for a in cl_meta:
+                a["sugerido_manter"] = False
+            manter = _choose_keeper(cl_meta)
+            if manter:
+                manter["sugerido_manter"] = True
+
+            art_tit_str = f"{cl_meta[0].get('artist')} - {cl_meta[0].get('title')}"
+            grupos.append({
+                "id": "grp-%d" % (len(grupos) + 1),
+                "nome": manter["nome"] if manter else cl_meta[0]["nome"],
+                "tamanho": manter["tamanho"] if manter else cl_meta[0]["tamanho"],
+                "grau_certeza": "POSSIVEL_DUPLICADO",
+                "motivo": f"Mesmo Artista e Título em tags ID3 ('{art_tit_str}').",
+                "hash_audio": cl_meta[0].get("hash", ""),
+                "arquivos": cl_meta,
+            })
+
+    grupos.sort(key=lambda g: (0 if g["grau_certeza"] == "IDENTICO_COMPROVADO" else 1, -g["tamanho"], g["nome"].lower()))
 
     brutos = sum(1 for e in entradas)
+    bytes_recup = sum(
+        sum(a["tamanho"] for a in g["arquivos"] if not a.get("sugerido_manter"))
+        for g in grupos
+    )
     return {
         "sucesso": True,
         "raizes": raizes,
         "total_arquivos": brutos,
         "grupos": len(grupos),
         "copias_redundantes": sum(len(g["arquivos"]) - 1 for g in grupos),
-        "bytes_recuperaveis": sum(g["tamanho"] * (len(g["arquivos"]) - 1) for g in grupos),
+        "bytes_recuperaveis": bytes_recup,
         "itens": grupos,
     }
 
 
 def _choose_keeper(arquivos):
     """
-    Heurística de manutenção: maior bitrate; empate -> dentro da biblioteca
-    Serato; empate -> mais antigo por mtime.
+    Heurística inteligente de preservação (Keeper Selection):
+    1. Presença de Hot Cues / Serato Markers (+500 pts)
+    2. Maior bitrate de áudio (+bitrate pts, ex: 320 kbps > 128 kbps)
+    3. Pertence à biblioteca Serato Master (+150 pts)
+    4. Nome limpo sem marcadores de cópia '(1)', ' - Cópia' (+50 pts)
+    5. Arquivo mais antigo / data de modificação (+10 pts)
     """
     if not arquivos:
         return None
 
     def score(a):
-        return (
-            a.get("bitrate_kbps") or 0,
-            1 if a.get("origem") == "serato" else 0,
-            -float(a.get("mtime") or 0),
-        )
+        s = 0
+        if a.get("has_serato_markers"):
+            s += 500
+        s += int(a.get("bitrate_kbps") or 0)
+        if a.get("origem") == "serato":
+            s += 150
+        nome = a.get("nome", "").lower()
+        if not re.search(r'[\(\[\{]\s*\d+\s*[\)\]\}]|\b(cópia|copia|copy)\b', nome):
+            s += 50
+        mtime = float(a.get("mtime") or 0)
+        return (s, -mtime)
+
     return max(arquivos, key=score)
 
 
