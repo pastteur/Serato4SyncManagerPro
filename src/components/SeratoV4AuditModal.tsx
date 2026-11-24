@@ -154,16 +154,21 @@ export const SeratoV4AuditModal: React.FC<SeratoV4AuditModalProps> = ({
 
               {/* Arquivos de Banco */}
               <div className="p-3 bg-slate-900/40 border border-slate-800 rounded-xl space-y-1.5 text-xs">
-                <span className="text-[10px] uppercase font-mono text-slate-400 font-bold">Arquivos Locais:</span>
-                <div className="flex items-center justify-between text-slate-300 font-mono text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase font-mono text-slate-400 font-bold">Diretório do Banco Serato v4:</span>
+                  <span className="text-[10px] font-mono text-serato-cyan truncate max-w-[280px]" title={report.library_dir}>
+                    {report.library_dir}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-slate-300 font-mono text-[11px] pt-1 border-t border-white/5">
                   <span>master.sqlite:</span>
-                  <span className={report.master_exists ? 'text-emerald-400' : 'text-slate-500'}>
+                  <span className={report.master_exists ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
                     {report.master_exists ? 'PRESENTE' : 'AUSENTE'}
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-slate-300 font-mono text-[11px]">
                   <span>location.sqlite:</span>
-                  <span className={report.location_exists ? 'text-emerald-400' : 'text-slate-500'}>
+                  <span className={report.location_exists ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
                     {report.location_exists ? 'PRESENTE' : 'AUSENTE'}
                   </span>
                 </div>

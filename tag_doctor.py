@@ -530,12 +530,29 @@ def enrich_missing_artists(items: list, stream_progress: bool = True):
 
 
 
+def get_master_database_path() -> Path:
+    """Localiza confiavelmente o arquivo master.sqlite do Serato."""
+    candidates = [
+        SERATO_INTERNAL_DB,
+        Path.home() / "Library" / "Application Support" / "Serato" / "Library" / "master.sqlite",
+        Path.home() / "Library" / "Application Support" / "Serato" / "master.sqlite"
+    ]
+    for c in candidates:
+        try:
+            if c.exists():
+                return c
+        except Exception:
+            pass
+    return SERATO_INTERNAL_DB
+
+
 def backup_master_database():
     """Realiza snapshot seguro de master.sqlite com carimbo de data/hora."""
-    if not SERATO_INTERNAL_DB.exists():
+    target_db = get_master_database_path()
+    if not target_db.exists():
         return {
             "sucesso": False,
-            "erro": f"Banco central do Serato não encontrado em: {SERATO_INTERNAL_DB}"
+            "erro": f"Banco central do Serato não encontrado em: {target_db}"
         }
 
     DEFAULT_BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -543,7 +560,7 @@ def backup_master_database():
     backup_file = DEFAULT_BACKUPS_DIR / f"master_backup_{ts}.sqlite"
 
     try:
-        shutil.copy2(SERATO_INTERNAL_DB, backup_file)
+        shutil.copy2(target_db, backup_file)
         size_mb = backup_file.stat().st_size / (1024 * 1024)
         return {
             "sucesso": True,
@@ -583,13 +600,14 @@ def restore_master_database(backup_path_str: str):
     if not backup_file.exists():
         return {"sucesso": False, "erro": "Arquivo de backup não encontrado."}
 
+    target_db = get_master_database_path()
     try:
         # Gera salvaguarda do atual antes de substituir
-        if SERATO_INTERNAL_DB.exists():
+        if target_db.exists():
             salvaguarda = DEFAULT_BACKUPS_DIR / f"master_pre_restore_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.sqlite"
-            shutil.copy2(SERATO_INTERNAL_DB, salvaguarda)
+            shutil.copy2(target_db, salvaguarda)
 
-        shutil.copy2(backup_file, SERATO_INTERNAL_DB)
+        shutil.copy2(backup_file, target_db)
         return {"sucesso": True, "mensagem": f"Banco restaurado com sucesso a partir de {backup_file.name}"}
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro ao restaurar: {e}"}

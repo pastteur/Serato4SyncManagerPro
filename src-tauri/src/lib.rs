@@ -592,13 +592,14 @@ mod commands {
         if let Some(home) = dirs_home() {
             let internal_mp3_sub = home.join("Music").join("MP3");
             let internal_mp3 = home.join("Music");
-            let internal_serato_appsup = home.join("Library").join("Application Support").join("Serato");
             let internal_serato_music = home.join("Music").join("_Serato_");
+            let internal_serato_appsup = home.join("Library").join("Application Support").join("Serato");
 
-            let opt_serato = if internal_serato_appsup.exists() && internal_serato_appsup.is_dir() {
-                Some(internal_serato_appsup)
-            } else if internal_serato_music.exists() && internal_serato_music.is_dir() {
+            // Crates e preferências residem em Music/_Serato_!
+            let opt_serato = if internal_serato_music.exists() && internal_serato_music.is_dir() {
                 Some(internal_serato_music)
+            } else if internal_serato_appsup.exists() && internal_serato_appsup.is_dir() {
+                Some(internal_serato_appsup)
             } else {
                 None
             };
@@ -677,10 +678,10 @@ mod commands {
                 None
             };
 
-            let found_serato = if serato_appsup.exists() && serato_appsup.is_dir() {
-                Some(serato_appsup.to_string_lossy().to_string())
-            } else if serato_music.exists() && serato_music.is_dir() {
+            let found_serato = if serato_music.exists() && serato_music.is_dir() {
                 Some(serato_music.to_string_lossy().to_string())
+            } else if serato_appsup.exists() && serato_appsup.is_dir() {
+                Some(serato_appsup.to_string_lossy().to_string())
             } else {
                 None
             };

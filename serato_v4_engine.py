@@ -32,19 +32,45 @@ class SeratoV4Engine:
     """Engine de inspeção, auditoria e leitura da biblioteca SQLite do Serato DJ Pro 4."""
 
     def __init__(self, library_dir: Optional[str] = None):
+        candidates = []
         if library_dir:
             cand = Path(os.path.expanduser(library_dir)).resolve()
-            if self._safe_exists(cand / "Library"):
-                self.library_dir = cand / "Library"
-            else:
-                self.library_dir = cand
+            # 1. Se o caminho passado tiver a subpasta Library ou for a própria pasta Library
+            candidates.extend([
+                cand / "Library",
+                cand,
+                cand.parent / "Library"
+            ])
+            # 2. Se for um caminho de volume externo (ex: /Volumes/Pastteyr/_Serato_)
+            parts = cand.parts
+            if len(parts) >= 3 and parts[1] == 'Volumes':
+                ext_app_sup = Path(parts[0]) / parts[1] / parts[2] / "Library" / "Application Support" / "Serato" / "Library"
+                candidates.append(ext_app_sup)
+
+        # 3. Caminho canônico onde o Serato 4 armazena o banco SQLite no sistema operacional
+        if sys.platform == "darwin":
+            candidates.extend([
+                DEFAULT_MACOS_SERATO_V4,
+                Path.home() / "Library" / "Application Support" / "Serato" / "Library",
+                Path.home() / "Library" / "Application Support" / "Serato"
+            ])
+        elif sys.platform == "win32" and DEFAULT_WIN_SERATO_V4:
+            candidates.append(DEFAULT_WIN_SERATO_V4)
+
+        # Prioriza o primeiro candidato onde master.sqlite ou root.sqlite existam fisicamente
+        selected_dir = None
+        for c in candidates:
+            if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite"):
+                selected_dir = c
+                break
+
+        if selected_dir:
+            self.library_dir = selected_dir
+        elif library_dir:
+            cand = Path(os.path.expanduser(library_dir)).resolve()
+            self.library_dir = cand / "Library" if self._safe_exists(cand / "Library") else cand
         else:
-            if sys.platform == "darwin":
-                self.library_dir = DEFAULT_MACOS_SERATO_V4
-            elif sys.platform == "win32" and DEFAULT_WIN_SERATO_V4:
-                self.library_dir = DEFAULT_WIN_SERATO_V4
-            else:
-                self.library_dir = DEFAULT_MACOS_SERATO_V4
+            self.library_dir = DEFAULT_MACOS_SERATO_V4
 
         self.master_db = self.library_dir / "master.sqlite"
         self.root_db = self.library_dir / "root.sqlite"
@@ -59,6 +85,12 @@ class SeratoV4Engine:
         uri = f"file:{db_path.as_posix()}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.create_collation("serato_asset_string_comparator", lambda a, b: (a > b) - (a < b))
+            conn.create_function("serato_str_norm", 1, lambda s: (s or "").lower())
+            conn.create_function("serato_raw_key_string_to_key_type", 1, lambda k: 0)
+        except Exception:
+            pass
         return conn
 
     def _safe_exists(self, p: Path) -> bool:
