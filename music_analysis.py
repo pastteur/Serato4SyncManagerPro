@@ -34,6 +34,7 @@ import argparse
 import subprocess
 from array import array
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 
 _THIS_DIR = str(Path(__file__).resolve().parent)
 if _THIS_DIR not in sys.path:
@@ -45,7 +46,7 @@ if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
 
 try:
     import mutagen
-    from mutagen.id3 import ID3, TBPM, TKEY
+    from mutagen.id3 import ID3, TBPM, TKEY, TIT1, COMM
 except ImportError:
     mutagen = None
     ID3 = None
@@ -268,14 +269,53 @@ def estimate_key(samples):
     return {"tom": name, "camelot": camelot, "confianca": round(max(0.0, corr), 3)}
 
 
+def estimate_energy(samples, onsets=None):
+    """
+    Calcula nível de energia de pista (1 a 10) combinando Loudness RMS
+    e densidade de transientes/onsets.
+    """
+    if not samples or len(samples) < 512:
+        return {"energy": 5, "rms_db": -18.0, "confianca": 0.0}
+
+    # 1. RMS Loudness
+    acc = 0.0
+    for s in samples:
+        acc += s * s
+    rms = math.sqrt(acc / len(samples))
+    ratio = max(1e-6, rms / 32767.0)
+    rms_db = 20.0 * math.log10(ratio)
+
+    # 2. Onset Density & Transients
+    if onsets is None:
+        onsets, _ = _onset_envelope(samples)
+
+    avg_onset = sum(onsets) / max(1, len(onsets)) if onsets else 0.0
+
+    # 3. Escala calibrada 1-10 (Loudness RMS entre -28 dB e -6 dB)
+    norm_rms = (rms_db - (-28.0)) / ((-6.0) - (-28.0))
+    norm_rms = max(0.0, min(1.0, norm_rms))
+
+    transient_bonus = min(0.25, avg_onset * 0.5)
+    raw_score = 1.0 + (norm_rms * 8.0) + (transient_bonus * 4.0)
+    energy = int(round(max(1.0, min(10.0, raw_score))))
+
+    return {
+        "energy": energy,
+        "rms_db": round(rms_db, 1),
+        "confianca": round(min(1.0, norm_rms + 0.2), 2)
+    }
+
+
 def analyze_file(filepath, seconds=BPM_SECONDS):
-    """Analisa BPM e tom de um arquivo. Não grava nada."""
+    """Analisa BPM, tom e energia de um arquivo. Não grava nada."""
     samples = decode_mono_pcm(filepath, seconds=seconds)
     if not samples or len(samples) < ANALYSIS_SR:
         return {"sucesso": False, "erro": "Não foi possível decodificar o áudio (FFmpeg ausente ou arquivo inválido)"}
 
     bpm, bpm_conf = estimate_bpm(samples)
     key = estimate_key(samples) or {"tom": "", "camelot": "", "confianca": 0.0}
+    energy_data = estimate_energy(samples)
+
     return {
         "sucesso": True,
         "arquivo": Path(filepath).name,
@@ -284,7 +324,110 @@ def analyze_file(filepath, seconds=BPM_SECONDS):
         "tom": key["tom"],
         "camelot": key["camelot"],
         "tom_confianca": key["confianca"],
+        "energy": energy_data["energy"],
+        "rms_db": energy_data["rms_db"],
+        "energy_confianca": energy_data["confianca"],
     }
+
+
+def write_energy_tag(filepath, energy: int, target_tag: str = "grouping", overwrite: bool = True):
+    """
+    Grava Energy (1-10) em tags ID3v2.3:
+    target_tag='grouping': Coluna Grouping do Serato (TIT1: "Energy 7")
+    target_tag='comment': Prefixa na coluna Comment do Serato (COMM: "[Energy 7]")
+    target_tag='both': Grava em ambos
+    """
+    if ID3 is None:
+        return {"sucesso": False, "erro": "Mutagen não instalado"}
+    path = Path(filepath)
+    if path.suffix.lower() != ".mp3":
+        return {"sucesso": False, "erro": "Apenas MP3 suportado para tags ID3"}
+
+    try:
+        tags = ID3(str(path))
+    except Exception:
+        tags = ID3()
+
+    energy_val = max(1, min(10, int(energy)))
+    alterou = False
+
+    if target_tag in ("grouping", "both"):
+        tags.delall("TIT1")
+        tags.add(TIT1(encoding=3, text=f"Energy {energy_val}"))
+        alterou = True
+
+    if target_tag in ("comment", "both"):
+        import re as _re
+        existing_comm = ""
+        for frame in tags.getall("COMM"):
+            if frame.desc == "" or frame.desc == "Comment":
+                existing_comm = str(frame.text[0]) if frame.text else ""
+                break
+        
+        cleaned_comm = _re.sub(r'\[Energy \d+\]\s*', '', existing_comm).strip()
+        new_comm = f"[Energy {energy_val}] {cleaned_comm}".strip()
+        tags.delall("COMM")
+        tags.add(COMM(encoding=3, lang='eng', desc='', text=[new_comm]))
+        alterou = True
+
+    if not alterou:
+        return {"sucesso": True, "gravado": False}
+
+    try:
+        from journal import record_id3_before_change
+        record_id3_before_change(str(path), action="gravacao_energy")
+    except Exception:
+        pass
+
+    try:
+        tags.save(str(path), v2_version=3)
+        return {"sucesso": True, "gravado": True, "energy": energy_val, "target": target_tag}
+    except Exception as e:
+        return {"sucesso": False, "erro": str(e)}
+
+
+def analyze_energy_batch(folder, limit=50, write=True, target_tag="grouping", emit=True):
+    """Analisa e opcionalmente grava Energy para lote de arquivos."""
+    root = Path(os.path.expanduser(folder))
+    files = []
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+        for f in filenames:
+            if f.startswith('.') or Path(f).suffix.lower() != ".mp3":
+                continue
+            files.append(Path(dirpath) / f)
+    files.sort()
+
+    if limit and int(limit) > 0:
+        files = files[: int(limit)]
+    total = len(files)
+    resultados = []
+
+    for idx, p in enumerate(files, 1):
+        res = analyze_file(p)
+        item = {"arquivo": str(p), "nome": p.name}
+        if res.get("sucesso"):
+            item["energy"] = res.get("energy", 5)
+            item["rms_db"] = res.get("rms_db", -18.0)
+            if write:
+                w = write_energy_tag(str(p), energy=res["energy"], target_tag=target_tag)
+                item["gravado"] = bool(w.get("gravado"))
+                if not w.get("sucesso"):
+                    item["erro"] = w.get("erro")
+        else:
+            item["erro"] = res.get("erro")
+        resultados.append(item)
+        if emit:
+            print(json.dumps({"tipo": "progresso", "processados": idx, "total": total,
+                              "faixa": p.name, "resultado": item}, ensure_ascii=False), flush=True)
+
+    final = {"tipo": "fim", "sucesso": True, "total": total,
+             "analisadas": sum(1 for r in resultados if "energy" in r),
+             "gravadas": sum(1 for r in resultados if r.get("gravado")),
+             "erros": sum(1 for r in resultados if r.get("erro"))}
+    if emit:
+        print(json.dumps(final, ensure_ascii=False), flush=True)
+    return final
 
 
 def write_analysis_tags(filepath, bpm=None, key_text=None, overwrite=False):
@@ -379,14 +522,213 @@ def analyze_batch(folder, limit=50, write=False, only_missing=True, emit=True):
     return final
 
 
+def camelot_compatibility_score(c1: str, c2: str) -> float:
+    """
+    Calcula pontuação de compatibilidade harmônica (0.0 a 1.0) entre duas chaves Camelot.
+    Ex: 8A e 8A -> 1.0 (mesma chave)
+        8A e 7A / 9A -> 0.9 (adjacente)
+        8A e 8B -> 0.85 (relativo maior/menor)
+        8A e 10A -> 0.75 (energy boost +2)
+    """
+    if not c1 or not c2:
+        return 0.5
+    c1, c2 = c1.strip().upper(), c2.strip().upper()
+    if c1 == c2:
+        return 1.0
+
+    try:
+        num1 = int(c1[:-1])
+        letter1 = c1[-1]
+        num2 = int(c2[:-1])
+        letter2 = c2[-1]
+    except Exception:
+        return 0.5
+
+    if letter1 == letter2:
+        diff = abs(num1 - num2)
+        if diff in (1, 11):
+            return 0.9
+        if (num2 - num1) % 12 == 2:
+            return 0.75  # Energy boost
+        if diff in (2, 10):
+            return 0.6
+    else:
+        if num1 == num2:
+            return 0.85  # Relativo maior/menor
+        diff = abs(num1 - num2)
+        if diff in (1, 11):
+            return 0.65
+
+    return 0.2
+
+
+def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmup",
+                         max_tracks: int = 20, start_track: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Ghost Curator / Set Curator:
+    Cria uma nova Crate no Serato ('[Set] <crate_name>.crate') ordenando faixas de forma harmônica,
+    com controle de BPM e curva de energia.
+    """
+    from crate_ops import get_crate_path, write_crate_atomic, library_root_for
+    from serato_macos_app import parse_crate_binary
+
+    serato = Path(os.path.expanduser(str(serato_dir))).resolve()
+    subcrates = serato / "Subcrates"
+    crate_path = get_crate_path(subcrates, crate_name)
+
+    if not crate_path.exists():
+        return {"sucesso": False, "erro": f"Crate de origem não encontrada: {crate_name}"}
+
+    try:
+        data = crate_path.read_bytes()
+        header_antigo, existentes, _, outros_blocos = parse_crate_binary(data)
+    except Exception as e:
+        return {"sucesso": False, "erro": f"Erro ao ler crate: {e}"}
+
+    if not existentes:
+        return {"sucesso": False, "erro": "A crate de origem não possui faixas."}
+
+    root = library_root_for(serato)
+    candidates = []
+    for rel in existentes:
+        full_p = root / rel
+        bpm = 126.0
+        camelot = "8A"
+        energy = 5
+        artist = ""
+
+        if full_p.exists() and mutagen is not None:
+            try:
+                t = ID3(str(full_p))
+                if t.get("TBPM"):
+                    bpm = float(str(t["TBPM"]).split()[0])
+                if t.get("TKEY"):
+                    camelot = str(t["TKEY"]).strip()
+                if t.get("TIT1"):
+                    tit1_str = str(t["TIT1"])
+                    import re as _re
+                    m = _re.search(r'\d+', tit1_str)
+                    if m:
+                        energy = int(m.group(0))
+                if t.get("TPE1"):
+                    artist = str(t["TPE1"]).strip().lower()
+            except Exception:
+                pass
+
+        candidates.append({
+            "rel": rel,
+            "filename": full_p.name,
+            "bpm": bpm,
+            "camelot": camelot,
+            "energy": energy,
+            "artist": artist
+        })
+
+    if not candidates:
+        return {"sucesso": False, "erro": "Nenhuma faixa válida encontrada na crate."}
+
+    total_needed = min(len(candidates), max(1, int(max_tracks)))
+    curated = []
+    available = list(candidates)
+
+    current = None
+    if start_track:
+        for c in available:
+            if start_track.lower() in c["filename"].lower() or start_track.lower() in c["rel"].lower():
+                current = c
+                break
+
+    if current is None:
+        if profile == "warmup":
+            current = min(available, key=lambda x: x["energy"])
+        else:
+            current = available[0]
+
+    curated.append(current)
+    available.remove(current)
+
+    for step in range(1, total_needed):
+        if not available:
+            break
+
+        if profile == "warmup":
+            target_energy = 3.0 + (step / max(1, total_needed - 1)) * 5.5
+        elif profile == "peak":
+            target_energy = 8.0 + (step % 2) * 1.5
+        elif profile == "rollercoaster":
+            target_energy = 6.0 + 3.0 * math.sin(step * math.pi / 4.0)
+        else:
+            target_energy = current["energy"]
+
+        best_cand = None
+        best_score = -999.0
+
+        for cand in available:
+            harm_score = camelot_compatibility_score(current["camelot"], cand["camelot"])
+            bpm_diff = abs(current["bpm"] - cand["bpm"]) / max(1.0, current["bpm"])
+            bpm_score = max(0.0, 1.0 - (bpm_diff / 0.08))
+            energy_score = max(0.0, 1.0 - (abs(cand["energy"] - target_energy) / 10.0))
+            artist_penalty = 0.4 if (current["artist"] and current["artist"] == cand["artist"]) else 0.0
+
+            total_score = (harm_score * 0.45) + (bpm_score * 0.35) + (energy_score * 0.20) - artist_penalty
+            if total_score > best_score:
+                best_score = total_score
+                best_cand = cand
+
+        if best_cand:
+            curated.append(best_cand)
+            available.remove(best_cand)
+            current = best_cand
+        else:
+            cand = available.pop(0)
+            curated.append(cand)
+            current = cand
+
+    safe_target = f"[Set] {crate_name}".replace('/', '%%')
+    new_crate_path = get_crate_path(subcrates, safe_target)
+    final_rel_paths = [c["rel"] for c in curated]
+
+    res = write_crate_atomic(new_crate_path, final_rel_paths, header_antigo, outros_blocos)
+    if res["sucesso"]:
+        res["crate_name"] = new_crate_path.stem
+        res["total_curated"] = len(curated)
+        res["mensagem"] = f"Crate curada [{new_crate_path.stem}] criada com {len(curated)} faixas (Perfil: {profile})."
+        res["curated_tracks"] = [{"nome": c["filename"], "bpm": c["bpm"], "camelot": c["camelot"], "energy": c["energy"]} for c in curated]
+
+    return res
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Análise de BPM e Tom")
-    parser.add_argument("--analyze", type=str, default="", help="Analisa BPM/Tom de um arquivo (não grava)")
+    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Análise de BPM, Tom e Energia")
+    parser.add_argument("--analyze", type=str, default="", help="Analisa BPM/Tom/Energy de um arquivo (não grava)")
     parser.add_argument("--analyze-batch", type=str, default="", help="Analisa uma pasta de MP3")
+    parser.add_argument("--energy-batch", type=str, default="", help="Analisa e grava energia para lote de faixas")
+    parser.add_argument("--target-tag", type=str, default="grouping", choices=["grouping", "comment", "both"],
+                        help="Campo onde a Energy será gravada (grouping = TIT1, comment = COMM)")
+    parser.add_argument("--curate-set", action="store_true", help="Gera uma crate curada (Ghost Curator)")
+    parser.add_argument("--serato", type=str, default="", help="Diretório _Serato_")
+    parser.add_argument("--crate", type=str, default="", help="Nome da Crate para curadoria")
+    parser.add_argument("--profile", type=str, default="warmup", choices=["warmup", "peak", "rollercoaster", "harmonic"])
+    parser.add_argument("--max-tracks", type=int, default=20, help="Máximo de faixas para a crate curada")
+    parser.add_argument("--start-track", type=str, default="", help="Faixa inicial opcional")
     parser.add_argument("--limit", type=int, default=50, help="Máximo de faixas no lote")
     parser.add_argument("--write", action="store_true", help="Grava TBPM/TKEY (apenas MP3, com journal)")
     parser.add_argument("--include-filled", action="store_true", help="Inclui faixas que já têm BPM e tom")
     args = parser.parse_args()
+
+    if args.curate_set:
+        if not args.serato or not args.crate:
+            print(json.dumps({"sucesso": False, "erro": "--serato e --crate são obrigatórios para curadoria"}))
+            sys.exit(1)
+        res = generate_curated_set(args.serato, args.crate, profile=args.profile,
+                                   max_tracks=args.max_tracks, start_track=args.start_track)
+        print(json.dumps(res, ensure_ascii=False))
+        sys.exit(0)
+
+    if args.energy_batch:
+        final = analyze_energy_batch(args.energy_batch, limit=args.limit, write=args.write,
+                                     target_tag=args.target_tag, emit=True)
+        sys.exit(0)
 
     if args.analyze:
         res = analyze_file(args.analyze)

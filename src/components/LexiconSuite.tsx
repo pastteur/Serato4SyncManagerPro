@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Search, HardDrive, Trash2, ShieldAlert, Sparkles, RefreshCw, 
   ArrowRight, CheckCircle2, Music, Radio, Key, Tag, Undo2, 
-  Play, Pause, AlertTriangle, Layers, Zap, FolderSearch
+  Play, Pause, AlertTriangle, Layers, Zap, FolderSearch,
+  Flame, Sliders, Wand2, TrendingUp, BarChart2
 } from 'lucide-react';
 
 interface LexiconSuiteProps {
@@ -41,6 +42,50 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
 
   // Estados de Undo de Receitas
   const [undoStatus, setUndoStatus] = useState<string | null>(null);
+
+  // Estados do Energy Engine
+  const [isAnalyzingEnergy, setIsAnalyzingEnergy] = useState<boolean>(false);
+  const [energyProgress, setEnergyProgress] = useState<{
+    processados: number;
+    total: number;
+    percentual: number;
+    faixa_atual: string;
+  } | null>(null);
+  const [targetEnergyTag, setTargetEnergyTag] = useState<'grouping' | 'comment' | 'both'>('grouping');
+  const [energyLimit, setEnergyLimit] = useState<number>(50);
+  const [energyResult, setEnergyResult] = useState<any | null>(null);
+
+  // Estados do Set Curator (Ghost Curator)
+  const [curatorCrate, setCuratorCrate] = useState<string>('');
+  const [curatorProfile, setCuratorProfile] = useState<'warmup' | 'peak' | 'rollercoaster' | 'harmonic'>('warmup');
+  const [curatorMaxTracks, setCuratorMaxTracks] = useState<number>(20);
+  const [isCurating, setIsCurating] = useState<boolean>(false);
+  const [curatedResult, setCuratedResult] = useState<any | null>(null);
+
+  // Listener do Progresso de Energia
+  useEffect(() => {
+    if (!isTauri) return;
+    let unlisten: (() => void) | undefined;
+    import('@tauri-apps/api/event').then(({ listen }) => {
+      listen<string>('energy-progress', (event) => {
+        try {
+          const payload = JSON.parse(event.payload);
+          if (payload.tipo === 'progresso') {
+            const perc = payload.total > 0 ? Math.round((payload.processados / payload.total) * 100) : 0;
+            setEnergyProgress({
+              processados: payload.processados,
+              total: payload.total,
+              percentual: perc,
+              faixa_atual: payload.faixa || ''
+            });
+          }
+        } catch (e) {
+          // ignore
+        }
+      }).then(u => { unlisten = u; });
+    });
+    return () => { if (unlisten) unlisten(); };
+  }, [isTauri]);
 
   // Polling leve para DeckWatch (Now Playing)
   useEffect(() => {
@@ -152,6 +197,72 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
       }
     } catch (e: any) {
       setUndoStatus(`❌ Erro no Undo: ${e}`);
+    }
+  };
+
+  // Dispara Mapeamento de Energia Acústica
+  const handleAnalyzeEnergy = async () => {
+    if (!isTauri || !mp3Path) {
+      alert('Selecione o diretório MP3 Master primeiro.');
+      return;
+    }
+    setIsAnalyzingEnergy(true);
+    setEnergyProgress({ processados: 0, total: energyLimit, percentual: 0, faixa_atual: 'Iniciando análise...' });
+    if (onAddLog) onAddLog(`⚡ Iniciando cálculo de Energy (1-10) em lote (${energyLimit} faixas) -> Destino: ${targetEnergyTag.toUpperCase()}...`);
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('analyze_energy_batch', {
+        mp3Path,
+        limit: energyLimit,
+        write: true,
+        targetTag: targetEnergyTag
+      });
+      const data = JSON.parse(resJson);
+      setEnergyResult(data);
+      if (onAddLog) {
+        onAddLog(`✅ Análise de Energy concluída: ${data.gravadas || 0} faixas marcadas com sucesso em ID3v2.3 (${targetEnergyTag}).`);
+      }
+      alert(`Mapeamento de Energia concluído!\n${data.gravadas || 0} faixas atualizadas com Energy no Serato.`);
+    } catch (e: any) {
+      alert(`Erro na análise de Energy: ${e}`);
+    } finally {
+      setIsAnalyzingEnergy(false);
+    }
+  };
+
+  // Dispara Ghost Curator / Set Curator
+  const handleCurateSet = async () => {
+    if (!isTauri || !seratoPath || !curatorCrate.trim()) {
+      alert('Selecione a pasta _Serato_ e digite o nome de uma Crate de origem.');
+      return;
+    }
+    setIsCurating(true);
+    if (onAddLog) onAddLog(`🎧 Ghost Curator: Gerando set curado da crate [${curatorCrate}] (Perfil: ${curatorProfile})...`);
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('generate_curated_set', {
+        seratoPath,
+        crateName: curatorCrate.trim(),
+        profile: curatorProfile,
+        maxTracks: curatorMaxTracks,
+        startTrack: null
+      });
+      const data = JSON.parse(resJson);
+      if (data.sucesso) {
+        setCuratedResult(data);
+        if (onAddLog) {
+          onAddLog(`🎯 Ghost Curator concluído: Nova crate [${data.crate_name}] gravada com ${data.total_curated} faixas harmonizadas!`);
+        }
+        alert(data.mensagem || 'Crate curada gerada com sucesso no Serato!');
+      } else {
+        alert(`Erro na curadoria: ${data.erro || 'Falha ao gerar set'}`);
+      }
+    } catch (e: any) {
+      alert(`Erro no Ghost Curator: ${e}`);
+    } finally {
+      setIsCurating(false);
     }
   };
 
@@ -378,6 +489,166 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
               {undoStatus}
             </div>
           )}
+        </div>
+
+        {/* Card: Energy Engine (Mapeador de Energia Acústica no Serato) */}
+        <div className="bg-serato-card border border-serato-cardBorder rounded-2xl p-5 shadow-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400">
+                <Flame className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  Energy Engine (1 a 10)
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 uppercase font-bold">
+                    Serato Ready
+                  </span>
+                </h4>
+                <p className="text-xs text-slate-400">Analisa RMS e transientes, gravando na coluna do Serato.</p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleAnalyzeEnergy}
+              disabled={isAnalyzingEnergy || !mp3Path}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-black transition shadow cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzingEnergy ? 'animate-spin' : ''}`} />
+              <span>{isAnalyzingEnergy ? 'Analisando...' : 'Mapear Energia'}</span>
+            </button>
+          </div>
+
+          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-xs space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300">Coluna Alvo no Serato:</span>
+              <select
+                value={targetEnergyTag}
+                onChange={(e) => setTargetEnergyTag(e.target.value as any)}
+                disabled={isAnalyzingEnergy}
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white font-mono text-[11px] focus:outline-none focus:border-rose-400 cursor-pointer"
+              >
+                <option value="grouping">Grouping (TIT1) [Recomendado]</option>
+                <option value="comment">Comments (COMM) [Mixed In Key]</option>
+                <option value="both">Ambos (Grouping + Comments)</option>
+              </select>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300">Limite de Faixas:</span>
+              <select
+                value={energyLimit}
+                onChange={(e) => setEnergyLimit(Number(e.target.value))}
+                disabled={isAnalyzingEnergy}
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white font-mono text-[11px] focus:outline-none focus:border-rose-400 cursor-pointer"
+              >
+                <option value={20}>20 Faixas</option>
+                <option value={50}>50 Faixas</option>
+                <option value={100}>100 Faixas</option>
+                <option value={250}>250 Faixas</option>
+                <option value={1000}>1.000 Faixas</option>
+              </select>
+            </div>
+
+            {energyProgress && isAnalyzingEnergy && (
+              <div className="space-y-1 pt-1">
+                <div className="flex justify-between text-[10px] text-slate-400 font-mono">
+                  <span className="truncate max-w-[200px]">{energyProgress.faixa_atual}</span>
+                  <span>{energyProgress.percentual}%</span>
+                </div>
+                <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
+                  <div
+                    className="bg-gradient-to-r from-rose-500 to-amber-400 h-full transition-all duration-200"
+                    style={{ width: `${energyProgress.percentual}%` }}
+                  />
+                </div>
+              </div>
+            )}
+            
+            <p className="text-[10px] text-slate-500">
+              💡 No Serato DJ Pro, clique com o botão direito nas colunas da biblioteca e marque <strong>Grouping</strong> para ordenar suas Crates do Warm-up ao Peak-Time!
+            </p>
+          </div>
+        </div>
+
+        {/* Card: Set Curator (Ghost Curator - Montador Algorítmico de Sets) */}
+        <div className="bg-serato-card border border-serato-cardBorder rounded-2xl p-5 shadow-lg space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-indigo-400">
+                <Wand2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  Ghost Curator (Set Builder)
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 uppercase font-bold">
+                    Camelot + Flow
+                  </span>
+                </h4>
+                <p className="text-xs text-slate-400">Monta sequências perfeitas por harmonia, BPM e curva de energia.</p>
+              </div>
+            </div>
+
+            <button
+              onClick={handleCurateSet}
+              disabled={isCurating || !seratoPath || !curatorCrate.trim()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500 hover:bg-indigo-400 text-white transition shadow cursor-pointer disabled:opacity-50"
+            >
+              <Sparkles className={`w-3.5 h-3.5 ${isCurating ? 'animate-bounce' : ''}`} />
+              <span>{isCurating ? 'Curando...' : 'Gerar Crate Curada'}</span>
+            </button>
+          </div>
+
+          <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-xs space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300">Crate de Origem:</span>
+              <input
+                type="text"
+                value={curatorCrate}
+                onChange={(e) => setCuratorCrate(e.target.value)}
+                placeholder="Ex: Funk%%12 ou Sertanejo"
+                disabled={isCurating}
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white text-xs w-48 focus:outline-none focus:border-indigo-400"
+              />
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300">Curva de Energia (Flow):</span>
+              <select
+                value={curatorProfile}
+                onChange={(e) => setCuratorProfile(e.target.value as any)}
+                disabled={isCurating}
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white font-mono text-[11px] focus:outline-none focus:border-indigo-400 cursor-pointer"
+              >
+                <option value="warmup">Warm-up (Crescente 3 ➔ 9)</option>
+                <option value="peak">Peak-Time (Explosão 8 ➔ 10)</option>
+                <option value="harmonic">Harmonic Flow (Camelot Puro)</option>
+                <option value="rollercoaster">Montanha-russa de Pista</option>
+              </select>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300">Quantidade de Faixas:</span>
+              <select
+                value={curatorMaxTracks}
+                onChange={(e) => setCuratorMaxTracks(Number(e.target.value))}
+                disabled={isCurating}
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white font-mono text-[11px] focus:outline-none focus:border-indigo-400 cursor-pointer"
+              >
+                <option value={10}>10 Músicas</option>
+                <option value={15}>15 Músicas</option>
+                <option value={20}>20 Músicas</option>
+                <option value={30}>30 Músicas</option>
+                <option value={50}>50 Músicas</option>
+              </select>
+            </div>
+
+            {curatedResult && (
+              <div className="p-2 bg-indigo-950/60 border border-indigo-800 rounded text-[11px] text-indigo-300">
+                ✅ Nova Crate <strong>{curatedResult.crate_name}</strong> gerada no Serato com {curatedResult.total_curated} faixas organizadas!
+              </div>
+            )}
+          </div>
         </div>
 
       </div>

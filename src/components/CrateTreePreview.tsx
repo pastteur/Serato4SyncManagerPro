@@ -2,7 +2,8 @@ import React, { useState, useMemo } from 'react';
 import { 
   FolderTree, Music, Search, Disc, Folder, Eye, CheckCircle2, Sparkles, 
   ChevronRight, ChevronDown, Layers, AlertTriangle, Copy, Check, Filter, 
-  FolderPlus, ChevronsDown, ChevronsUp, FileText, Play
+  FolderPlus, ChevronsDown, ChevronsUp, FileText, Play,
+  Wrench, ArrowDownAZ, ArrowUpAZ, Shuffle, Save, Edit3, MoreVertical
 } from 'lucide-react';
 import { SyncSummary, CrateTreeItem, CrateTrack } from '../types';
 import { PlayingTrackInfo } from './AudioPlayerBar';
@@ -11,6 +12,8 @@ interface CrateTreePreviewProps {
   summary: SyncSummary | null;
   onOpenFileInFinder?: (filePath: string) => void;
   onPlayTrack?: (track: PlayingTrackInfo) => void;
+  seratoPath?: string;
+  onAddLog?: (message: string) => void;
 }
 
 export interface EnrichedCrateTrack extends CrateTrack {
@@ -19,7 +22,13 @@ export interface EnrichedCrateTrack extends CrateTrack {
   crate_master: string;
 }
 
-export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onOpenFileInFinder, onPlayTrack }) => {
+export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ 
+  summary, 
+  onOpenFileInFinder, 
+  onPlayTrack,
+  seratoPath,
+  onAddLog
+}) => {
   // Estado de seleção: '__ALL__' seleciona a biblioteca geral com todas as músicas alocadas
   const [selectedCrateKey, setSelectedCrateKey] = useState<string>('__ALL__');
   const [trackSearch, setTrackSearch] = useState<string>('');
@@ -33,6 +42,13 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onO
   
   // Feedback visual de cópia da lista
   const [copied, setCopied] = useState<boolean>(false);
+
+  // Estados de Playlist Tools
+  const [showToolsMenu, setShowToolsMenu] = useState<boolean>(false);
+  const [isToolRunning, setIsToolRunning] = useState<boolean>(false);
+  const [toolStatus, setToolStatus] = useState<string | null>(null);
+  const [prefixModalOpen, setPrefixModalOpen] = useState<boolean>(false);
+  const [prefixInput, setPrefixInput] = useState<string>('01. ');
 
   // Helper para detectar subcrates dentro de subcrates (aninhamento multinível)
   const isNestedSubcrate = (item: CrateTreeItem) => {
@@ -225,6 +241,57 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onO
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Executa ações das Playlist Tools (Prefix, Capitalize, Sort, Rewrite Order)
+  const handlePlaylistToolAction = async (action: string, sortMode?: string, prefix?: string) => {
+    if (!activeCrate || isAllSelected) {
+      alert('Selecione uma Crate específica para aplicar ferramentas de Playlist.');
+      return;
+    }
+
+    if (!seratoPath) {
+      alert('Caminho da pasta _Serato_ não definido. Selecione a unidade no topo primeiro.');
+      return;
+    }
+
+    setShowToolsMenu(false);
+    setIsToolRunning(true);
+    setToolStatus(`Executando ${action}...`);
+
+    const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+    if (!isTauri) {
+      if (onAddLog) onAddLog(`[Simulação Web] Playlist Tool '${action}' executada na Crate [${activeCrate.nome_crate}].`);
+      setIsToolRunning(false);
+      setToolStatus(null);
+      return;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('crate_playlist_tools', {
+        seratoPath,
+        action,
+        crateName: activeCrate.nome_crate,
+        prefix: prefix || null,
+        sortMode: sortMode || null,
+        sources: null,
+        paths: action === 'rewrite_order' ? activeCrate.faixas.map(f => f.caminho_rel) : null,
+        target: 'subcrate'
+      });
+      const data = JSON.parse(resJson);
+      if (data.sucesso) {
+        if (onAddLog) onAddLog(`🎯 Playlist Tool '${action}': ${data.mensagem || 'Operação realizada com sucesso.'}`);
+        alert(data.mensagem || 'Operação realizada com sucesso na Crate!');
+      } else {
+        alert(`Erro na Crate: ${data.erro || 'Falha ao executar ação'}`);
+      }
+    } catch (e: any) {
+      alert(`Falha: ${e}`);
+    } finally {
+      setIsToolRunning(false);
+      setToolStatus(null);
+    }
   };
 
   const isDemo = !summary?.crates_arvore || Object.keys(summary.crates_arvore).length === 0;
@@ -490,8 +557,93 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onO
               </span>
             </div>
 
-            {/* Ações da Tabela: Copiar Lista e Busca */}
-            <div className="flex items-center gap-2">
+            {/* Ações da Tabela: Playlist Tools, Copiar Lista e Busca */}
+            <div className="flex items-center gap-2 relative">
+              {!isAllSelected && activeCrate && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setShowToolsMenu(prev => !prev)}
+                    disabled={isToolRunning}
+                    className="px-2 py-1 rounded bg-serato-card hover:bg-slate-700 text-serato-cyan border border-serato-cyan/40 text-[11px] font-mono flex items-center gap-1 transition cursor-pointer"
+                    title="Menu de Ferramentas de Crate e Playlist (Lexicon Inspired)"
+                  >
+                    <Wrench className="w-3 h-3 text-serato-cyan" />
+                    <span>{toolStatus || 'Playlist Tools ▾'}</span>
+                  </button>
+
+                  {/* Dropdown Menu de Playlist Tools */}
+                  {showToolsMenu && (
+                    <div className="absolute right-0 top-8 z-30 w-52 bg-slate-900 border border-slate-700 rounded-lg shadow-2xl py-1 text-xs space-y-0.5 animate-in fade-in duration-100">
+                      <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800">
+                        Ferramentas da Crate
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowToolsMenu(false);
+                          setPrefixModalOpen(true);
+                        }}
+                        className="w-full text-left px-3 py-1.5 hover:bg-slate-800 flex items-center gap-2 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <Edit3 className="w-3.5 h-3.5 text-serato-cyan" />
+                        <span>Adicionar Prefixo...</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handlePlaylistToolAction('capitalize')}
+                        className="w-full text-left px-3 py-1.5 hover:bg-slate-800 flex items-center gap-2 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <Disc className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Capitalizar Nome (Title Case)</span>
+                      </button>
+
+                      <div className="border-t border-slate-800 my-1" />
+
+                      <button
+                        type="button"
+                        onClick={() => handlePlaylistToolAction('sort', 'az')}
+                        className="w-full text-left px-3 py-1.5 hover:bg-slate-800 flex items-center gap-2 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <ArrowDownAZ className="w-3.5 h-3.5 text-serato-neonGreen" />
+                        <span>Ordenar Faixas (A-Z)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handlePlaylistToolAction('sort', 'za')}
+                        className="w-full text-left px-3 py-1.5 hover:bg-slate-800 flex items-center gap-2 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <ArrowUpAZ className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Ordenar Faixas (Z-A)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handlePlaylistToolAction('sort', 'shuffle')}
+                        className="w-full text-left px-3 py-1.5 hover:bg-slate-800 flex items-center gap-2 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <Shuffle className="w-3.5 h-3.5 text-purple-400" />
+                        <span>Embaralhar Faixas (Shuffle)</span>
+                      </button>
+
+                      <div className="border-t border-slate-800 my-1" />
+
+                      <button
+                        type="button"
+                        onClick={() => handlePlaylistToolAction('rewrite_order')}
+                        className="w-full text-left px-3 py-1.5 hover:bg-slate-800 flex items-center gap-2 text-slate-200 hover:text-white transition cursor-pointer"
+                      >
+                        <Save className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Gravar Ordem Atual no HD</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <button
                 type="button"
                 onClick={handleCopyTrackList}
@@ -634,6 +786,49 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({ summary, onO
           </div>
         </div>
       </div>
+
+      {/* Modal de Prefixo de Crate (Playlist Tools) */}
+      {prefixModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-serato-card border border-serato-cardBorder rounded-xl max-w-sm w-full p-4 space-y-3 shadow-2xl">
+            <h4 className="text-xs font-bold text-white flex items-center gap-2">
+              <Edit3 className="w-4 h-4 text-serato-cyan" />
+              <span>Adicionar Prefixo à Crate</span>
+            </h4>
+            <p className="text-[11px] text-slate-400">
+              Digite o prefixo para adicionar ao nome da crate <b>{activeCrate?.nome_exibicao}</b> (ex: <code className="text-amber-300">01. </code> ou <code className="text-amber-300">[WARM] </code>):
+            </p>
+            <input
+              type="text"
+              value={prefixInput}
+              onChange={(e) => setPrefixInput(e.target.value)}
+              className="w-full px-3 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-white focus:outline-none focus:border-serato-cyan"
+              autoFocus
+            />
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPrefixModalOpen(false)}
+                className="px-3 py-1 rounded bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setPrefixModalOpen(false);
+                  if (prefixInput.trim()) {
+                    handlePlaylistToolAction('prefix', undefined, prefixInput.trim());
+                  }
+                }}
+                className="px-3 py-1 rounded bg-serato-cyan text-black font-bold text-xs hover:bg-cyan-300 cursor-pointer"
+              >
+                Aplicar Prefixo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

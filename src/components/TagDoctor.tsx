@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle, FileSpreadsheet, Play } from 'lucide-react';
+import { Tag, Sparkles, ShieldCheck, RefreshCw, Search, ArrowRight, Music, ChevronLeft, ChevronRight, Folder, FolderTree, Disc3, Zap, CheckCircle2, Layers, ArrowUpDown, ArrowUp, ArrowDown, CheckSquare, Square, Filter, AlertTriangle, FileSpreadsheet, Play, Undo2, Wand2, Scissors, Globe, Type, Hash, HelpCircle } from 'lucide-react';
 import { ConfirmModal } from './ConfirmModal';
 
 export interface TagDoctorItem {
@@ -117,6 +117,9 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const [showSmartFixes, setShowSmartFixes] = useState<boolean>(false);
+  const [undoStatus, setUndoStatus] = useState<string | null>(null);
+  const [isSmartFixRunning, setIsSmartFixRunning] = useState<boolean>(false);
 
   // Modal de Confirmação em Tela
   const [modalConfig, setModalConfig] = useState<{
@@ -566,6 +569,85 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
     onAddLog(`📊 Planilha CSV exportada com sucesso: ${exportContext} salvas em "${filename}".`);
   };
 
+  // Execução de Smart Fixes Rápidos (Lexicon Inspired)
+  const handleApplySmartFix = async (recipeName: string, label: string, param?: string) => {
+    const targetFiles = selectedIds.size > 0
+      ? items.filter(it => selectedIds.has(it.id)).map(it => it.caminho)
+      : items.map(it => it.caminho);
+
+    if (targetFiles.length === 0) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Nenhuma Música Selecionada',
+        message: 'Por favor, selecione ao menos uma música ou carregue a lista para aplicar o Smart Fix.',
+        confirmText: 'OK',
+        variant: 'info',
+        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+      });
+      return;
+    }
+
+    setModalConfig({
+      isOpen: true,
+      title: `Aplicar Smart Fix: ${label}`,
+      message: `Deseja aplicar a correção '${label}' em ${targetFiles.length} faixa(s)?\n\nEssa operação possui histórico de Undo e preserva 100% dos seus Hot Cues no Serato.`,
+      confirmText: `Aplicar em ${targetFiles.length} Faixas`,
+      variant: 'info',
+      onConfirm: async () => {
+        setModalConfig(prev => ({ ...prev, isOpen: false }));
+        setIsSmartFixRunning(true);
+        onAddLog(`⚡ Aplicando Smart Fix '${label}' em ${targetFiles.length} arquivo(s)...`);
+
+        const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+        if (!isTauri) {
+          onAddLog(`[Simulação Web] Smart Fix '${label}' aplicado em ${targetFiles.length} faixas.`);
+          setIsSmartFixRunning(false);
+          return;
+        }
+
+        try {
+          const { invoke } = await import('@tauri-apps/api/core');
+          const resJson = await invoke<string>('apply_recipe', {
+            recipeName,
+            files: targetFiles,
+            param: param || null
+          });
+          const data = JSON.parse(resJson);
+          if (data.sucesso) {
+            onAddLog(`✅ Smart Fix '${label}' aplicado com sucesso! (${data.affected_count} alterados).`);
+            setUndoStatus(`↩️ Desfazer '${label}'`);
+            loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+          } else {
+            alert(`Falha no Smart Fix: ${data.errors?.join(', ') || 'Erro desconhecido'}`);
+          }
+        } catch (e: any) {
+          alert(`Erro ao executar Smart Fix: ${e}`);
+        } finally {
+          setIsSmartFixRunning(false);
+        }
+      }
+    });
+  };
+
+  const handleUndoSmartFix = async () => {
+    const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+    if (!isTauri) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('undo_recipe');
+      const data = JSON.parse(resJson);
+      if (data.sucesso) {
+        onAddLog(`↩️ Undo executado com sucesso: '${data.recipe_name}' (${data.restored_count} faixas restauradas).`);
+        setUndoStatus(null);
+        loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+      } else {
+        alert(data.erro || 'Nenhuma ação recente para desfazer.');
+      }
+    } catch (e: any) {
+      alert(`Erro ao desfazer: ${e}`);
+    }
+  };
+
   // Aplicação de tags para as faixas selecionadas da página
   const handleApplyCleanPage = () => {
     const selectedItems = items
@@ -864,8 +946,134 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
             <ShieldCheck className="w-3 h-3 text-serato-neonGreen" />
             <span>{backupStatus || 'Backup'}</span>
           </button>
+
+          {/* Botão Smart Fixes Rápidos */}
+          <button
+            type="button"
+            onClick={() => setShowSmartFixes(prev => !prev)}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold border transition cursor-pointer ${
+              showSmartFixes
+                ? 'bg-purple-950/80 text-purple-300 border-purple-500 shadow-sm'
+                : 'bg-serato-card hover:bg-purple-950/40 text-purple-300 border-purple-800/60'
+            }`}
+            title="Abre o painel de ferramentas inteligentes de correção rápida (estilo Lexicon)"
+          >
+            <Wand2 className="w-3 h-3 text-purple-400" />
+            <span>Smart Fixes</span>
+          </button>
         </div>
       </div>
+
+      {/* Painel Expansível de Smart Fixes Rápidos */}
+      {showSmartFixes && (
+        <div className="bg-purple-950/30 border border-purple-800/50 p-2 rounded-lg flex flex-wrap items-center gap-1.5 shrink-0 text-xs animate-in fade-in duration-150">
+          <div className="flex items-center gap-1 text-[11px] font-bold text-purple-300 mr-1">
+            <Wand2 className="w-3.5 h-3.5 text-purple-400" />
+            <span>Smart Fixes ({selectedIds.size > 0 ? `${selectedIds.size} selecionadas` : 'todas visíveis'}):</span>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('fix_casing', 'Fix Casing (Capitalização DJ)')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🔠 Fix Casing
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('replace_with_space', 'Replace With Space')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            ␣ Replace Space
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('fix_encoded', 'Fix Encoded Characters')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🌐 Fix Encoded
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('extract_artist_from_title', 'Extract Artist from Title')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🎤 Extract Artist
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('extract_remixer', 'Extract Remixer')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🎧 Extract Remixer
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('add_mix_parentheses', 'Add Mix Parentheses')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            (Mix) Padronizar
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('remove_garbage', 'Remove Garbage')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🧹 Remove Garbage
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('remove_promo', 'Remove Promotional Text')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            📢 Remove Promo
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('remove_number_prefix', 'Remove Number Prefix (01-, 02.)')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🔢 Remove Numbers
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('remove_urls', 'Remove URLs')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+          >
+            🔗 Remove URLs
+          </button>
+
+          {undoStatus && (
+            <button
+              type="button"
+              onClick={handleUndoSmartFix}
+              className="ml-auto px-2 py-0.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/50 rounded text-[10px] font-bold transition cursor-pointer flex items-center gap-1"
+            >
+              <Undo2 className="w-3 h-3 text-amber-400" />
+              <span>{undoStatus}</span>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Barra Integrada Compacta de Filtros, Nomenclatura, Busca e Seleção (Linha Única) */}
       <div className="bg-serato-header/50 border border-serato-cardBorder p-1 rounded-lg flex flex-wrap items-center justify-between gap-1.5 shrink-0 text-xs">

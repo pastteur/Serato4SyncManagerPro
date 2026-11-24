@@ -373,6 +373,122 @@ class TestLexiconFeatures(unittest.TestCase):
         data_scan = json.loads(res_scan.stdout.strip())
         self.assertTrue(data_scan.get("sucesso"))
 
+    # --------------------------------------------------------------------------
+    # 13. TESTES DOS SMART FIXES (RECIPE ENGINE)
+    # --------------------------------------------------------------------------
+    def test_smart_fixes_transformations(self):
+        """Valida transformações de texto inteligentes de metadados e Smart Fixes."""
+        import recipe_engine as re_eng
+
+        # Casing com siglas de DJ e artigos
+        self.assertEqual(
+            re_eng.smart_fix_casing("hear me now (feat. zeeba) - alok dj"),
+            "Hear Me Now (feat. Zeeba) - Alok DJ"
+        )
+        self.assertEqual(
+            re_eng.smart_fix_casing("mc poze do rodo - a cara do crime"),
+            "MC Poze do Rodo - A Cara do Crime"
+        )
+
+        # Replace with space
+        self.assertEqual(
+            re_eng.smart_replace_with_space("Vintage_Culture.Deep%20House--Track"),
+            "Vintage Culture Deep House - Track"
+        )
+
+        # Fix encoded & mojibake
+        self.assertEqual(
+            re_eng.smart_fix_encoded("Alok &amp; Bhaskar - Fuego"),
+            "Alok & Bhaskar - Fuego"
+        )
+
+        # Remove prefixos numéricos
+        self.assertEqual(
+            re_eng.smart_remove_number_prefix("01 - Song Title"),
+            "Song Title"
+        )
+        self.assertEqual(
+            re_eng.smart_remove_number_prefix("12. Outra Faixa"),
+            "Outra Faixa"
+        )
+
+        # Remove promo & URLs
+        self.assertEqual(
+            re_eng.smart_remove_promo("Song Title [KondZilla] (Official Video) [Exclusive]"),
+            "Song Title"
+        )
+        self.assertEqual(
+            re_eng.smart_remove_urls("Song Title www.radiofly.ws"),
+            "Song Title"
+        )
+
+        # Add mix parentheses
+        self.assertEqual(
+            re_eng.smart_add_mix_parentheses("Song Name Extended Mix"),
+            "Song Name (Extended Mix)"
+        )
+
+        # Extract remixer
+        t, rem = re_eng.smart_extract_remixer("Piece of Your Heart (Alok Remix)")
+        self.assertEqual(rem, "Alok")
+
+    # --------------------------------------------------------------------------
+    # 14. TESTES DE PLAYLIST TOOLS (CRATE_OPS)
+    # --------------------------------------------------------------------------
+    def test_playlist_tools_operations(self):
+        """Testa adição, ordenação A-Z, prefixo, capitalização e reordenação em crates."""
+        import crate_ops
+
+        serato = self.test_root / "_Serato_"
+        subcrates = serato / "Subcrates"
+        subcrates.mkdir(parents=True, exist_ok=True)
+
+        music_dir = self.test_root / "Music" / "MP3"
+        music_dir.mkdir(parents=True, exist_ok=True)
+        f_b = music_dir / "Bravo.mp3"
+        f_a = music_dir / "Alpha.mp3"
+        f_c = music_dir / "Charlie.mp3"
+        for f in (f_b, f_a, f_c):
+            f.write_text("mp3-data")
+
+        # 1. Adicionar faixas
+        res_add = crate_ops.add_paths_to_crate(str(serato), "House%%40", [str(f_b), str(f_a), str(f_c)])
+        self.assertTrue(res_add["sucesso"], res_add.get("erro"))
+        self.assertEqual(res_add["total"], 3)
+
+        # 2. Ordenar faixas A-Z
+        res_sort = crate_ops.sort_crate_tracks(str(serato), "House%%40", sort_mode="az")
+        self.assertTrue(res_sort["sucesso"])
+
+        # 3. Adicionar Prefixo na Crate
+        res_pref = crate_ops.prefix_crate(str(serato), "House%%40", "01.", target="subcrate")
+        self.assertTrue(res_pref["sucesso"])
+        self.assertEqual(res_pref["new_name"], "House%%01. 40")
+
+        # 4. Capitalizar Crate
+        res_cap = crate_ops.capitalize_crate(str(serato), "House%%01. 40")
+        self.assertTrue(res_cap["sucesso"])
+
+    # --------------------------------------------------------------------------
+    # 15. TESTES DE ENERGY ENGINE E SET CURATOR
+    # --------------------------------------------------------------------------
+    def test_energy_engine_and_curator(self):
+        """Valida estimativa de energia, regras Camelot e assistente de sets."""
+        import music_analysis
+
+        # 1. Compatibilidade harmônica Camelot
+        self.assertEqual(music_analysis.camelot_compatibility_score("8A", "8A"), 1.0)
+        self.assertEqual(music_analysis.camelot_compatibility_score("8A", "9A"), 0.9)
+        self.assertEqual(music_analysis.camelot_compatibility_score("8A", "8B"), 0.85)
+        self.assertEqual(music_analysis.camelot_compatibility_score("8A", "10A"), 0.75)
+
+        # 2. Estimativa de energia acústica
+        mock_samples = [int(15000 * ((i % 100) / 100.0)) for i in range(2000)]
+        res_e = music_analysis.estimate_energy(mock_samples)
+        self.assertIn("energy", res_e)
+        self.assertGreaterEqual(res_e["energy"], 1)
+        self.assertLessEqual(res_e["energy"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

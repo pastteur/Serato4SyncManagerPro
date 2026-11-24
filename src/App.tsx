@@ -749,8 +749,10 @@ export const App: React.FC = () => {
             <div className={activeTab === 'tree' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
               <CrateTreePreview
                 summary={summary}
+                seratoPath={seratoPath}
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onPlayTrack={(track) => setActivePlayingTrack(track)}
+                onAddLog={addLog}
               />
             </div>
 

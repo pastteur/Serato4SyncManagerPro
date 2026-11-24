@@ -3161,10 +3161,21 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn apply_recipe(app: AppHandle, recipe_name: String, files: Vec<String>) -> Result<String, String> {
+    pub async fn apply_recipe(
+        app: AppHandle,
+        recipe_name: String,
+        files: Vec<String>,
+        param: Option<String>
+    ) -> Result<String, String> {
         let mut args = vec!["--recipe".into(), recipe_name, "--files".into()];
         for f in files {
             args.push(f);
+        }
+        if let Some(p) = param {
+            if !p.trim().is_empty() {
+                args.push("--param".into());
+                args.push(p);
+            }
         }
         run_py_json(&app, "recipe_engine.py", &args)
     }
@@ -3172,6 +3183,140 @@ mod commands {
     #[tauri::command]
     pub async fn undo_recipe(app: AppHandle) -> Result<String, String> {
         run_py_json(&app, "recipe_engine.py", &["--undo".into()])
+    }
+
+    #[tauri::command]
+    pub async fn crate_playlist_tools(
+        app: AppHandle,
+        serato_path: String,
+        action: String,
+        crate_name: String,
+        prefix: Option<String>,
+        sort_mode: Option<String>,
+        sources: Option<Vec<String>>,
+        paths: Option<Vec<String>>,
+        target: Option<String>,
+    ) -> Result<String, String> {
+        bloqueio_serato("modificar ou reordenar crates")?;
+        let mut args: Vec<String> = vec![
+            "--action".into(), action,
+            "--serato".into(), serato_path,
+            "--crate".into(), crate_name,
+        ];
+        if let Some(pfx) = prefix {
+            if !pfx.trim().is_empty() {
+                args.push("--prefix".into());
+                args.push(pfx);
+            }
+        }
+        if let Some(sm) = sort_mode {
+            args.push("--sort-mode".into());
+            args.push(sm);
+        }
+        if let Some(tgt) = target {
+            args.push("--target".into());
+            args.push(tgt);
+        }
+        if let Some(srcs) = sources {
+            if !srcs.is_empty() {
+                args.push("--sources".into());
+                args.extend(srcs);
+            }
+        }
+        if let Some(pts) = paths {
+            if !pts.is_empty() {
+                args.push("--paths".into());
+                args.extend(pts);
+            }
+        }
+        run_py_json(&app, "crate_ops.py", &args)
+    }
+
+    #[tauri::command]
+    pub async fn analyze_energy_batch(
+        app: AppHandle,
+        window: Window,
+        mp3_path: String,
+        limit: usize,
+        write: bool,
+        target_tag: String,
+    ) -> Result<String, String> {
+        if write {
+            bloqueio_serato("gravar Energy nas tags")?;
+        }
+        let script = find_canonical_python_script(Some(&app), "music_analysis.py")?;
+        let python_bin = find_python_binary()?;
+        let mut cmd = Command::new(&python_bin);
+        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+        cmd.arg(&script).arg("--energy-batch").arg(&mp3_path);
+        cmd.arg("--limit").arg(limit.to_string());
+        cmd.arg("--target-tag").arg(target_tag);
+        if write {
+            cmd.arg("--write");
+        }
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar análise de energia: {}", e))?;
+        let stderr_pipe = child.stderr.take();
+        let err_drain = std::thread::spawn(move || {
+            let mut s = String::new();
+            if let Some(pipe) = stderr_pipe {
+                for line in BufReader::new(pipe).lines().flatten() {
+                    if !s.is_empty() { s.push('\n'); }
+                    s.push_str(&line);
+                }
+            }
+            s
+        });
+
+        let mut final_json = String::new();
+        if let Some(stdout) = child.stdout.take() {
+            for line_res in BufReader::new(stdout).lines() {
+                if let Ok(line) = line_res {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with('{') {
+                        if trimmed.contains("\"tipo\": \"progresso\"") || trimmed.contains("\"tipo\":\"progresso\"") {
+                            let _ = window.emit("energy-progress", trimmed);
+                        } else if trimmed.contains("\"tipo\": \"fim\"") || trimmed.contains("\"tipo\":\"fim\"") {
+                            final_json = trimmed.to_string();
+                        }
+                    }
+                }
+            }
+        }
+        let _ = child.wait();
+        let _ = err_drain.join();
+        if final_json.is_empty() {
+            Ok("{\"sucesso\": true}".into())
+        } else {
+            Ok(final_json)
+        }
+    }
+
+    #[tauri::command]
+    pub async fn generate_curated_set(
+        app: AppHandle,
+        serato_path: String,
+        crate_name: String,
+        profile: String,
+        max_tracks: usize,
+        start_track: Option<String>,
+    ) -> Result<String, String> {
+        bloqueio_serato("gerar Crate curada no Serato")?;
+        let mut args: Vec<String> = vec![
+            "--curate-set".into(),
+            "--serato".into(), serato_path,
+            "--crate".into(), crate_name,
+            "--profile".into(), profile,
+            "--max-tracks".into(), max_tracks.to_string(),
+        ];
+        if let Some(st) = start_track {
+            if !st.trim().is_empty() {
+                args.push("--start-track".into());
+                args.push(st);
+            }
+        }
+        run_py_json(&app, "music_analysis.py", &args)
     }
 
     #[tauri::command]
@@ -3340,6 +3485,9 @@ pub fn run() {
             commands::clean_taxonomy_file,
             commands::apply_recipe,
             commands::undo_recipe,
+            commands::crate_playlist_tools,
+            commands::analyze_energy_batch,
+            commands::generate_curated_set,
             commands::get_deckwatch,
             commands::update_mytags
         ])
