@@ -24,9 +24,11 @@ import uuid
 import random
 import shutil
 import struct
+import hashlib
 import argparse
+from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 sys.dont_write_bytecode = True
 
@@ -56,39 +58,94 @@ def get_crate_path(subcrates_dir: Path, crate_name: str) -> Path:
     return subcrates_dir / safe
 
 
+def calc_crate_sha256(filepath: Path) -> str:
+    """Calcula o hash SHA-256 de um arquivo de crate."""
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def read_and_validate_crate(crate_path: Path) -> Tuple[bytes, List[str], List[bytes]]:
+    """
+    Lê e valida estruturalmente um arquivo binário .crate existente.
+    Nunca interpreta falha de leitura como crate vazia.
+    Lança ValueError ou IOError se a crate estiver corrompida, truncada ou ilegível.
+    """
+    if not crate_path.exists():
+        raise FileNotFoundError(f"Crate não encontrada: {crate_path.name}")
+    try:
+        data = crate_path.read_bytes()
+    except Exception as e:
+        raise IOError(f"Falha de I/O ao ler crate [{crate_path.name}]: {e}")
+
+    if len(data) == 0:
+        raise ValueError(f"Crate corrompida: arquivo vazio (0 bytes) [{crate_path.name}]")
+
+    header, tracks, _, outros_blocos = parse_crate_binary(data)
+    if header is None:
+        raise ValueError(f"Crate corrompida ou estrutura inválida (vrsn ausente/inválido) [{crate_path.name}]")
+
+    return header, tracks, outros_blocos
+
+
 def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                        header_antigo: Optional[bytes] = None,
-                       outros_blocos: Optional[List[bytes]] = None) -> Dict[str, Any]:
+                       outros_blocos: Optional[List[bytes]] = None,
+                       action_name: str = "write_crate") -> Dict[str, Any]:
     """
     Grava uma lista de caminhos relativos em arquivo binário .crate com substituição
-    atômica (UUID temp), fsync e verificação estrutural estrita.
+    atômica (UUID temp), fsync, backup validado por SHA-256, journal e rollback automático.
     """
     crate_path.parent.mkdir(parents=True, exist_ok=True)
     crate_ja_existia = crate_path.exists()
     bak = crate_path.with_suffix('.bak')
+    versioned_bak = None
+    orig_hash = None
 
     if crate_ja_existia:
+        # 1. Valida se a crate original é íntegra antes de qualquer alteração
         try:
-            orig_size = crate_path.stat().st_size
+            orig_data = crate_path.read_bytes()
+            if orig_data:
+                h_check, _, _, ob_check = parse_crate_binary(orig_data)
+                if h_check is None:
+                    return {
+                        "sucesso": False,
+                        "erro": f"Crate original [{crate_path.name}] está corrompida ou ilegível. Gravação cancelada para evitar perda de dados."
+                    }
+                if header_antigo is None:
+                    header_antigo = h_check
+                if outros_blocos is None:
+                    outros_blocos = ob_check
+        except Exception as e_check:
+            return {
+                "sucesso": False,
+                "erro": f"Falha ao validar crate original [{crate_path.name}]: {e_check}"
+            }
+
+        # 2. Cria backup com validação de hash SHA-256
+        try:
+            orig_hash = calc_crate_sha256(crate_path)
             shutil.copy2(crate_path, bak)
-            if not bak.exists() or bak.stat().st_size != orig_size:
+            bak_hash = calc_crate_sha256(bak)
+            if bak_hash != orig_hash:
                 if bak.exists():
                     bak.unlink()
-                return {"sucesso": False, "erro": "Falha na criação ou verificação de tamanho do backup .bak da crate."}
+                return {
+                    "sucesso": False,
+                    "erro": "Falha na validação de integridade do backup (.bak) por SHA-256."
+                }
+            # Backup versionado com timestamp para preservação histórica
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            versioned_bak = crate_path.with_name(f"{crate_path.name}.bak_{stamp}")
+            shutil.copy2(bak, versioned_bak)
         except Exception as e_bak:
-            return {"sucesso": False, "erro": f"Impossível criar backup da crate antes da alteração: {e_bak}"}
-
-        if header_antigo is None or outros_blocos is None:
-            try:
-                data = crate_path.read_bytes()
-                h, _, _, ob = parse_crate_binary(data)
-                if header_antigo is None:
-                    header_antigo = h
-                if outros_blocos is None:
-                    outros_blocos = ob
-            except Exception:
-                header_antigo = b'vrsn\x00\x00\x00\x08\x001\x00.\x000\x000'
-                outros_blocos = []
+            return {
+                "sucesso": False,
+                "erro": f"Impossível criar backup seguro da crate antes da alteração: {e_bak}"
+            }
 
     outros_blocos = outros_blocos or []
     tmp = crate_path.with_name(f".tmp_{crate_path.name}_{uuid.uuid4().hex[:8]}")
@@ -105,39 +162,73 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
             f.flush()
             os.fsync(f.fileno())
 
-        # Validação estrutural do arquivo gerado antes de substituir o original
+        # 3. Validação estrutural do temporário
         if not tmp.exists() or tmp.stat().st_size < 16:
-            raise IOError("Arquivo temporário da crate gerado incompleto ou vazio.")
+            raise IOError("Arquivo temporário da crate incompleto ou vazio.")
 
         tmp_bytes = tmp.read_bytes()
-        if not tmp_bytes.startswith(b'vrsn'):
-            raise IOError("Estrutura da crate no arquivo temporário é inválida (vrsn ausente).")
+        val_header, val_tracks, _, _ = parse_crate_binary(tmp_bytes)
+        if val_header is None:
+            raise IOError("Estrutura da crate no arquivo temporário é inválida (vrsn ausente ou corrompido).")
 
-        _, val_tracks, _, _ = parse_crate_binary(tmp_bytes)
         if len(val_tracks) != len(track_rel_list):
             raise IOError(f"Divergência estrutural de faixas ({len(val_tracks)} vs {len(track_rel_list)} esperadas).")
 
-        # Substituição atômica no mesmo sistema de arquivos
+        # 4. Substituição atômica
         os.replace(tmp, crate_path)
+
+        # 5. Validação pós-gravação
+        post_bytes = crate_path.read_bytes()
+        post_header, post_tracks, _, _ = parse_crate_binary(post_bytes)
+        if post_header is None or len(post_tracks) != len(track_rel_list):
+            raise IOError("Falha na validação pós-escrita do arquivo definitivo.")
+
+        post_hash = calc_crate_sha256(crate_path)
+
+        # 6. Registro no Journal
+        try:
+            import journal
+            journal.record_crate_operation(
+                crate_path=str(crate_path),
+                acao=action_name,
+                hash_anterior=orig_hash,
+                hash_posterior=post_hash,
+                backup_path=str(versioned_bak or bak) if crate_ja_existia else None,
+                total_tracks=len(track_rel_list)
+            )
+        except Exception:
+            pass
+
     except Exception as e:
+        # Rollback automático restaurando backup se existia
         if tmp.exists():
             try:
                 tmp.unlink()
             except Exception:
                 pass
-        return {"sucesso": False, "erro": str(e)}
+        if crate_ja_existia and bak.exists():
+            try:
+                shutil.copy2(bak, crate_path)
+            except Exception:
+                pass
+        return {
+            "sucesso": False,
+            "erro": f"Falha na gravação/validação da crate [{crate_path.name}]: {e}. Rollback executado."
+        }
 
     return {
         "sucesso": True,
         "crate": crate_path.name,
         "caminho": str(crate_path),
         "backup": str(bak) if crate_ja_existia else None,
+        "sobrescrita": crate_ja_existia,
+        "hash": post_hash,
         "total": len(track_rel_list)
     }
 
 
 def add_paths_to_crate(serato_dir: str, crate_name: str, abs_paths: List[str]) -> Dict[str, Any]:
-    """Adiciona faixas (caminhos absolutos) a uma crate mantendo faixas existentes."""
+    """Adiciona faixas (caminhos absolutos) a uma crate mantendo faixas existentes com validação estrita."""
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
     subcrates = serato / "Subcrates"
     crate_path = get_crate_path(subcrates, crate_name)
@@ -167,10 +258,13 @@ def add_paths_to_crate(serato_dir: str, crate_name: str, abs_paths: List[str]) -
 
     if crate_path.exists():
         try:
-            data = crate_path.read_bytes()
-            header_antigo, existentes, _, outros_blocos = parse_crate_binary(data)
-        except Exception:
-            pass
+            header_antigo, existentes, outros_blocos = read_and_validate_crate(crate_path)
+        except Exception as e_crate:
+            return {
+                "sucesso": False,
+                "erro": f"Operação interrompida: crate de destino [{crate_name}] existe mas é inválida ou ilegível: {e_crate}",
+                "rejeitados": rejeitados
+            }
 
     final = list(existentes)
     adicionados = 0
@@ -179,7 +273,7 @@ def add_paths_to_crate(serato_dir: str, crate_name: str, abs_paths: List[str]) -
             final.append(rel)
             adicionados += 1
 
-    res = write_crate_atomic(crate_path, final, header_antigo, outros_blocos)
+    res = write_crate_atomic(crate_path, final, header_antigo, outros_blocos, action_name="add_paths")
     if not res["sucesso"]:
         return res
 
@@ -194,7 +288,7 @@ def add_paths_to_crate(serato_dir: str, crate_name: str, abs_paths: List[str]) -
 
 def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az") -> Dict[str, Any]:
     """
-    Ordena as faixas dentro de uma crate e reescreve o binário.
+    Ordena as faixas dentro de uma crate e reescreve o binário com validação integral.
     sort_mode: 'az' (A-Z pelo nome do arquivo), 'za' (Z-A), 'shuffle' (aleatório).
     """
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
@@ -205,10 +299,9 @@ def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az") -
         return {"sucesso": False, "erro": f"Crate não encontrada: {crate_name}"}
 
     try:
-        data = crate_path.read_bytes()
-        header_antigo, existentes, _, outros_blocos = parse_crate_binary(data)
+        header_antigo, existentes, outros_blocos = read_and_validate_crate(crate_path)
     except Exception as e:
-        return {"sucesso": False, "erro": f"Erro ao ler crate: {e}"}
+        return {"sucesso": False, "erro": f"Erro ao ler crate [{crate_name}]: {e}"}
 
     if not existentes:
         return {"sucesso": True, "crate": crate_name, "total": 0, "mensagem": "Crate vazia."}
@@ -225,7 +318,7 @@ def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az") -
     else:
         return {"sucesso": False, "erro": f"Modo de ordenação inválido: {sort_mode}"}
 
-    res = write_crate_atomic(crate_path, sorted_tracks, header_antigo, outros_blocos)
+    res = write_crate_atomic(crate_path, sorted_tracks, header_antigo, outros_blocos, action_name=f"sort_{sort_mode}")
     if res["sucesso"]:
         res["mensagem"] = f"Crate [{crate_name}] reordenada com sucesso ({sort_mode.upper()} - {len(sorted_tracks)} faixas)."
     return res
@@ -306,46 +399,55 @@ def capitalize_crate(serato_dir: str, crate_name: str) -> Dict[str, Any]:
 
 
 def merge_crates(serato_dir: str, source_crates: List[str], target_crate: str) -> Dict[str, Any]:
-    """Funde múltiplas crates de origem em uma crate de destino sem duplicatas."""
+    """
+    Funde múltiplas crates de origem em uma crate de destino sem duplicatas.
+    Interrompe a operação imediatamente se QUALQUER crate de origem ou de destino
+    for ilegível ou inválida, garantindo que não ocorram omissões silenciosas.
+    """
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
     subcrates = serato / "Subcrates"
     target_path = get_crate_path(subcrates, target_crate)
+
+    if not source_crates:
+        return {"sucesso": False, "erro": "Nenhuma crate de origem informada para fusão."}
 
     all_tracks = []
     header_antigo = None
     outros_blocos = []
 
-    # Lê faixas já existentes na target (se houver)
+    # 1. Lê faixas já existentes na target (se houver). Se target for ilegível, aborta!
     if target_path.exists():
         try:
-            data = target_path.read_bytes()
-            header_antigo, existentes, _, outros_blocos = parse_crate_binary(data)
+            header_antigo, existentes, outros_blocos = read_and_validate_crate(target_path)
             all_tracks.extend(existentes)
-        except Exception:
-            pass
+        except Exception as e_tgt:
+            return {
+                "sucesso": False,
+                "erro": f"Operação de fusão cancelada: crate de destino [{target_crate}] está corrompida ou ilegível ({e_tgt}). Nenhuma alteração realizada."
+            }
 
-    # Lê faixas de cada source_crate
+    # 2. Lê faixas de CADA source_crate. Se QUALQUER uma falhar, aborta a operação inteira!
     for sc_name in source_crates:
         sc_path = get_crate_path(subcrates, sc_name)
-        if not sc_path.exists():
-            continue
         try:
-            data = sc_path.read_bytes()
-            _, tracks, _, _ = parse_crate_binary(data)
-            for t in tracks:
-                if t not in all_tracks:
-                    all_tracks.append(t)
-        except Exception:
-            pass
+            _, sc_tracks, _ = read_and_validate_crate(sc_path)
+        except Exception as e_sc:
+            return {
+                "sucesso": False,
+                "erro": f"Operação de fusão cancelada: crate de origem [{sc_name}] não pôde ser interpretada ({e_sc}). Nenhuma alteração foi realizada."
+            }
+        for t in sc_tracks:
+            if t not in all_tracks:
+                all_tracks.append(t)
 
-    res = write_crate_atomic(target_path, all_tracks, header_antigo, outros_blocos)
+    res = write_crate_atomic(target_path, all_tracks, header_antigo, outros_blocos, action_name="merge_crates")
     if res["sucesso"]:
         res["mensagem"] = f"{len(source_crates)} crate(s) fundida(s) em [{target_crate}] com sucesso ({len(all_tracks)} faixas)."
     return res
 
 
 def rewrite_crate_order(serato_dir: str, crate_name: str, ordered_tracks: List[str]) -> Dict[str, Any]:
-    """Reescreve a ordem das faixas na crate com a ordem explícita fornecida."""
+    """Reescreve a ordem das faixas na crate com validação estrutural prévia e posterior."""
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
     subcrates = serato / "Subcrates"
     crate_path = get_crate_path(subcrates, crate_name)
@@ -354,13 +456,15 @@ def rewrite_crate_order(serato_dir: str, crate_name: str, ordered_tracks: List[s
     outros_blocos = []
     if crate_path.exists():
         try:
-            data = crate_path.read_bytes()
-            header_antigo, _, _, outros_blocos = parse_crate_binary(data)
-        except Exception:
-            pass
+            header_antigo, _, outros_blocos = read_and_validate_crate(crate_path)
+        except Exception as e_order:
+            return {
+                "sucesso": False,
+                "erro": f"Operação cancelada: crate [{crate_name}] está ilegível ou corrompida ({e_order})."
+            }
 
     clean_tracks = [normalizar_nfc(t) for t in ordered_tracks if t]
-    res = write_crate_atomic(crate_path, clean_tracks, header_antigo, outros_blocos)
+    res = write_crate_atomic(crate_path, clean_tracks, header_antigo, outros_blocos, action_name="rewrite_order")
     if res["sucesso"]:
         res["mensagem"] = f"Ordem manual da crate [{crate_name}] persistida com sucesso ({len(clean_tracks)} faixas)."
     return res

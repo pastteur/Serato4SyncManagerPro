@@ -522,8 +522,11 @@ def is_volume_mounted(vol_name: str, volumes_root: Path = Path("/Volumes")) -> b
     """Verifica se o volume especificado está montado no sistema."""
     if not vol_name:
         return True
-    vol_path = volumes_root / vol_name
-    return vol_path.exists() and vol_path.is_dir()
+    try:
+        vol_path = volumes_root / vol_name
+        return vol_path.exists() and vol_path.is_dir()
+    except (PermissionError, OSError):
+        return True
 
 
 def is_track_volume_available(rel_path: str, mp3_base: Path, volumes_root: Path = Path("/Volumes")) -> bool:
@@ -560,41 +563,56 @@ def resolve_serato_path(rel_path: str, mp3_base: Path):
     clean_rel = rel_path.strip().lstrip('/')
 
     # 1. Caminho absoluto
-    p_abs = Path(rel_path)
-    if p_abs.is_absolute() and p_abs.exists():
-        return p_abs
+    try:
+        p_abs = Path(rel_path)
+        if p_abs.is_absolute() and p_abs.exists():
+            return p_abs
+    except (PermissionError, OSError):
+        pass
 
     # 2. Caminho a partir da raiz do volume do mp3_base (ex: /Volumes/Pastteyr / Music/MP3/...)
-    parts = mp3_base.resolve().parts
-    if len(parts) >= 3 and parts[1] == 'Volumes':
-        vol_root = Path(parts[0]) / parts[1] / parts[2]
-        cand = vol_root / clean_rel
-        if cand.exists():
-            return cand
+    try:
+        parts = mp3_base.resolve().parts
+        if len(parts) >= 3 and parts[1] == 'Volumes':
+            vol_root = Path(parts[0]) / parts[1] / parts[2]
+            cand = vol_root / clean_rel
+            if cand.exists():
+                return cand
+    except (PermissionError, OSError):
+        pass
 
     # 3. Caminho a partir da raiz do sistema (ex: Users/pastteur/Music/...)
-    cand_sys = Path('/') / clean_rel
-    if cand_sys.exists():
-        return cand_sys
+    try:
+        cand_sys = Path('/') / clean_rel
+        if cand_sys.exists():
+            return cand_sys
+    except (PermissionError, OSError):
+        pass
 
     # 4. Alinhamento com a pasta MP3 base ou seus ancestrais
-    curr = mp3_base
-    while curr != curr.parent:
-        cand = curr / clean_rel
-        if cand.exists():
-            return cand
-        cand_p = curr.parent / clean_rel
-        if cand_p.exists():
-            return cand_p
-        curr = curr.parent
+    try:
+        curr = mp3_base
+        while curr != curr.parent:
+            cand = curr / clean_rel
+            if cand.exists():
+                return cand
+            cand_p = curr.parent / clean_rel
+            if cand_p.exists():
+                return cand_p
+            curr = curr.parent
+    except (PermissionError, OSError):
+        pass
 
     # 5. Outros volumes montados no Mac
-    if Path("/Volumes").exists():
-        for vol in Path("/Volumes").iterdir():
-            if vol.is_dir() and not vol.name.startswith('.'):
-                cand_vol = vol / clean_rel
-                if cand_vol.exists():
-                    return cand_vol
+    try:
+        if Path("/Volumes").exists():
+            for vol in Path("/Volumes").iterdir():
+                if vol.is_dir() and not vol.name.startswith('.'):
+                    cand_vol = vol / clean_rel
+                    if cand_vol.exists():
+                        return cand_vol
+    except (PermissionError, OSError):
+        pass
 
     return None
 
@@ -637,24 +655,34 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str, stream_json
         ext_sc = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "Subcrates"
         if ext_sc.exists() and ext_sc not in subcrates_dirs:
             subcrates_dirs.append(ext_sc)
-    home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
-    if home_sc.exists() and home_sc not in subcrates_dirs:
-        subcrates_dirs.append(home_sc)
+    try:
+        home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
+        if home_sc.exists() and home_sc not in subcrates_dirs:
+            subcrates_dirs.append(home_sc)
+    except (PermissionError, OSError):
+        pass
 
     missing_tracks = []
     checked_paths = set()
 
     # Busca volumes montados e lixeiras locais
     trashes_folders = []
-    if Path("/Volumes").exists():
-        for vol in Path("/Volumes").iterdir():
-            if vol.is_dir() and not vol.name.startswith('.'):
-                trash_candidate = vol / ".Trashes" / "501"
-                if trash_candidate.exists():
-                    trashes_folders.append(trash_candidate)
-    user_trash = Path.home() / ".Trash"
-    if user_trash.exists():
-        trashes_folders.append(user_trash)
+    try:
+        if Path("/Volumes").exists():
+            for vol in Path("/Volumes").iterdir():
+                if vol.is_dir() and not vol.name.startswith('.'):
+                    trash_candidate = vol / ".Trashes" / "501"
+                    if trash_candidate.exists():
+                        trashes_folders.append(trash_candidate)
+    except (PermissionError, OSError):
+        pass
+
+    try:
+        user_trash = Path.home() / ".Trash"
+        if user_trash.exists():
+            trashes_folders.append(user_trash)
+    except (PermissionError, OSError):
+        pass
 
     crate_files = []
     for sc_dir in subcrates_dirs:
@@ -830,7 +858,15 @@ def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
         target_path = get_serato_target_path(rel_path, mp3_base)
         target_res = target_path.resolve()
         # Validação contra fuga de diretório autorizado
-        allowed_roots = [mp3_base, Path("/Volumes").resolve(), Path.home().resolve()]
+        allowed_roots = [mp3_base]
+        try:
+            allowed_roots.append(Path("/Volumes").resolve())
+        except (PermissionError, OSError):
+            pass
+        try:
+            allowed_roots.append(Path.home().resolve())
+        except (PermissionError, OSError):
+            pass
         if not any(str(target_res).startswith(str(r)) for r in allowed_roots):
             return {"sucesso": False, "erro": f"Destino fora do diretório autorizado: {target_res}"}
     except Exception as e:
@@ -1027,9 +1063,12 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
         if ext_sc.exists() and ext_sc not in subcrates_dirs:
             subcrates_dirs.append(ext_sc)
 
-    home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
-    if home_sc.exists() and home_sc not in subcrates_dirs:
-        subcrates_dirs.append(home_sc)
+    try:
+        home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
+        if home_sc.exists() and home_sc not in subcrates_dirs:
+            subcrates_dirs.append(home_sc)
+    except (PermissionError, OSError):
+        pass
 
     target_set = None
     if target_path and target_path.strip():
@@ -1180,20 +1219,30 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                 continue
 
     # Limpa também na database V2 do Serato (banco central de faixas)
-    db_candidates = [
-        serato_dir / "database V2",
-        Path.home() / "Music" / "_Serato_" / "database V2"
-    ]
+    db_candidates = [serato_dir / "database V2"]
+    try:
+        home_db = Path.home() / "Music" / "_Serato_" / "database V2"
+        if home_db.exists():
+            db_candidates.append(home_db)
+    except (PermissionError, OSError):
+        pass
+
     if len(parts) >= 3 and parts[1] == 'Volumes':
-        ext_db = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2"
-        if ext_db.exists() and ext_db not in db_candidates:
-            db_candidates.append(ext_db)
+        try:
+            ext_db = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2"
+            if ext_db.exists() and ext_db not in db_candidates:
+                db_candidates.append(ext_db)
+        except (PermissionError, OSError):
+            pass
 
     total_db_removed = 0
     for db_cand in db_candidates:
-        if db_cand.exists():
-            cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None, max_pct=max_lost_pct)
-            total_db_removed += cnt
+        try:
+            if db_cand.exists():
+                cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None, max_pct=max_lost_pct)
+                total_db_removed += cnt
+        except (PermissionError, OSError):
+            pass
 
     # Também remove do banco SQLite de Sound Seals para manter o cache sincronizado
     try:

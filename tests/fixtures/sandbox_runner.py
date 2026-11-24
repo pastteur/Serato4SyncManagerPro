@@ -235,64 +235,73 @@ class SeratoSandbox:
 
         for rel in self.CRITICAL_HOST_PATHS:
             p = HOST_HOME / rel
-            if p.exists():
-                stat = p.stat()
-                if p.is_dir():
-                    try:
-                        children = {c.name for c in p.iterdir()}
-                    except Exception:
-                        children = set()
-                    snap[str(p)] = {"exists": True, "is_dir": True, "mtime": stat.st_mtime_ns, "children": children}
+            try:
+                if p.exists():
+                    stat = p.stat()
+                    if p.is_dir():
+                        try:
+                            children = {c.name for c in p.iterdir()}
+                        except Exception:
+                            children = set()
+                        snap[str(p)] = {"exists": True, "is_dir": True, "mtime": stat.st_mtime_ns, "children": children}
+                    else:
+                        snap[str(p)] = {"exists": True, "is_dir": False, "mtime": stat.st_mtime_ns, "size": stat.st_size}
                 else:
-                    snap[str(p)] = {"exists": True, "is_dir": False, "mtime": stat.st_mtime_ns, "size": stat.st_size}
-            else:
+                    snap[str(p)] = {"exists": False}
+            except (PermissionError, OSError):
                 snap[str(p)] = {"exists": False}
 
         # Check external volume
         ext = Path("/Volumes/Pastteyr")
-        if ext.exists():
-            try:
-                stat = ext.stat()
-                is_dir = ext.is_dir()
-                children = set()
-                if is_dir:
-                    try:
-                        children = {c.name for c in ext.iterdir()}
-                    except Exception:
-                        children = set()
-                snap[str(ext)] = {
-                    "exists": True,
-                    "is_dir": is_dir,
-                    "mtime": stat.st_mtime_ns,
-                    "size": stat.st_size,
-                    "children": children,
-                }
-            except Exception:
-                snap[str(ext)] = {"exists": True, "is_dir": True, "mtime": 0, "size": 0, "children": set()}
-        else:
+        try:
+            if ext.exists():
+                try:
+                    stat = ext.stat()
+                    is_dir = ext.is_dir()
+                    children = set()
+                    if is_dir:
+                        try:
+                            children = {c.name for c in ext.iterdir()}
+                        except Exception:
+                            children = set()
+                    snap[str(ext)] = {
+                        "exists": True,
+                        "is_dir": is_dir,
+                        "mtime": stat.st_mtime_ns,
+                        "size": stat.st_size,
+                        "children": children,
+                    }
+                except Exception:
+                    snap[str(ext)] = {"exists": True, "is_dir": True, "mtime": 0, "size": 0, "children": set()}
+            else:
+                snap[str(ext)] = {"exists": False}
+        except (PermissionError, OSError):
             snap[str(ext)] = {"exists": False}
 
         # Snapshot extra watch paths
         for p in self.extra_watch_paths:
-            p_res = Path(p).resolve()
-            if p_res.exists():
-                stat = p_res.stat()
-                is_dir = p_res.is_dir()
-                children = set()
-                if is_dir:
-                    try:
-                        children = {c.name for c in p_res.iterdir()}
-                    except Exception:
-                        children = set()
-                snap[str(p_res)] = {
-                    "exists": True,
-                    "is_dir": is_dir,
-                    "mtime": stat.st_mtime_ns,
-                    "size": stat.st_size,
-                    "children": children,
-                }
-            else:
-                snap[str(p_res)] = {"exists": False}
+            try:
+                p_res = Path(p).resolve()
+                if p_res.exists():
+                    stat = p_res.stat()
+                    is_dir = p_res.is_dir()
+                    children = set()
+                    if is_dir:
+                        try:
+                            children = {c.name for c in p_res.iterdir()}
+                        except Exception:
+                            children = set()
+                    snap[str(p_res)] = {
+                        "exists": True,
+                        "is_dir": is_dir,
+                        "mtime": stat.st_mtime_ns,
+                        "size": stat.st_size,
+                        "children": children,
+                    }
+                else:
+                    snap[str(p_res)] = {"exists": False}
+            except (PermissionError, OSError):
+                snap[str(p)] = {"exists": False}
 
         # Snapshot top-level HOST_HOME entries
         try:
@@ -315,36 +324,40 @@ class SeratoSandbox:
             if path_str == "__HOST_HOME_ENTRIES__":
                 continue
             p = Path(path_str)
-            if not state.get("exists", False):
-                if p.exists():
-                    raise AssertionError(
-                        f"CRITICAL SANDBOX LEAK DETECTED: File or directory {p} was created in host environment!"
-                    )
-            else:
-                if not p.exists():
-                    raise AssertionError(
-                        f"CRITICAL SANDBOX LEAK DETECTED: Host file {p} was deleted during execution!"
-                    )
-                stat = p.stat()
-                if not state.get("is_dir", False):
-                    mtime_diff = stat.st_mtime_ns != state.get("mtime")
-                    size_diff = "size" in state and stat.st_size != state["size"]
-                    if mtime_diff or size_diff:
+            try:
+                if not state.get("exists", False):
+                    if p.exists():
                         raise AssertionError(
-                            f"CRITICAL SANDBOX LEAK DETECTED: Host file {p} was modified! "
-                            f"(mtime: {state.get('mtime')} -> {stat.st_mtime_ns}, "
-                            f"size: {state.get('size')} -> {stat.st_size})"
+                            f"CRITICAL SANDBOX LEAK DETECTED: File or directory {p} was created in host environment!"
                         )
                 else:
-                    try:
-                        current_children = {c.name for c in p.iterdir()}
-                    except Exception:
-                        current_children = set()
-                    new_files = current_children - state.get("children", set())
-                    if new_files:
+                    if not p.exists():
                         raise AssertionError(
-                            f"CRITICAL SANDBOX LEAK DETECTED: New files {new_files} created in host directory {p}!"
+                            f"CRITICAL SANDBOX LEAK DETECTED: Host file {p} was deleted during execution!"
                         )
+                    stat = p.stat()
+                    if not state.get("is_dir", False):
+                        mtime_diff = stat.st_mtime_ns != state.get("mtime")
+                        size_diff = "size" in state and stat.st_size != state["size"]
+                        if mtime_diff or size_diff:
+                            raise AssertionError(
+                                f"CRITICAL SANDBOX LEAK DETECTED: Host file {p} was modified! "
+                                f"(mtime: {state.get('mtime')} -> {stat.st_mtime_ns}, "
+                                f"size: {state.get('size')} -> {stat.st_size})"
+                            )
+                    else:
+                        try:
+                            current_children = {c.name for c in p.iterdir()}
+                        except Exception:
+                            current_children = set()
+                        new_files = current_children - state.get("children", set())
+                        if new_files:
+                            raise AssertionError(
+                                f"CRITICAL SANDBOX LEAK DETECTED: New files {new_files} created in host directory {p}!"
+                            )
+            except (PermissionError, OSError):
+                # Ignora verificação de caminhos de host inacessíveis pelo sandbox
+                pass
 
         # Check top-level HOST_HOME entries
         if "__HOST_HOME_ENTRIES__" in self._snapshot:

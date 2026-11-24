@@ -14,12 +14,74 @@ pub struct AppSecurityState {
     pub is_operation_active: Arc<AtomicBool>,
 }
 
+#[derive(Debug)]
+pub struct OperationGuard {
+    active_flag: Arc<AtomicBool>,
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.active_flag.store(false, Ordering::SeqCst);
+    }
+}
+
 impl AppSecurityState {
     pub fn new() -> Self {
         Self {
             is_operation_active: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    /// Tenta adquirir o bloqueio exclusivo de operação mutável.
+    /// Retorna OperationGuard se adquirido com sucesso, ou Erro se outra operação já estiver ativa.
+    pub fn acquire_lock(&self) -> Result<OperationGuard, String> {
+        if self
+            .is_operation_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            Ok(OperationGuard {
+                active_flag: Arc::clone(&self.is_operation_active),
+            })
+        } else {
+            Err("Bloqueio de concorrência: outra operação de gravação ou sincronização já está em execução no momento.".to_string())
+        }
+    }
+}
+
+pub fn generate_operacao_id() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let h1 = (nanos >> 64) as u64;
+    let h2 = (nanos & 0xFFFF_FFFF_FFFF_FFFF) as u64;
+    format!(
+        "{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}",
+        (h1 >> 32) as u32,
+        (h1 & 0xFFFF) as u16,
+        ((h1 >> 16) & 0x0FFF) as u16,
+        ((h2 >> 48) & 0x0FFF) as u16,
+        (h2 & 0x0000_FFFF_FFFF_FFFF) ^ count
+    )
+}
+
+pub fn format_structured_error(
+    codigo: &str,
+    mensagem: &str,
+    detalhes: serde_json::Value,
+) -> String {
+    let operacao_id = generate_operacao_id();
+    serde_json::json!({
+        "sucesso": false,
+        "codigo": codigo,
+        "mensagem": mensagem,
+        "detalhes": detalhes,
+        "operacao_id": operacao_id
+    })
+    .to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -190,9 +252,6 @@ fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> R
     ))
 }
 
-fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> PathBuf {
-    find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name))
-}
 fn make_python_cmd_with_app(app: Option<&AppHandle>, script: &Path, bin: &Path) -> Command {
     let mut cmd = Command::new(bin);
     cmd.env("PYTHONDONTWRITEBYTECODE", "1");
@@ -269,10 +328,15 @@ fn make_python_cmd(script: &Path, bin: &Path) -> Command {
     make_python_cmd_with_app(None, script, bin)
 }
 
-fn find_python_cmd(app: Option<&AppHandle>, script_name: &str) -> Command {
-    let script = find_canonical_python_script(app, script_name).unwrap_or_else(|_| PathBuf::from(script_name));
-    let bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
-    make_python_cmd_with_app(app, &script, &bin)
+fn find_python_cmd(app: Option<&AppHandle>, script_name: &str) -> Result<Command, String> {
+    let script = find_canonical_python_script(app, script_name)?;
+    let bin = find_python_binary()?;
+    Ok(make_python_cmd_with_app(app, &script, &bin))
+}
+
+#[allow(dead_code)]
+fn find_python_script(app: Option<&AppHandle>, script_name: &str) -> Result<PathBuf, String> {
+    find_canonical_python_script(app, script_name)
 }
 
 
@@ -294,6 +358,32 @@ pub fn is_serato_running() -> bool {
         }
     }
     false
+}
+
+pub fn bloqueio_serato(acao: &str) -> Result<(), String> {
+    if is_serato_running() {
+        return Err(format!(
+            "❌ BLOQUEIO DE SEGURANÇA: O Serato DJ Pro está em execução ativa (ou seu estado não pôde ser verificado pelo sistema). Feche o aplicativo Serato DJ Pro antes de {}.",
+            acao
+        ));
+    }
+    Ok(())
+}
+
+pub fn bloqueio_serato_e_concorrencia(
+    app: Option<&AppHandle>,
+    acao: &str,
+) -> Result<Option<OperationGuard>, String> {
+    bloqueio_serato(acao)?;
+    if let Some(handle) = app {
+        if let Some(state) = handle.try_state::<AppSecurityState>() {
+            let guard = state.acquire_lock().map_err(|e| {
+                format!("❌ {}: não é possível {}.", e, acao)
+            })?;
+            return Ok(Some(guard));
+        }
+    }
+    Ok(None)
 }
 
 extern "C" {
@@ -746,6 +836,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn move_to_trash(path: String) -> Result<(), String> {
+        bloqueio_serato("mover arquivo para a lixeira")?;
         let mut file_path = PathBuf::from(&path);
 
         // Se o caminho for relativo ou não existir diretamente, tenta resolver contra /Volumes/* ou Home
@@ -861,7 +952,7 @@ mod commands {
     pub async fn start_sync(
         app: AppHandle,
         window: Window,
-        security_state: tauri::State<'_, AppSecurityState>,
+        _security_state: tauri::State<'_, AppSecurityState>,
         mp3_path: String,
         serato_path: String,
         export_csv: bool,
@@ -883,13 +974,31 @@ mod commands {
             return Err(err_msg);
         }
 
+        let guard = if !dry_run {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "executar sincronização física da biblioteca")?)
+        } else {
+            None
+        };
+
         let script_path = find_canonical_python_script(Some(&app), "serato_macos_app.py")?;
         let python_bin = find_python_binary()?;
         let window_clone = window.clone();
-        let is_op_active = security_state.is_operation_active.clone();
-        is_op_active.store(true, Ordering::SeqCst);
 
         std::thread::spawn(move || {
+            let _guard = guard;
+            if !dry_run && is_serato_running() {
+                let err_msg = "❌ BLOQUEIO DE SEGURANÇA: O Serato DJ Pro foi aberto durante a inicialização da sincronização. Operação cancelada.".to_string();
+                let _ = window_clone.emit("sync-log", &err_msg);
+                let _ = window_clone.emit(
+                    "sync-finished",
+                    SyncFinishedPayload {
+                        success: false,
+                        exit_code: Some(1),
+                        message: err_msg,
+                    },
+                );
+                return;
+            }
             let _ = window_clone.emit("sync-log", format!("🐍 Motor Python: {}", script_path.display()));
 
             let mut cmd = Command::new(&python_bin);
@@ -913,8 +1022,7 @@ mod commands {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    is_op_active.store(false, Ordering::SeqCst);
-                    let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
+                            let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
                     let _ = window_clone.emit("sync-log", &err_msg);
                     let _ = window_clone.emit(
                         "sync-finished",
@@ -993,7 +1101,6 @@ mod commands {
                     message,
                 },
             );
-            is_op_active.store(false, Ordering::SeqCst);
         });
 
         Ok(())
@@ -1004,7 +1111,7 @@ mod commands {
         app: AppHandle,
         mp3_path: String,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--list-crates");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1031,7 +1138,7 @@ mod commands {
         include_subcrates: Option<bool>,
         naming_mode: Option<String>,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--scan-tags");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1123,14 +1230,13 @@ mod commands {
         rename_files: Option<bool>,
         search: Option<String>,
     ) -> Result<(), String> {
-        if is_serato_running() {
-            return Err("Bloqueio de segurança: O Serato DJ Pro está aberto. Feche o Serato antes de aplicar tags nos arquivos para evitar perda de dados por conflito de gravação.".into());
-        }
-        let script = find_python_script(Some(&app), "tag_doctor.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar tags nas músicas em lote")?;
+        let script = find_canonical_python_script(Some(&app), "tag_doctor.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-apply");
             cmd.arg("--mp3");
@@ -1224,10 +1330,9 @@ mod commands {
         items_json: String,
         rename_files: Option<bool>,
     ) -> Result<(), String> {
-        if is_serato_running() {
-            return Err("Bloqueio de segurança: O Serato DJ Pro está aberto. Feche o Serato antes de aplicar tags nos arquivos para evitar perda de dados por conflito de gravação.".into());
-        }
-        let script = find_python_script(Some(&app), "tag_doctor.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar tags nas músicas selecionadas")?;
+        let script = find_canonical_python_script(Some(&app), "tag_doctor.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         let temp_dir = std::env::temp_dir();
@@ -1242,8 +1347,8 @@ mod commands {
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
-            let mut cmd = make_python_cmd(&script, &python_bin);
+            let _guard = guard;
+            let mut cmd = make_python_cmd_with_app(None, &script, &python_bin);
             cmd.arg("--apply-tags");
             cmd.arg(&temp_file);
             if let Some(true) = rename_files {
@@ -1310,7 +1415,9 @@ mod commands {
         window: Window,
         items_json: String,
     ) -> Result<(), String> {
-        let script = find_python_script(Some(&app), "tag_doctor.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "enriquecer artistas ausentes nas tags")?;
+        let script = find_canonical_python_script(Some(&app), "tag_doctor.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         let temp_dir = std::env::temp_dir();
@@ -1325,7 +1432,7 @@ mod commands {
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--enrich-artists");
             cmd.arg(&temp_file);
@@ -1386,7 +1493,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn backup_serato_db(app: AppHandle) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--backup-db");
 
         let output = cmd.output().map_err(|e| format!("Falha ao executar backup: {}", e))?;
@@ -1400,7 +1507,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn list_serato_backups(app: AppHandle) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--list-backups");
 
         let output = cmd.output().map_err(|e| format!("Falha ao listar backups: {}", e))?;
@@ -1410,7 +1517,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn restore_serato_db(app: AppHandle, backup_path: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py");
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--restore-db");
         cmd.arg(&backup_path);
 
@@ -1431,7 +1538,7 @@ mod commands {
         batch: Option<usize>,
         force: Option<bool>,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--scan");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -1486,7 +1593,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn list_cue_backups(app: AppHandle, search: Option<String>) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--list-backups");
         if let Some(s) = search {
             if !s.trim().is_empty() {
@@ -1511,7 +1618,7 @@ mod commands {
         if is_serato_running() {
             return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de restaurar Hot Cues.".into());
         }
-        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--restore");
         cmd.arg(&filepath);
 
@@ -1527,10 +1634,76 @@ mod commands {
     // Ferramentas de biblioteca: BPM/tom, journal de desfazer, crates
     // ------------------------------------------------------------------
 
+    fn try_parse_json(stdout: &str) -> Option<serde_json::Value> {
+        let stdout_trim = stdout.trim();
+        if (stdout_trim.starts_with('{') && stdout_trim.ends_with('}'))
+            || (stdout_trim.starts_with('[') && stdout_trim.ends_with(']'))
+        {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(stdout_trim) {
+                return Some(v);
+            }
+        }
+
+        for line in stdout.lines().rev() {
+            let line_trim = line.trim();
+            if (line_trim.starts_with('{') && line_trim.ends_with('}'))
+                || (line_trim.starts_with('[') && line_trim.ends_with(']'))
+            {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line_trim) {
+                    return Some(v);
+                }
+            }
+        }
+
+        if let Some(first_brace) = stdout.find('{') {
+            if let Some(last_brace) = stdout.rfind('}') {
+                if last_brace > first_brace {
+                    let slice = &stdout[first_brace..=last_brace];
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+
+        if let Some(first_bracket) = stdout.find('[') {
+            if let Some(last_bracket) = stdout.rfind(']') {
+                if last_bracket > first_bracket {
+                    let slice = &stdout[first_bracket..=last_bracket];
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(slice) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
     /// Executa um script Python e devolve a resposta JSON de forma robusta e resiliente.
     fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
-        let path = find_canonical_python_script(Some(app), script)?;
-        let python_bin = find_python_binary()?;
+        let path = match find_canonical_python_script(Some(app), script) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(format_structured_error(
+                    "SCRIPT_NOT_FOUND",
+                    &format!("Script Python '{}' não encontrado nos recursos do aplicativo", script),
+                    serde_json::json!({ "script": script, "erro": e }),
+                ));
+            }
+        };
+
+        let python_bin = match find_python_binary() {
+            Ok(b) => b,
+            Err(e) => {
+                return Err(format_structured_error(
+                    "PYTHON_INTERPRETER_NOT_FOUND",
+                    "Nenhum interpretador Python 3 funcional foi localizado no sistema",
+                    serde_json::json!({ "erro": e }),
+                ));
+            }
+        };
+
         let mut cmd = Command::new(&python_bin);
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
 
@@ -1543,9 +1716,25 @@ mod commands {
                 py_path_parts.push(vendor_dir.to_string_lossy().to_string());
             }
             if let Ok(existing) = std::env::var("PYTHONPATH") {
-                py_path_parts.push(existing);
+                if !existing.is_empty() {
+                    py_path_parts.push(existing);
+                }
             }
             cmd.env("PYTHONPATH", py_path_parts.join(":"));
+        }
+
+        if let Ok(current_path) = std::env::var("PATH") {
+            let parts: Vec<&str> = current_path.split(':').collect();
+            let mut new_parts = Vec::new();
+            for p in &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+                if !parts.contains(p) {
+                    new_parts.push(*p);
+                }
+            }
+            if !new_parts.is_empty() {
+                let full_path = format!("{}:{}", new_parts.join(":"), current_path);
+                cmd.env("PATH", full_path);
+            }
         }
 
         cmd.arg(&path);
@@ -1553,67 +1742,113 @@ mod commands {
             cmd.arg(a);
         }
 
-        let output = cmd
-            .output()
-            .map_err(|e| format!("Falha ao executar {}: {}", script, e))?;
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stdout_trim = stdout.trim();
+        let mut child = cmd.spawn().map_err(|e| {
+            format_structured_error(
+                "PROCESS_SPAWN_FAILED",
+                &format!("Falha ao iniciar processo Python para '{}': {}", script, e),
+                serde_json::json!({ "script": script, "erro": e.to_string() }),
+            )
+        })?;
 
-        // 1. Tenta verificar se o stdout completo é um JSON válido (objeto ou array, mono ou multi-linha)
-        if (stdout_trim.starts_with('{') && stdout_trim.ends_with('}'))
-            || (stdout_trim.starts_with('[') && stdout_trim.ends_with(']'))
-        {
-            if serde_json::from_str::<serde_json::Value>(stdout_trim).is_ok() {
-                return Ok(stdout_trim.to_string());
-            }
-        }
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
 
-        // 2. Procura pela última linha que seja um JSON válido (caso haja logs antes)
-        for line in stdout.lines().rev() {
-            let line_trim = line.trim();
-            if (line_trim.starts_with('{') && line_trim.ends_with('}'))
-                || (line_trim.starts_with('[') && line_trim.ends_with(']'))
-            {
-                if serde_json::from_str::<serde_json::Value>(line_trim).is_ok() {
-                    return Ok(line_trim.to_string());
+        let out_thread = std::thread::spawn(move || {
+            let mut out = String::new();
+            if let Some(p) = stdout_pipe {
+                let r = BufReader::new(p);
+                for line in r.lines().flatten() {
+                    if !out.is_empty() { out.push('\n'); }
+                    out.push_str(&line);
                 }
             }
-        }
+            out
+        });
 
-        // 3. Procura por bloco JSON contido entre o primeiro '{'/'[' e o último '}'/']'
-        if let Some(first_brace) = stdout.find('{') {
-            if let Some(last_brace) = stdout.rfind('}') {
-                if last_brace > first_brace {
-                    let slice = &stdout[first_brace..=last_brace];
-                    if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
-                        return Ok(slice.to_string());
+        let err_thread = std::thread::spawn(move || {
+            let mut err = String::new();
+            if let Some(p) = stderr_pipe {
+                let r = BufReader::new(p);
+                for line in r.lines().flatten() {
+                    if !err.is_empty() { err.push('\n'); }
+                    err.push_str(&line);
+                }
+            }
+            err
+        });
+
+        let timeout = Duration::from_secs(120);
+        let start_time = std::time::Instant::now();
+        let exit_status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    break status;
+                }
+                Ok(None) => {
+                    if start_time.elapsed() > timeout {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = out_thread.join();
+                        let _ = err_thread.join();
+                        return Err(format_structured_error(
+                            "PYTHON_TIMEOUT",
+                            &format!("Tempo limite de 120s excedido ao executar {}", script),
+                            serde_json::json!({ "script": script, "timeout_seconds": 120 }),
+                        ));
                     }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = out_thread.join();
+                    let _ = err_thread.join();
+                    return Err(format_structured_error(
+                        "PROCESS_WAIT_ERROR",
+                        &format!("Erro ao monitorar subprocesso Python {}: {}", script, e),
+                        serde_json::json!({ "script": script, "erro": e.to_string() }),
+                    ));
                 }
             }
-        }
-
-        if let Some(first_bracket) = stdout.find('[') {
-            if let Some(last_bracket) = stdout.rfind(']') {
-                if last_bracket > first_bracket {
-                    let slice = &stdout[first_bracket..=last_bracket];
-                    if serde_json::from_str::<serde_json::Value>(slice).is_ok() {
-                        return Ok(slice.to_string());
-                    }
-                }
-            }
-        }
-
-        // Se falhou ao extrair JSON, relata erro com o stderr ou stdout detalhado
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let msg = if !stderr.trim().is_empty() {
-            stderr.to_string()
-        } else if !stdout.trim().is_empty() {
-            stdout.to_string()
-        } else {
-            "Execução falhou (processo retornou vazio sem saída)".to_string()
         };
-        Err(format!("Erro em {}: {}", script, msg.trim()))
+
+        let stdout = out_thread.join().unwrap_or_default();
+        let stderr = err_thread.join().unwrap_or_default();
+        let status = exit_status;
+
+        if !status.success() {
+            let code = status.code().unwrap_or(-1);
+            if let Some(json_val) = try_parse_json(&stdout) {
+                if json_val.is_object() {
+                    return Ok(json_val.to_string());
+                }
+            }
+            return Err(format_structured_error(
+                "PYTHON_EXECUTION_FAILED",
+                &format!("O módulo Python '{}' encerrou com falha (código {})", script, code),
+                serde_json::json!({
+                    "script": script,
+                    "exit_code": code,
+                    "stderr": stderr.trim(),
+                    "stdout": stdout.trim()
+                }),
+            ));
+        }
+
+        if let Some(json_val) = try_parse_json(&stdout) {
+            return Ok(json_val.to_string());
+        }
+
+        Err(format_structured_error(
+            "INVALID_JSON_RESPONSE",
+            &format!("O módulo Python '{}' concluiu mas não retornou um JSON válido", script),
+            serde_json::json!({
+                "script": script,
+                "stdout": stdout.trim(),
+                "stderr": stderr.trim()
+            }),
+        ))
     }
 
     /// Duplicados multi-pasta, com progresso emitido em "duplicates-progress".
@@ -1699,7 +1934,7 @@ mod commands {
         paths: Vec<String>,
         destination: String,
     ) -> Result<String, String> {
-        bloqueio_serato("mover arquivos da biblioteca")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "mover arquivos da biblioteca")?;
         let mut args: Vec<String> = vec!["--move".into()];
         args.extend(paths);
         args.push("--destination".into());
@@ -1712,7 +1947,7 @@ mod commands {
         app: AppHandle,
         paths: Vec<String>,
     ) -> Result<String, String> {
-        bloqueio_serato("mover arquivos para a lixeira")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "mover arquivos para a lixeira")?;
         let mut args: Vec<String> = vec!["--trash".into()];
         args.extend(paths);
         run_py_json(&app, "duplicates_tool.py", &args)
@@ -1725,7 +1960,7 @@ mod commands {
         crate_name: String,
         paths: Vec<String>,
     ) -> Result<String, String> {
-        bloqueio_serato("gravar em uma crate")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "gravar em uma crate")?;
         let mut args: Vec<String> = vec![
             "--serato".into(), serato_path,
             "--crate".into(), crate_name,
@@ -1735,15 +1970,7 @@ mod commands {
         run_py_json(&app, "crate_ops.py", &args)
     }
 
-    fn bloqueio_serato(acao: &str) -> Result<(), String> {
-        if is_serato_running() {
-            return Err(format!(
-                "Bloqueio de segurança: o Serato DJ Pro está em execução. Feche o Serato antes de {}.",
-                acao
-            ));
-        }
-        Ok(())
-    }
+
 
     #[tauri::command]
     pub async fn analyze_track_file(app: AppHandle, filepath: String) -> Result<String, String> {
@@ -1760,9 +1987,11 @@ mod commands {
         write: bool,
         include_filled: bool,
     ) -> Result<String, String> {
-        if write {
-            bloqueio_serato("gravar BPM e tom nas tags")?;
-        }
+        let _guard = if write {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "gravar BPM e tom nas tags")?)
+        } else {
+            None
+        };
         let script = find_canonical_python_script(Some(&app), "music_analysis.py")?;
         let python_bin = find_python_binary()?;
         let mut cmd = Command::new(&python_bin);
@@ -1831,7 +2060,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn undo_journal(app: AppHandle, op_id: Option<i64>) -> Result<String, String> {
-        bloqueio_serato("desfazer alterações de tags")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "desfazer alterações de tags")?;
         let mut args: Vec<String> = vec!["--undo".into()];
         if let Some(id) = op_id {
             args.push(id.to_string());
@@ -1872,7 +2101,7 @@ mod commands {
         m3u_path: String,
         crate_name: String,
     ) -> Result<String, String> {
-        bloqueio_serato("criar uma crate")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "criar uma crate")?;
         run_py_json(&app, "library_tools.py", &[
             "--import-m3u".into(), m3u_path, "--crate-name".into(), crate_name, "--serato".into(), serato_path,
         ])
@@ -1886,9 +2115,11 @@ mod commands {
         config_json: String,
         dry_run: bool,
     ) -> Result<String, String> {
-        if !dry_run {
-            bloqueio_serato("criar uma crate inteligente")?;
-        }
+        let _guard = if !dry_run {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "criar uma crate inteligente")?)
+        } else {
+            None
+        };
         let mut args: Vec<String> = vec![
             "--smart-create".into(), config_json, "--mp3".into(), mp3_path, "--serato".into(), serato_path,
         ];
@@ -1900,7 +2131,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn smart_crate_refresh(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
-        bloqueio_serato("regenerar crates inteligentes")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "regenerar crates inteligentes")?;
         run_py_json(&app, "library_tools.py", &[
             "--smart-refresh".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
         ])
@@ -1923,7 +2154,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn get_sound_seal_status(app: AppHandle) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--status");
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar status do Sound Seal: {}", e))?;
@@ -1939,7 +2170,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn get_sound_seal_duplicates(app: AppHandle, strategy: Option<String>) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--duplicates");
         if let Some(s) = strategy {
             cmd.arg("--strategy");
@@ -1959,7 +2190,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn set_sound_seal_master(app: AppHandle, audio_seal: String, filepath: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--set-master");
         cmd.arg(&audio_seal);
         cmd.arg(&filepath);
@@ -1977,7 +2208,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn batch_set_sound_seal_masters(app: AppHandle, masters_json: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--batch-set-masters");
         cmd.arg(&masters_json);
 
@@ -1994,7 +2225,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn clear_sound_seal_masters(app: AppHandle) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--clear-masters");
 
         let output = cmd.output().map_err(|e| format!("Falha ao limpar preferências de master: {}", e))?;
@@ -2015,7 +2246,7 @@ mod commands {
         mp3_path: String,
         serato_path: String,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--relocate");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2070,7 +2301,7 @@ mod commands {
         rel_path: String,
         source_path: String,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--relink");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2094,11 +2325,13 @@ mod commands {
         mp3_path: String,
         items_json: String,
     ) -> Result<(), String> {
-        let script = find_python_script(Some(&app), "sound_seal.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "religar faixas ausentes em lote")?;
+        let script = find_canonical_python_script(Some(&app), "sound_seal.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-relink");
             cmd.arg(&items_json);
@@ -2148,7 +2381,7 @@ mod commands {
         target_path: Option<String>,
         target_paths: Option<String>,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py");
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--remove-lost");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2193,7 +2426,7 @@ mod commands {
         serato_path: String,
         export_crate: Option<String>,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py");
+        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py")?;
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
         cmd.arg("--serato");
@@ -2249,7 +2482,7 @@ mod commands {
         app: AppHandle,
         upgrades_json: String,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py");
+        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py")?;
         cmd.arg("--replace-upgrades");
         cmd.arg(&upgrades_json);
 
@@ -2264,7 +2497,7 @@ mod commands {
         tracks_json: String,
         target_folder: String,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py");
+        let mut cmd = find_python_cmd(Some(&app), "track_matcher.py")?;
         cmd.arg("--integrate-tracks");
         cmd.arg(&tracks_json);
         cmd.arg("--target-folder");
@@ -2288,7 +2521,7 @@ mod commands {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--scan");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2371,7 +2604,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn get_audio_spectrogram(app: AppHandle, filepath: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--spectrogram");
         cmd.arg(&filepath);
 
@@ -2385,7 +2618,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn resample_track_local(app: AppHandle, filepath: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--resample-local");
         cmd.arg(&filepath);
 
@@ -2400,11 +2633,13 @@ mod commands {
         window: Window,
         filepaths_json: String,
     ) -> Result<(), String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "normalizar frequência de áudio em lote")?;
+        let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-resample-local");
             cmd.arg(&filepaths_json);
@@ -2446,10 +2681,11 @@ mod commands {
 
     #[tauri::command]
     pub async fn repair_track_online(app: AppHandle, filepath: String, serato_dir: Option<String>) -> Result<String, String> {
-        bloqueio_serato("reparar faixa online")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "reparar faixa online")?;
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+            let _guard = _guard;
             cmd.arg("--repair-online");
             cmd.arg(&filepath);
             if let Some(ref s_dir) = serato_dir {
@@ -2489,12 +2725,13 @@ mod commands {
         filepaths_json: String,
         serato_dir: Option<String>,
     ) -> Result<(), String> {
-        bloqueio_serato("reparar faixas online em lote")?;
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "reparar faixas online em lote")?;
         let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
         let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-repair-online");
             cmd.arg(&filepaths_json);
@@ -2580,7 +2817,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn preaudit_track_online(app: AppHandle, filepath: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--preaudit-online");
         cmd.arg(&filepath);
 
@@ -2595,11 +2832,11 @@ mod commands {
         window: Window,
         filepaths_json: String,
     ) -> Result<(), String> {
-        let script = find_python_script(Some(&app), "audio_health.py");
+        let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-preaudit-online");
             cmd.arg(&filepaths_json);
@@ -2645,7 +2882,7 @@ mod commands {
         filepath: String,
         new_name: String,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "audio_health.py");
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--rename-track");
         cmd.arg(&filepath);
         cmd.arg("--new-name");
@@ -2658,7 +2895,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn preview_auto_cues(app: AppHandle, filepath: String) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--preview");
         cmd.arg(&filepath);
 
@@ -2672,7 +2909,7 @@ mod commands {
         if is_serato_running() {
             return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de gravar Hot Cues nos arquivos.".into());
         }
-        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--apply");
         cmd.arg(&filepath);
 
@@ -2694,7 +2931,7 @@ mod commands {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> Result<String, String> {
-        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--scan-crate");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -2784,14 +3021,13 @@ mod commands {
         only_pending: Option<bool>,
         overwrite_existing: Option<bool>,
     ) -> Result<(), String> {
-        if is_serato_running() {
-            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de aplicar Hot Cues na crate.".into());
-        }
-        let script = find_python_script(Some(&app), "auto_cue.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar Hot Cues na crate")?;
+        let script = find_canonical_python_script(Some(&app), "auto_cue.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--batch-crate");
             cmd.arg("--mp3");
@@ -2863,11 +3099,13 @@ mod commands {
         subcrate: Option<String>,
         include_subcrates: Option<bool>,
     ) -> Result<(), String> {
-        let script = find_python_script(Some(&app), "auto_cue.py");
+        let guard = bloqueio_serato_e_concorrencia(Some(&app), "reparar Hot Cues na crate")?;
+        let script = find_canonical_python_script(Some(&app), "auto_cue.py")?;
+        let python_bin = find_python_binary()?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
-            let python_bin = find_python_binary().unwrap_or_else(|_| PathBuf::from("/usr/bin/python3"));
+            let _guard = guard;
             let mut cmd = make_python_cmd(&script, &python_bin);
             cmd.arg("--repair-batch");
             cmd.arg("--mp3");
@@ -2929,7 +3167,7 @@ mod commands {
         if is_serato_running() {
             return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de aplicar lote de Hot Cues nos arquivos.".into());
         }
-        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py");
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--apply-batch");
         cmd.arg(&filepaths_json);
 
@@ -3104,6 +3342,11 @@ mod commands {
         copy_audio: bool,
         dry_run: bool
     ) -> Result<String, String> {
+        let _guard = if !dry_run {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "exportar biblioteca para pendrive Pioneer")?)
+        } else {
+            None
+        };
         // Grava tracks_json em arquivo temporário para evitar estouro de buffer de linha de comando
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!("pioneer_tracks_{}.json", std::process::id()));
@@ -3153,6 +3396,11 @@ mod commands {
 
     #[tauri::command]
     pub async fn clean_taxonomy_file(app: AppHandle, filepath: String, dry_run: bool) -> Result<String, String> {
+        let _guard = if !dry_run {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "limpar taxonomia do arquivo")?)
+        } else {
+            None
+        };
         let mut args = vec!["--file".into(), filepath];
         if dry_run {
             args.push("--dry-run".into());
@@ -3167,6 +3415,7 @@ mod commands {
         files: Vec<String>,
         param: Option<String>
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar receita de organização de tags")?;
         let mut args = vec!["--recipe".into(), recipe_name, "--files".into()];
         for f in files {
             args.push(f);
@@ -3182,6 +3431,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn undo_recipe(app: AppHandle) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "desfazer receita de organização de tags")?;
         run_py_json(&app, "recipe_engine.py", &["--undo".into()])
     }
 
@@ -3197,7 +3447,7 @@ mod commands {
         paths: Option<Vec<String>>,
         target: Option<String>,
     ) -> Result<String, String> {
-        bloqueio_serato("modificar ou reordenar crates")?;
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "modificar ou reordenar crates")?;
         let mut args: Vec<String> = vec![
             "--action".into(), action,
             "--serato".into(), serato_path,
@@ -3241,9 +3491,11 @@ mod commands {
         write: bool,
         target_tag: String,
     ) -> Result<String, String> {
-        if write {
-            bloqueio_serato("gravar Energy nas tags")?;
-        }
+        let _guard = if write {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "gravar Energy nas tags")?)
+        } else {
+            None
+        };
         let script = find_canonical_python_script(Some(&app), "music_analysis.py")?;
         let python_bin = find_python_binary()?;
         let mut cmd = Command::new(&python_bin);
@@ -3301,8 +3553,15 @@ mod commands {
         profile: String,
         max_tracks: usize,
         start_track: Option<String>,
+        commit: Option<bool>,
+        exclude_incomplete: Option<bool>,
     ) -> Result<String, String> {
-        bloqueio_serato("gerar Crate curada no Serato")?;
+        let is_commit = commit.unwrap_or(false);
+        let _guard = if is_commit {
+            Some(bloqueio_serato_e_concorrencia(Some(&app), "gerar Crate curada no Serato")?)
+        } else {
+            None
+        };
         let mut args: Vec<String> = vec![
             "--curate-set".into(),
             "--serato".into(), serato_path,
@@ -3310,6 +3569,12 @@ mod commands {
             "--profile".into(), profile,
             "--max-tracks".into(), max_tracks.to_string(),
         ];
+        if is_commit {
+            args.push("--commit".into());
+        }
+        if exclude_incomplete.unwrap_or(false) {
+            args.push("--exclude-incomplete".into());
+        }
         if let Some(st) = start_track {
             if !st.trim().is_empty() {
                 args.push("--start-track".into());
@@ -3338,6 +3603,7 @@ mod commands {
         add_tags: Vec<String>,
         remove_tags: Vec<String>
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "atualizar MyTags nas faixas")?;
         let mut args = vec!["--file".into(), filepath];
         if !add_tags.is_empty() {
             args.push("--add".into());
@@ -3493,4 +3759,62 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("erro ao inicializar aplicação tauri");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_operation_guard_concurrency_and_raii() {
+        let state = AppSecurityState::new();
+        assert!(!state.is_operation_active.load(Ordering::SeqCst));
+
+        // 1. Primeira aquisição deve ser bem sucedida
+        let guard1 = state.acquire_lock();
+        assert!(guard1.is_ok());
+        assert!(state.is_operation_active.load(Ordering::SeqCst));
+
+        // 2. Aquisição concorrente deve ser bloqueada
+        let guard2 = state.acquire_lock();
+        assert!(guard2.is_err());
+        assert!(guard2.unwrap_err().contains("Bloqueio de concorrência"));
+
+        // 3. Liberação via drop do RAII Guard
+        drop(guard1);
+        assert!(!state.is_operation_active.load(Ordering::SeqCst));
+
+        // 4. Nova aquisição após drop deve ser liberada imediatamente
+        let guard3 = state.acquire_lock();
+        assert!(guard3.is_ok());
+        assert!(state.is_operation_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_structured_error_format() {
+        let err_json = format_structured_error(
+            "PYTHON_EXECUTION_FAILED",
+            "Erro de execução do teste",
+            serde_json::json!({ "script": "test.py", "exit_code": 1 }),
+        );
+
+        let parsed: serde_json::Value = serde_json::from_str(&err_json).expect("JSON inválido");
+        assert_eq!(parsed["sucesso"], false);
+        assert_eq!(parsed["codigo"], "PYTHON_EXECUTION_FAILED");
+        assert_eq!(parsed["mensagem"], "Erro de execução do teste");
+        assert_eq!(parsed["detalhes"]["script"], "test.py");
+        assert_eq!(parsed["detalhes"]["exit_code"], 1);
+
+        let op_id = parsed["operacao_id"].as_str().expect("operacao_id ausente");
+        assert!(op_id.len() >= 16);
+    }
+
+    #[test]
+    fn test_generate_unique_operacao_ids() {
+        let id1 = generate_operacao_id();
+        let id2 = generate_operacao_id();
+        assert_ne!(id1, id2);
+        assert!(id1.contains("-"));
+        assert!(id2.contains("-"));
+    }
 }

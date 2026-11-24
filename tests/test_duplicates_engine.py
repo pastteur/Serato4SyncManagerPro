@@ -110,6 +110,26 @@ class TestDuplicatesEngine(unittest.TestCase):
         self.assertIsNotNone(keeper)
         self.assertEqual(keeper["caminho"], "/path/high.mp3", "Deveria manter a faixa com Serato Markers e 320 kbps")
 
+    def test_05_move_files_quarantine_manifest(self):
+        """Ao mover arquivos duplicados para quarentena, gera quarantine_manifest.json com sha256."""
+        src_file = self.dir_a / "Duplicate_To_Move.mp3"
+        src_file.write_bytes(b"DUPLICATE_DATA_FOR_QUARANTINE" * 50)
+        dest_quarantine = self.root / "Quarentena"
+
+        res = duplicates_tool.move_files([str(src_file)], str(dest_quarantine))
+        self.assertTrue(res["sucesso"])
+        self.assertEqual(res["movidos"], 1)
+        self.assertTrue(Path(res["manifesto"]).is_file())
+
+        import json
+        with open(res["manifesto"], "r", encoding="utf-8") as f:
+            manifest_data = json.load(f)
+        self.assertEqual(len(manifest_data), 1)
+        entry = manifest_data[0]
+        self.assertEqual(entry["arquivo_origem"], str(src_file.resolve()))
+        self.assertTrue(len(entry["sha256"]) == 64)
+        self.assertTrue(Path(entry["arquivo_destino"]).is_file())
+
 
 if __name__ == "__main__":
     unittest.main()

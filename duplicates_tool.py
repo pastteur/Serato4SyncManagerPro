@@ -27,10 +27,12 @@ import sys
 import re
 import csv
 import json
+import uuid
 import shutil
 import argparse
 import hashlib
 import unicodedata
+from datetime import datetime
 from pathlib import Path
 
 _THIS_DIR = str(Path(__file__).resolve().parent)
@@ -45,6 +47,11 @@ try:
     import mutagen
 except ImportError:
     mutagen = None
+
+try:
+    import journal
+except ImportError:
+    journal = None
 
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 HASHABLE_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
@@ -93,6 +100,18 @@ def compute_content_hash(filepath):
         return ""
 
 
+def calc_sha256(filepath) -> str:
+    """Calcula o hash SHA-256 integral do arquivo em disco."""
+    try:
+        hasher = hashlib.sha256()
+        with open(filepath, 'rb') as f:
+            while chunk := f.read(65536):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+    except Exception:
+        return ""
+
+
 def clean_audio_name(filename):
     """
     Normaliza o nome do arquivo para matching semântico/musical:
@@ -110,7 +129,7 @@ def clean_audio_name(filename):
 
 
 def read_meta(filepath):
-    """BPM, tom, duração, bitrate, artista, título e marcadores Serato."""
+    """BPM, tom, duração, bitrate, artista, título, marcadores Serato e Sound Seal."""
     meta = {
         "bpm": "",
         "key": "",
@@ -118,7 +137,8 @@ def read_meta(filepath):
         "bitrate_kbps": 0,
         "artist": "",
         "title": "",
-        "has_serato_markers": False
+        "has_serato_markers": False,
+        "sound_seal": ""
     }
     if mutagen is None:
         return meta
@@ -165,6 +185,15 @@ def read_meta(filepath):
                 if "GEOB:Serato" in k or str(k).startswith("GEOB:Serato"):
                     meta["has_serato_markers"] = True
                     break
+        except Exception:
+            pass
+        try:
+            for k, val in tags.items():
+                k_str = str(k)
+                if "COMM" in k_str and "SOUND_SEAL" in str(val):
+                    meta["sound_seal"] = str(val)
+                elif "TXXX:SOUND_SEAL" in k_str:
+                    meta["sound_seal"] = str(val)
         except Exception:
             pass
     return meta
@@ -459,10 +488,12 @@ def _choose_keeper(arquivos):
     """
     Heurística inteligente de preservação (Keeper Selection):
     1. Presença de Hot Cues / Serato Markers (+500 pts)
-    2. Maior bitrate de áudio (+bitrate pts, ex: 320 kbps > 128 kbps)
-    3. Pertence à biblioteca Serato Master (+150 pts)
-    4. Nome limpo sem marcadores de cópia '(1)', ' - Cópia' (+50 pts)
-    5. Arquivo mais antigo / data de modificação (+10 pts)
+    2. Presença de Sound Seal acústico confirmado (+300 pts)
+    3. Maior bitrate de áudio (+bitrate pts, ex: 320 kbps > 128 kbps)
+    4. Pertence à biblioteca Serato Master (+150 pts)
+    5. Metadados ricos e confirmados (BPM, Tom, Artista) (+25 pts cada)
+    6. Nome limpo sem marcadores de cópia '(1)', ' - Cópia' (+50 pts)
+    7. Arquivo mais antigo / data de modificação (+10 pts)
     """
     if not arquivos:
         return None
@@ -471,9 +502,17 @@ def _choose_keeper(arquivos):
         s = 0
         if a.get("has_serato_markers"):
             s += 500
+        if a.get("sound_seal"):
+            s += 300
         s += int(a.get("bitrate_kbps") or 0)
         if a.get("origem") == "serato":
             s += 150
+        if a.get("bpm"):
+            s += 25
+        if a.get("key"):
+            s += 25
+        if a.get("artist"):
+            s += 25
         nome = a.get("nome", "").lower()
         if not re.search(r'[\(\[\{]\s*\d+\s*[\)\]\}]|\b(cópia|copia|copy)\b', nome):
             s += 50
@@ -487,49 +526,96 @@ def _choose_keeper(arquivos):
 # Ações sobre arquivos
 # ------------------------------------------------------------------------------
 def move_to_trash(paths):
+    operacao_id = str(uuid.uuid4())
+    manifesto_itens = []
     resultados = []
+    timestamp = datetime.now().isoformat()
+
     for raw in paths:
-        p = Path(os.path.expanduser(str(raw)))
+        p = Path(os.path.expanduser(str(raw))).resolve()
         if not p.exists():
             resultados.append({"arquivo": str(raw), "sucesso": False, "erro": "Arquivo não encontrado"})
             continue
+
+        file_hash = calc_sha256(p)
+        file_size = p.stat().st_size if p.exists() else 0
+        dest_record = None
+
         try:
-            texto = p.as_uri()
-            from Foundation import NSURL  # type: ignore
-            from AppKit import NSWorkspace  # type: ignore
-            ok = NSWorkspace.sharedWorkspace().performFileOperation_source_destination_files_tag_(
-                "NSWorkspaceRecycleOperation", str(p.parent), "", [p.name], None
-            )
-            resultados.append({"arquivo": str(p), "sucesso": bool(ok)})
-        except Exception:
-            # Sem pyobjc: move para a Lixeira do usuário diretamente
+            # Sem pyobjc ou em fallback: move para a Lixeira do usuário diretamente
             lixeira = Path.home() / ".Trash"
             lixeira.mkdir(exist_ok=True)
             destino = lixeira / p.name
             if destino.exists():
                 import time
                 destino = lixeira / ("%d_%s" % (int(time.time()), p.name))
-            try:
-                shutil.move(str(p), str(destino))
-                resultados.append({"arquivo": str(p), "sucesso": True, "destino": str(destino)})
-            except Exception as e:
-                resultados.append({"arquivo": str(p), "sucesso": False, "erro": str(e)})
-    return {"sucesso": all(r["sucesso"] for r in resultados), "itens": resultados}
+            shutil.move(str(p), str(destino))
+            dest_record = str(destino)
+            resultados.append({"arquivo": str(p), "sucesso": True, "destino": str(destino)})
+        except Exception as e:
+            resultados.append({"arquivo": str(p), "sucesso": False, "erro": str(e)})
+
+        if dest_record:
+            manifesto_entry = {
+                "operacao_id": operacao_id,
+                "timestamp": timestamp,
+                "acao": "TRASH",
+                "arquivo_origem": str(p),
+                "arquivo_destino": dest_record,
+                "sha256": file_hash,
+                "tamanho_bytes": file_size
+            }
+            manifesto_itens.append(manifesto_entry)
+            if journal:
+                try:
+                    with journal.get_journal_db() as conn:
+                        conn.execute("""
+                            INSERT INTO operacoes (criado_em, acao, arquivo, desfeita, hash_anterior, hash_posterior)
+                            VALUES (?, 'DUPLICATE_TRASH', ?, 0, ?, ?);
+                        """, (timestamp, str(p), file_hash, dest_record))
+                        conn.commit()
+                except Exception:
+                    pass
+
+    manifest_path = None
+    if manifesto_itens:
+        try:
+            REPORT_DIR.mkdir(parents=True, exist_ok=True)
+            manifest_path = REPORT_DIR / f"trash_manifest_{operacao_id}.json"
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump({"operacao_id": operacao_id, "timestamp": timestamp, "itens": manifesto_itens}, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    return {
+        "sucesso": all(r["sucesso"] for r in resultados),
+        "operacao_id": operacao_id,
+        "manifesto": str(manifest_path) if manifest_path else "",
+        "itens": resultados
+    }
 
 
 def move_files(paths, destination):
-    dest_dir = Path(os.path.expanduser(str(destination)))
+    dest_dir = Path(os.path.expanduser(str(destination))).resolve()
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         return {"sucesso": False, "erro": "Destino inválido: %s" % e}
 
+    operacao_id = str(uuid.uuid4())
+    manifesto_itens = []
     resultados = []
+    timestamp = datetime.now().isoformat()
+
     for raw in paths:
-        src = Path(os.path.expanduser(str(raw)))
+        src = Path(os.path.expanduser(str(raw))).resolve()
         if not src.exists():
             resultados.append({"arquivo": str(raw), "sucesso": False, "erro": "Arquivo não encontrado"})
             continue
+
+        file_hash = calc_sha256(src)
+        file_size = src.stat().st_size if src.exists() else 0
+
         destino = dest_dir / src.name
         if destino.exists():
             destino = dest_dir / ("%s_movido%s" % (src.stem, src.suffix))
@@ -539,12 +625,54 @@ def move_files(paths, destination):
                 n += 1
         try:
             shutil.move(str(src), str(destino))
+            dest_record = str(destino)
             resultados.append({"arquivo": str(src), "sucesso": True, "destino": str(destino)})
+
+            manifesto_entry = {
+                "operacao_id": operacao_id,
+                "timestamp": timestamp,
+                "acao": "MOVE",
+                "arquivo_origem": str(src),
+                "arquivo_destino": dest_record,
+                "sha256": file_hash,
+                "tamanho_bytes": file_size
+            }
+            manifesto_itens.append(manifesto_entry)
+            if journal:
+                try:
+                    with journal.get_journal_db() as conn:
+                        conn.execute("""
+                            INSERT INTO operacoes (criado_em, acao, arquivo, desfeita, hash_anterior, hash_posterior)
+                            VALUES (?, 'DUPLICATE_MOVE', ?, 0, ?, ?);
+                        """, (timestamp, str(src), file_hash, dest_record))
+                        conn.commit()
+                except Exception:
+                    pass
         except Exception as e:
             resultados.append({"arquivo": str(src), "sucesso": False, "erro": str(e)})
+
+    manifest_path = dest_dir / "quarantine_manifest.json"
+    try:
+        existing_manifest = []
+        if manifest_path.exists():
+            try:
+                with open(manifest_path, "r", encoding="utf-8") as f:
+                    existing_manifest = json.load(f)
+                    if not isinstance(existing_manifest, list):
+                        existing_manifest = []
+            except Exception:
+                existing_manifest = []
+        existing_manifest.extend(manifesto_itens)
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(existing_manifest, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
     return {
         "sucesso": all(r["sucesso"] for r in resultados),
+        "operacao_id": operacao_id,
         "destino": str(dest_dir),
+        "manifesto": str(manifest_path),
         "movidos": sum(1 for r in resultados if r["sucesso"]),
         "itens": resultados,
     }

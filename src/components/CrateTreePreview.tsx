@@ -3,7 +3,8 @@ import {
   FolderTree, Music, Search, Disc, Folder, Eye, CheckCircle2, Sparkles, 
   ChevronRight, ChevronDown, Layers, AlertTriangle, Copy, Check, Filter, 
   FolderPlus, ChevronsDown, ChevronsUp, FileText, Play,
-  Wrench, ArrowDownAZ, ArrowUpAZ, Shuffle, Save, Edit3, MoreVertical
+  Wrench, ArrowDownAZ, ArrowUpAZ, Shuffle, Save, Edit3, MoreVertical,
+  ShieldCheck, Sliders
 } from 'lucide-react';
 import { SyncSummary, CrateTreeItem, CrateTrack } from '../types';
 import { PlayingTrackInfo } from './AudioPlayerBar';
@@ -49,6 +50,16 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
   const [toolStatus, setToolStatus] = useState<string | null>(null);
   const [prefixModalOpen, setPrefixModalOpen] = useState<boolean>(false);
   const [prefixInput, setPrefixInput] = useState<string>('01. ');
+  const [toolPreview, setToolPreview] = useState<{
+    action: string;
+    sortMode?: string;
+    prefix?: string;
+    title: string;
+    desc: string;
+    crateName: string;
+    count: number;
+    sampleTracks: string[];
+  } | null>(null);
 
   // Helper para detectar subcrates dentro de subcrates (aninhamento multinível)
   const isNestedSubcrate = (item: CrateTreeItem) => {
@@ -243,8 +254,8 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Executa ações das Playlist Tools (Prefix, Capitalize, Sort, Rewrite Order)
-  const handlePlaylistToolAction = async (action: string, sortMode?: string, prefix?: string) => {
+  // Prepara e exibe a Prévia para aprovação obrigatória (Princípio Analisar -> Prévia -> Ajustar)
+  const handlePlaylistToolAction = (action: string, sortMode?: string, prefix?: string) => {
     if (!activeCrate || isAllSelected) {
       alert('Selecione uma Crate específica para aplicar ferramentas de Playlist.');
       return;
@@ -256,6 +267,47 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     }
 
     setShowToolsMenu(false);
+
+    let title = '';
+    let desc = '';
+    if (action === 'sort') {
+      const modeNames: Record<string, string> = {
+        az: 'Alfabética A-Z (por Título)',
+        za: 'Alfabética Z-A (por Título)',
+        shuffle: 'Embaralhar Faixas (Shuffle Aleatório)'
+      };
+      title = `Reordenar Crate: ${modeNames[sortMode || 'az'] || sortMode}`;
+      desc = `As faixas da Crate serão reordenadas fisicamente dentro do arquivo Serato .crate de acordo com: ${modeNames[sortMode || 'az'] || sortMode}.`;
+    } else if (action === 'prefix') {
+      title = `Adicionar Prefixo "${prefix}"`;
+      desc = `O prefixo "${prefix}" será inserido no início do nome da Crate no Serato.`;
+    } else if (action === 'capitalize') {
+      title = 'Capitalizar Nome da Crate';
+      desc = 'O nome da Crate será padronizado em Title Case (Primeiras Letras Maiúsculas).';
+    } else if (action === 'rewrite_order') {
+      title = 'Salvar Ordem Atual das Faixas';
+      desc = 'A sequência exibida na tela será fixada de forma permanente no arquivo binário .crate.';
+    }
+
+    const sample = (activeCrate.faixas || []).slice(0, 5).map(f => f.nome);
+
+    setToolPreview({
+      action,
+      sortMode,
+      prefix,
+      title,
+      desc,
+      crateName: activeCrate.nome_crate,
+      count: activeCrate.faixas.length,
+      sampleTracks: sample
+    });
+  };
+
+  // Executa exclusivamente o plano aprovado após confirmação no botão AJUSTAR
+  const handleExecuteApprovedTool = async () => {
+    if (!toolPreview || !activeCrate) return;
+    const { action, sortMode, prefix } = toolPreview;
+    setToolPreview(null);
     setIsToolRunning(true);
     setToolStatus(`Executando ${action}...`);
 
@@ -823,7 +875,75 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
                 }}
                 className="px-3 py-1 rounded bg-serato-cyan text-black font-bold text-xs hover:bg-cyan-300 cursor-pointer"
               >
-                Aplicar Prefixo
+                Avançar para Prévia
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Prévia e Aprovação Obrigatória (Playlist Tools) */}
+      {toolPreview && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-serato-card border border-serato-cardBorder rounded-2xl max-w-md w-full p-5 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-800">
+              <div className="p-2 bg-amber-500/10 border border-amber-500/30 rounded-xl text-amber-400">
+                <Sliders className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  Prévia de Alteração: {toolPreview.title}
+                </h4>
+                <p className="text-xs text-slate-400">
+                  Crate: <strong className="text-white">{toolPreview.crateName}</strong> ({toolPreview.count} faixas)
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl space-y-2 text-xs">
+              <div className="text-slate-300 font-medium">
+                {toolPreview.desc}
+              </div>
+              {toolPreview.sampleTracks.length > 0 && (
+                <div className="space-y-1 pt-1">
+                  <span className="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">
+                    Amostra de faixas afetadas:
+                  </span>
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800 space-y-1 font-mono text-[11px] text-slate-300 max-h-28 overflow-y-auto">
+                    {toolPreview.sampleTracks.map((name, i) => (
+                      <div key={i} className="truncate">
+                        {i + 1}. {name}
+                      </div>
+                    ))}
+                    {toolPreview.count > toolPreview.sampleTracks.length && (
+                      <div className="text-slate-500 italic text-[10px]">
+                        ... e mais {toolPreview.count - toolPreview.sampleTracks.length} faixa(s).
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              <div className="p-2 bg-emerald-950/40 border border-emerald-800/40 rounded text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>Backup atômico verificado com SHA-256 (.bak) criado antes da gravação física.</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setToolPreview(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+              >
+                CANCELAR
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteApprovedTool}
+                className="px-5 py-2 rounded-xl bg-serato-cyan hover:bg-cyan-300 text-black text-xs font-bold transition shadow-lg shadow-serato-cyan/20 cursor-pointer flex items-center gap-1.5"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>AJUSTAR</span>
               </button>
             </div>
           </div>

@@ -28,7 +28,37 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
-JOURNAL_PATH = Path.home() / ".serato_sync_journal.sqlite"
+def get_journal_path() -> Path:
+    global JOURNAL_PATH
+    if "JOURNAL_PATH" in globals() and JOURNAL_PATH is not None:
+        p_val = Path(JOURNAL_PATH).resolve()
+        default_home = (Path.home() / ".serato_sync_journal.sqlite").resolve()
+        fallback_proj = (Path(__file__).resolve().parent / ".serato_sync_journal.sqlite").resolve()
+        if p_val != default_home and p_val != fallback_proj:
+            return p_val
+    env_p = os.environ.get("SERATO_JOURNAL_PATH")
+    if env_p:
+        p = Path(env_p).resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    default_p = Path.home() / ".serato_sync_journal.sqlite"
+    try:
+        default_p.parent.mkdir(parents=True, exist_ok=True)
+        test_file = default_p.parent / f".serato_perm_{os.getpid()}"
+        test_file.touch()
+        test_file.unlink()
+        return default_p
+    except Exception:
+        fallback = Path(__file__).resolve().parent / ".serato_sync_journal.sqlite"
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            return fallback
+        except Exception:
+            import tempfile
+            return Path(tempfile.gettempdir()) / ".serato_sync_journal.sqlite"
+
+
+JOURNAL_PATH = get_journal_path()
 
 
 def calc_file_sha256(filepath: str) -> str:
@@ -52,7 +82,9 @@ def calc_audio_tail_sha256(filepath: str) -> str:
 
 
 def get_journal_db():
-    conn = sqlite3.connect(str(JOURNAL_PATH))
+    p = get_journal_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(p), timeout=15.0)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS operacoes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,6 +99,20 @@ def get_journal_db():
         );
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ops_arquivo ON operacoes(arquivo);")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS crate_operacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            criado_em TEXT NOT NULL,
+            acao TEXT NOT NULL,
+            crate_path TEXT NOT NULL,
+            hash_anterior TEXT,
+            hash_posterior TEXT,
+            backup_path TEXT,
+            total_tracks INTEGER,
+            desfeita INTEGER DEFAULT 0
+        );
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_crate_ops_path ON crate_operacoes(crate_path);")
     # Migração idempotente de colunas se a tabela já existir em versão legada
     for col in ["hash_anterior", "hash_posterior", "audio_tail_hash"]:
         try:
@@ -75,6 +121,24 @@ def get_journal_db():
             pass
     conn.commit()
     return conn
+
+
+def record_crate_operation(crate_path: str, acao: str, hash_anterior: str = None,
+                           hash_posterior: str = None, backup_path: str = None,
+                           total_tracks: int = 0) -> int:
+    """Registra uma operação de modificação de crate no journal."""
+    conn = get_journal_db()
+    with conn:
+        cur = conn.execute(
+            """INSERT INTO crate_operacoes
+               (criado_em, acao, crate_path, hash_anterior, hash_posterior, backup_path, total_tracks, desfeita)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0)""",
+            (datetime.now().isoformat(timespec='seconds'), acao, str(crate_path),
+             hash_anterior, hash_posterior, backup_path, int(total_tracks))
+        )
+        op_id = cur.lastrowid
+    conn.close()
+    return op_id
 
 
 def read_leading_id3(filepath):
@@ -113,7 +177,8 @@ def record_id3_before_change(filepath, action="alteracao_tags"):
 
 def record_operation_after(op_id, filepath=None):
     """Sela a operação gravando o hash final do arquivo após a conclusão com sucesso."""
-    if not op_id or not JOURNAL_PATH.exists():
+    p_db = get_journal_path()
+    if not op_id or not p_db.exists():
         return
     conn = get_journal_db()
     with conn:
@@ -127,7 +192,8 @@ def record_operation_after(op_id, filepath=None):
 
 
 def list_operations(limit=200, only_active=False):
-    if not JOURNAL_PATH.exists():
+    p_db = get_journal_path()
+    if not p_db.exists():
         return {"sucesso": True, "total": 0, "items": []}
     conn = get_journal_db()
     query = "SELECT id, criado_em, acao, arquivo, desfeita, LENGTH(id3_anterior), hash_anterior, hash_posterior FROM operacoes"
@@ -160,7 +226,8 @@ def undo_operation(op_id=None):
       3. Se o áudio puro permanece intacto.
     Restaura o bloco ID3 anterior preservando o áudio byte a byte e substitui atomicamente.
     """
-    if not JOURNAL_PATH.exists():
+    p_db = get_journal_path()
+    if not p_db.exists():
         return {"sucesso": False, "erro": "Nenhuma operação registrada"}
     conn = get_journal_db()
     if op_id is None:

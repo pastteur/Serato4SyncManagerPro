@@ -332,9 +332,10 @@ def analyze_file(filepath, seconds=BPM_SECONDS):
 
 def write_energy_tag(filepath, energy: int, target_tag: str = "grouping", overwrite: bool = True):
     """
-    Grava Energy (1-10) em tags ID3v2.3:
+    Grava Energy (1-10) em tags ID3v2.3 preservando integralmente frames ID3 não envolvidos,
+    comentários adicionais de terceiros/Serato/iTunes, com journal obrigatório e rollback em caso de falha.
     target_tag='grouping': Coluna Grouping do Serato (TIT1: "Energy 7")
-    target_tag='comment': Prefixa na coluna Comment do Serato (COMM: "[Energy 7]")
+    target_tag='comment': Prefixa na coluna Comment padrão do Serato (COMM: "[Energy 7]")
     target_tag='both': Grava em ambos
     """
     if ID3 is None:
@@ -342,6 +343,9 @@ def write_energy_tag(filepath, energy: int, target_tag: str = "grouping", overwr
     path = Path(filepath)
     if path.suffix.lower() != ".mp3":
         return {"sucesso": False, "erro": "Apenas MP3 suportado para tags ID3"}
+
+    if not path.is_file():
+        return {"sucesso": False, "erro": f"Arquivo não encontrado: {path}"}
 
     try:
         tags = ID3(str(path))
@@ -351,39 +355,89 @@ def write_energy_tag(filepath, energy: int, target_tag: str = "grouping", overwr
     energy_val = max(1, min(10, int(energy)))
     alterou = False
 
+    # 1. Atualização estrita de TIT1 (Grouping) preservando Grouping manual pré-existente
     if target_tag in ("grouping", "both"):
+        import re as _re
+        existing_grouping = str(tags["TIT1"]) if "TIT1" in tags else ""
+        # Remove eventuais prefixos ou sufixos de Energy anteriores sem destruir texto manual
+        cleaned_grouping = _re.sub(r'Energy\s*\d+\s*[-|/]?\s*', '', existing_grouping, flags=_re.IGNORECASE).strip()
+        cleaned_grouping = _re.sub(r'[-|/]?\s*Energy\s*\d+', '', cleaned_grouping, flags=_re.IGNORECASE).strip()
+
+        if cleaned_grouping:
+            new_grouping = f"Energy {energy_val} - {cleaned_grouping}"
+        else:
+            new_grouping = f"Energy {energy_val}"
+
         tags.delall("TIT1")
-        tags.add(TIT1(encoding=3, text=f"Energy {energy_val}"))
+        tags.add(TIT1(encoding=3, text=new_grouping))
         alterou = True
 
+    # 2. Atualização estrita de COMM (Comment) preservando comentários de outras tags/descrições
     if target_tag in ("comment", "both"):
         import re as _re
-        existing_comm = ""
-        for frame in tags.getall("COMM"):
-            if frame.desc == "" or frame.desc == "Comment":
-                existing_comm = str(frame.text[0]) if frame.text else ""
+        comm_frames = tags.getall("COMM")
+        target_comm_frame = None
+        for frame in comm_frames:
+            if getattr(frame, 'desc', '') in ("", "Comment"):
+                target_comm_frame = frame
                 break
-        
-        cleaned_comm = _re.sub(r'\[Energy \d+\]\s*', '', existing_comm).strip()
+
+        existing_comm_text = ""
+        if target_comm_frame and target_comm_frame.text:
+            existing_comm_text = str(target_comm_frame.text[0])
+
+        cleaned_comm = _re.sub(r'\[Energy \d+\]\s*', '', existing_comm_text).strip()
         new_comm = f"[Energy {energy_val}] {cleaned_comm}".strip()
-        tags.delall("COMM")
+
+        # Remove APENAS o frame padrão específico a atualizar, preservando todos os demais comentários
+        if target_comm_frame:
+            remaining_comm = [f for f in comm_frames if f is not target_comm_frame]
+            tags.delall("COMM")
+            for f in remaining_comm:
+                tags.add(f)
+
         tags.add(COMM(encoding=3, lang='eng', desc='', text=[new_comm]))
         alterou = True
 
     if not alterou:
         return {"sucesso": True, "gravado": False}
 
+    # 3. Registro mandatório no Journal (fail-closed: se falhar o journal, aborta a escrita)
     try:
-        from journal import record_id3_before_change
-        record_id3_before_change(str(path), action="gravacao_energy")
-    except Exception:
-        pass
+        from journal import record_id3_before_change, record_operation_after, undo_operation
+        op_id = record_id3_before_change(str(path), action="gravacao_energy")
+    except Exception as j_err:
+        return {
+            "sucesso": False,
+            "erro": f"Cancelado por segurança: Falha obrigatória no Journal de auditoria: {j_err}"
+        }
 
+    # 4. Gravação física em ID3v2.3
     try:
         tags.save(str(path), v2_version=3)
-        return {"sucesso": True, "gravado": True, "energy": energy_val, "target": target_tag}
     except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+        return {"sucesso": False, "erro": f"Erro de I/O ao salvar tags ID3: {e}"}
+
+    # 5. Validação pós-escrita e integridade
+    try:
+        check_tags = ID3(str(path))
+        if target_tag in ("grouping", "both") and not check_tags.get("TIT1"):
+            raise IOError("Frame TIT1 (Grouping) não foi encontrado após a gravação.")
+        if target_tag in ("comment", "both") and not check_tags.getall("COMM"):
+            raise IOError("Frame COMM (Comment) não foi encontrado após a gravação.")
+        # Sela no journal com hash final
+        record_operation_after(op_id, str(path))
+        return {"sucesso": True, "gravado": True, "energy": energy_val, "target": target_tag}
+    except Exception as v_err:
+        # Rollback automático restaurando estado prévio
+        try:
+            undo_operation(op_id)
+        except Exception:
+            pass
+        return {
+            "sucesso": False,
+            "erro": f"Validação pós-escrita falhou ({v_err}). Rollback automático executado."
+        }
 
 
 def analyze_energy_batch(folder, limit=50, write=True, target_tag="grouping", emit=True):
@@ -421,10 +475,13 @@ def analyze_energy_batch(folder, limit=50, write=True, target_tag="grouping", em
             print(json.dumps({"tipo": "progresso", "processados": idx, "total": total,
                               "faixa": p.name, "resultado": item}, ensure_ascii=False), flush=True)
 
+    import uuid
     final = {"tipo": "fim", "sucesso": True, "total": total,
              "analisadas": sum(1 for r in resultados if "energy" in r),
              "gravadas": sum(1 for r in resultados if r.get("gravado")),
-             "erros": sum(1 for r in resultados if r.get("erro"))}
+             "erros": sum(1 for r in resultados if r.get("erro")),
+             "resultados": resultados,
+             "operacao_id": str(uuid.uuid4())}
     if emit:
         print(json.dumps(final, ensure_ascii=False), flush=True)
     return final
@@ -563,12 +620,15 @@ def camelot_compatibility_score(c1: str, c2: str) -> float:
 
 
 def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmup",
-                         max_tracks: int = 20, start_track: Optional[str] = None) -> Dict[str, Any]:
+                         max_tracks: int = 20, start_track: Optional[str] = None,
+                         dry_run: bool = False, exclude_incomplete: bool = False) -> Dict[str, Any]:
     """
     Ghost Curator / Set Curator:
-    Cria uma nova Crate no Serato ('[Set] <crate_name>.crate') ordenando faixas de forma harmônica,
-    com controle de BPM e curva de energia.
+    Ordena faixas de forma harmônica com controle de BPM e curva de energia.
+    Não presume dados ausentes como reais, identifica campos faltantes,
+    calcula nível de confiança por faixa e suporta modo dry-run para prévia.
     """
+    import uuid
     from crate_ops import get_crate_path, write_crate_atomic, library_root_for
     from serato_macos_app import parse_crate_binary
 
@@ -590,20 +650,27 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
 
     root = library_root_for(serato)
     candidates = []
+    faixas_incompletas = 0
+
     for rel in existentes:
         full_p = root / rel
-        bpm = 126.0
-        camelot = "8A"
-        energy = 5
+        bpm = None
+        camelot = None
+        energy = None
         artist = ""
 
         if full_p.exists() and mutagen is not None:
             try:
                 t = ID3(str(full_p))
                 if t.get("TBPM"):
-                    bpm = float(str(t["TBPM"]).split()[0])
+                    try:
+                        bpm = float(str(t["TBPM"]).split()[0])
+                    except Exception:
+                        bpm = None
                 if t.get("TKEY"):
-                    camelot = str(t["TKEY"]).strip()
+                    k = str(t["TKEY"]).strip()
+                    if k:
+                        camelot = k
                 if t.get("TIT1"):
                     tit1_str = str(t["TIT1"])
                     import re as _re
@@ -615,17 +682,46 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
             except Exception:
                 pass
 
+        # Identifica campos ausentes sem assumir dados fictícios
+        ausentes = []
+        if bpm is None:
+            ausentes.append("BPM")
+        if camelot is None:
+            ausentes.append("Camelot")
+        if energy is None:
+            ausentes.append("Energy")
+
+        is_completo = (len(ausentes) == 0)
+        if not is_completo:
+            faixas_incompletas += 1
+
+        if exclude_incomplete and not is_completo:
+            continue
+
+        if len(ausentes) >= 3:
+            confianca = 0.0
+        else:
+            confianca = max(0.0, 1.0 - (len(ausentes) / 3.0))
+
         candidates.append({
             "rel": rel,
             "filename": full_p.name,
             "bpm": bpm,
+            "bpm_efetivo": bpm if bpm is not None else 126.0,
             "camelot": camelot,
+            "camelot_efetivo": camelot if camelot else "8A",
             "energy": energy,
-            "artist": artist
+            "energy_efetivo": energy if energy is not None else 5,
+            "artist": artist,
+            "completo": is_completo,
+            "campos_ausentes": ausentes,
+            "confianca": round(confianca, 2),
+            "status_metadados": "medido" if is_completo else ("parcial" if len(ausentes) < 3 else "desconhecido")
         })
 
     if not candidates:
-        return {"sucesso": False, "erro": "Nenhuma faixa válida encontrada na crate."}
+        msg = "Nenhuma faixa com análise musical completa encontrada." if exclude_incomplete else "Nenhuma faixa válida encontrada na crate."
+        return {"sucesso": False, "erro": msg}
 
     total_needed = min(len(candidates), max(1, int(max_tracks)))
     curated = []
@@ -640,7 +736,7 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
 
     if current is None:
         if profile == "warmup":
-            current = min(available, key=lambda x: x["energy"])
+            current = min(available, key=lambda x: x["energy_efetivo"])
         else:
             current = available[0]
 
@@ -658,19 +754,21 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
         elif profile == "rollercoaster":
             target_energy = 6.0 + 3.0 * math.sin(step * math.pi / 4.0)
         else:
-            target_energy = current["energy"]
+            target_energy = current["energy_efetivo"]
 
         best_cand = None
         best_score = -999.0
 
         for cand in available:
-            harm_score = camelot_compatibility_score(current["camelot"], cand["camelot"])
-            bpm_diff = abs(current["bpm"] - cand["bpm"]) / max(1.0, current["bpm"])
+            harm_score = camelot_compatibility_score(current["camelot_efetivo"], cand["camelot_efetivo"])
+            bpm_diff = abs(current["bpm_efetivo"] - cand["bpm_efetivo"]) / max(1.0, current["bpm_efetivo"])
             bpm_score = max(0.0, 1.0 - (bpm_diff / 0.08))
-            energy_score = max(0.0, 1.0 - (abs(cand["energy"] - target_energy) / 10.0))
+            energy_score = max(0.0, 1.0 - (abs(cand["energy_efetivo"] - target_energy) / 10.0))
             artist_penalty = 0.4 if (current["artist"] and current["artist"] == cand["artist"]) else 0.0
 
-            total_score = (harm_score * 0.45) + (bpm_score * 0.35) + (energy_score * 0.20) - artist_penalty
+            # Pontuação ponderada incluindo confiabilidade dos metadados
+            confidence_weight = cand["confianca"]
+            total_score = ((harm_score * 0.45) + (bpm_score * 0.35) + (energy_score * 0.20) - artist_penalty) * (0.7 + 0.3 * confidence_weight)
             if total_score > best_score:
                 best_score = total_score
                 best_cand = cand
@@ -687,13 +785,47 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
     safe_target = f"[Set] {crate_name}".replace('/', '%%')
     new_crate_path = get_crate_path(subcrates, safe_target)
     final_rel_paths = [c["rel"] for c in curated]
+    operacao_id = str(uuid.uuid4())
 
-    res = write_crate_atomic(new_crate_path, final_rel_paths, header_antigo, outros_blocos)
+    summary_tracks = [
+        {
+            "nome": c["filename"],
+            "caminho_rel": c["rel"],
+            "bpm": c["bpm"],
+            "camelot": c["camelot"],
+            "energy": c["energy"],
+            "confianca": c["confianca"],
+            "status_metadados": c["status_metadados"],
+            "campos_ausentes": c["campos_ausentes"]
+        }
+        for c in curated
+    ]
+
+    # MODO PRÉVIA (DRY RUN)
+    if dry_run:
+        return {
+            "sucesso": True,
+            "dry_run": True,
+            "operacao_id": operacao_id,
+            "crate_alvo": new_crate_path.stem,
+            "caminho_crate": str(new_crate_path),
+            "total_curated": len(curated),
+            "total_origem": len(existentes),
+            "faixas_incompletas": faixas_incompletas,
+            "profile": profile,
+            "mensagem": f"Prévia da crate [{new_crate_path.stem}] calculada com {len(curated)} faixas. Nenhuma alteração gravada.",
+            "curated_tracks": summary_tracks
+        }
+
+    # EXECUÇÃO FÍSICA
+    res = write_crate_atomic(new_crate_path, final_rel_paths, header_antigo, outros_blocos, action_name="ghost_curator")
     if res["sucesso"]:
+        res["operacao_id"] = operacao_id
         res["crate_name"] = new_crate_path.stem
         res["total_curated"] = len(curated)
-        res["mensagem"] = f"Crate curada [{new_crate_path.stem}] criada com {len(curated)} faixas (Perfil: {profile})."
-        res["curated_tracks"] = [{"nome": c["filename"], "bpm": c["bpm"], "camelot": c["camelot"], "energy": c["energy"]} for c in curated]
+        res["faixas_incompletas"] = faixas_incompletas
+        res["mensagem"] = f"Crate curada [{new_crate_path.stem}] gravada com {len(curated)} faixas (Perfil: {profile})."
+        res["curated_tracks"] = summary_tracks
 
     return res
 
@@ -706,6 +838,8 @@ def main():
     parser.add_argument("--target-tag", type=str, default="grouping", choices=["grouping", "comment", "both"],
                         help="Campo onde a Energy será gravada (grouping = TIT1, comment = COMM)")
     parser.add_argument("--curate-set", action="store_true", help="Gera uma crate curada (Ghost Curator)")
+    parser.add_argument("--commit", action="store_true", help="Executa a gravação física (por padrão gera apenas prévia dry-run)")
+    parser.add_argument("--exclude-incomplete", action="store_true", help="Descarta faixas com análise incompleta")
     parser.add_argument("--serato", type=str, default="", help="Diretório _Serato_")
     parser.add_argument("--crate", type=str, default="", help="Nome da Crate para curadoria")
     parser.add_argument("--profile", type=str, default="warmup", choices=["warmup", "peak", "rollercoaster", "harmonic"])
@@ -721,7 +855,8 @@ def main():
             print(json.dumps({"sucesso": False, "erro": "--serato e --crate são obrigatórios para curadoria"}))
             sys.exit(1)
         res = generate_curated_set(args.serato, args.crate, profile=args.profile,
-                                   max_tracks=args.max_tracks, start_track=args.start_track)
+                                   max_tracks=args.max_tracks, start_track=args.start_track,
+                                   dry_run=not args.commit, exclude_incomplete=args.exclude_incomplete)
         print(json.dumps(res, ensure_ascii=False))
         sys.exit(0)
 

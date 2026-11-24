@@ -591,7 +591,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
       isOpen: true,
       title: `Aplicar Smart Fix: ${label}`,
       message: `Deseja aplicar a correção '${label}' em ${targetFiles.length} faixa(s)?\n\nEssa operação possui histórico de Undo e preserva 100% dos seus Hot Cues no Serato.`,
-      confirmText: `Aplicar em ${targetFiles.length} Faixas`,
+      confirmText: 'AJUSTAR',
       variant: 'info',
       onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));
@@ -677,7 +677,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
       isOpen: true,
       title: 'Aplicar Correções Selecionadas',
       message: msg,
-      confirmText: `Aplicar em ${selectedItems.length} Faixas`,
+      confirmText: 'AJUSTAR',
       variant: 'info',
       onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));
@@ -728,7 +728,7 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
       isOpen: true,
       title: renameFilesOnDisk ? '⚡ Higienização Completa (Tags + Renomear no HD)' : '⚡ Higienizar Tags ID3 em Lote',
       message: msg,
-      confirmText: 'Sim, Executar Lote',
+      confirmText: 'AJUSTAR',
       variant: 'warning',
       onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));

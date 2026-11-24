@@ -17,6 +17,7 @@ import uuid
 import shutil
 import sqlite3
 import argparse
+import hashlib
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
@@ -37,6 +38,57 @@ try:
     import mutagen
 except ImportError:
     mutagen = None
+
+
+def calc_quick_hash(filepath: Path) -> str:
+    """
+    Calcula um hash rápido e determinístico de integridade do arquivo de áudio:
+    - Para arquivos <= 1MB: SHA-256 integral do arquivo.
+    - Para arquivos > 1MB: SHA-256 composto pelo tamanho do arquivo em bytes,
+      os primeiros 64 KB, 64 KB da região central e os últimos 64 KB.
+    """
+    if not filepath.is_file():
+        return ""
+    try:
+        size = filepath.stat().st_size
+        hasher = hashlib.sha256()
+        hasher.update(str(size).encode("ascii"))
+        chunk_size = 64 * 1024
+
+        with open(filepath, "rb") as f:
+            if size <= 1024 * 1024:
+                while chunk := f.read(chunk_size):
+                    hasher.update(chunk)
+            else:
+                # Primeiros 64 KB
+                hasher.update(f.read(chunk_size))
+                # Meio 64 KB
+                mid = max(0, (size // 2) - (chunk_size // 2))
+                f.seek(mid)
+                hasher.update(f.read(chunk_size))
+                # Últimos 64 KB
+                f.seek(max(0, size - chunk_size))
+                hasher.update(f.read(chunk_size))
+        return hasher.hexdigest()
+    except Exception:
+        return ""
+
+
+def is_copy_up_to_date(src: Path, dest: Path) -> bool:
+    """
+    Verifica se a cópia no destino já está 100% atualizada comparando
+    existência, tamanho exato em bytes e quick hash de integridade.
+    """
+    if not dest.is_file() or not src.is_file():
+        return False
+    try:
+        src_stat = src.stat()
+        dest_stat = dest.stat()
+        if src_stat.st_size != dest_stat.st_size:
+            return False
+        return calc_quick_hash(src) == calc_quick_hash(dest)
+    except Exception:
+        return False
 
 
 class PioneerUsbExporter:
@@ -176,12 +228,16 @@ class PioneerUsbExporter:
     def export_crate(self, crate_name: str, tracks: List[Dict[str, Any]], copy_audio: bool = True, dry_run: bool = False) -> Dict[str, Any]:
         """
         Exporta uma lista de faixas sob uma Playlist Pioneer, copiando arquivos para
-        o pendrive e convertendo marcadores Serato Markers2 para Cues Pioneer.
+        o pendrive com verificação de integridade e convertendo marcadores Serato Markers2 para Cues Pioneer.
         """
+        operacao_id = str(uuid.uuid4())
         stats = {
+            "sucesso": True,
+            "operacao_id": operacao_id,
             "crate_name": crate_name,
             "total_tracks": len(tracks),
             "copied_tracks": 0,
+            "skipped_up_to_date": 0,
             "cues_converted": 0,
             "total_bytes": 0,
             "errors": []
@@ -234,10 +290,30 @@ class PioneerUsbExporter:
             if copy_audio:
                 try:
                     dest_dir.mkdir(parents=True, exist_ok=True)
-                    if not dest_file.exists() or dest_file.stat().st_size != src_path.stat().st_size:
-                        shutil.copy2(src_path, dest_file)
-                    stats["copied_tracks"] += 1
-                    stats["total_bytes"] += dest_file.stat().st_size
+                    if is_copy_up_to_date(src_path, dest_file):
+                        stats["skipped_up_to_date"] += 1
+                        stats["total_bytes"] += dest_file.stat().st_size
+                    else:
+                        # Cópia atômica via arquivo temporário com validação de hash pós-cópia
+                        tmp_file = dest_dir / f".part_{uuid.uuid4().hex[:8]}_{src_path.name}"
+                        try:
+                            shutil.copy2(src_path, tmp_file)
+                            src_hash = calc_quick_hash(src_path)
+                            tmp_hash = calc_quick_hash(tmp_file)
+                            if src_hash != tmp_hash:
+                                if tmp_file.exists():
+                                    tmp_file.unlink()
+                                raise IOError(f"Falha na validação de integridade pós-cópia para '{src_path.name}'")
+                            os.replace(tmp_file, dest_file)
+                        except Exception:
+                            if tmp_file.exists():
+                                try:
+                                    tmp_file.unlink()
+                                except Exception:
+                                    pass
+                            raise
+                        stats["copied_tracks"] += 1
+                        stats["total_bytes"] += dest_file.stat().st_size
                 except Exception as e:
                     stats["errors"].append(f"Falha ao copiar áudio '{src_path.name}': {e}")
                     continue
@@ -290,6 +366,7 @@ class PioneerUsbExporter:
 
         conn.commit()
         conn.close()
+        stats["sucesso"] = len(stats["errors"]) == 0
         return stats
 
 

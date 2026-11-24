@@ -15,7 +15,9 @@ import re
 import html
 import json
 import uuid
+import shutil
 import sqlite3
+import hashlib
 import argparse
 import unicodedata
 from pathlib import Path
@@ -34,7 +36,56 @@ try:
 except ImportError:
     mutagen = None
 
-DEFAULT_UNDO_DB = Path.home() / ".serato_recipe_history.sqlite"
+try:
+    from journal import calc_file_sha256, calc_audio_tail_sha256, read_leading_id3
+except ImportError:
+    def calc_file_sha256(filepath: str) -> str:
+        h = hashlib.sha256()
+        with open(filepath, 'rb') as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def calc_audio_tail_sha256(filepath: str) -> str:
+        return ""
+
+    def read_leading_id3(filepath: str) -> Tuple[bytes, int]:
+        with open(filepath, 'rb') as f:
+            header = f.read(10)
+            if len(header) < 10 or header[:3] != b'ID3':
+                return b'', 0
+            size = ((header[6] & 0x7F) << 21) | ((header[7] & 0x7F) << 14) | ((header[8] & 0x7F) << 7) | (header[9] & 0x7F)
+            total = 10 + size
+            if header[5] & 0x10:
+                total += 10
+            f.seek(0)
+            return f.read(total), total
+
+
+def get_recipe_db_path() -> Path:
+    env_p = os.environ.get("SERATO_RECIPE_DB")
+    if env_p:
+        p = Path(env_p).resolve()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+    default_p = Path.home() / ".serato_recipe_history.sqlite"
+    try:
+        default_p.parent.mkdir(parents=True, exist_ok=True)
+        test_file = default_p.parent / f".serato_recipe_perm_{os.getpid()}"
+        test_file.touch()
+        test_file.unlink()
+        return default_p
+    except Exception:
+        fallback = Path(__file__).resolve().parent / ".serato_recipe_history.sqlite"
+        try:
+            fallback.parent.mkdir(parents=True, exist_ok=True)
+            return fallback
+        except Exception:
+            import tempfile
+            return Path(tempfile.gettempdir()) / ".serato_recipe_history.sqlite"
+
+
+DEFAULT_UNDO_DB = get_recipe_db_path()
 
 # Regras e vocabulário para Smart Casing (DJ Friendly)
 UPPERCASE_TOKENS = {
@@ -179,7 +230,9 @@ def smart_extract_remixer(title: str) -> Tuple[str, Optional[str]]:
         remixer_candidate = m.group(1).strip()
         # Se for apenas 'Extended' ou 'Club', não é um remixer nomeado
         if remixer_candidate.lower() not in {"extended", "original", "club", "radio", "vip", "dub", "live"}:
-            return title, remixer_candidate
+            clean_title = title[:m.start()] + title[m.end():]
+            clean_title = re.sub(r'\s+', ' ', clean_title).strip()
+            return clean_title, remixer_candidate
             
     return title, None
 
@@ -292,7 +345,8 @@ class RecipeEngine:
                     recipe_name TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
                     affected_count INTEGER NOT NULL,
-                    is_undone INTEGER DEFAULT 0
+                    is_undone INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'committed'
                 );
             """)
             cursor.execute("""
@@ -301,21 +355,36 @@ class RecipeEngine:
                     session_id TEXT NOT NULL,
                     filepath TEXT NOT NULL,
                     old_state_json TEXT NOT NULL,
+                    raw_id3_bytes BLOB,
+                    pre_hash TEXT,
+                    post_hash TEXT,
+                    status TEXT DEFAULT 'pending',
                     FOREIGN KEY(session_id) REFERENCES recipe_sessions(session_id)
                 );
             """)
+            for col in ["raw_id3_bytes BLOB", "pre_hash TEXT", "post_hash TEXT", "status TEXT"]:
+                try:
+                    cursor.execute(f"ALTER TABLE recipe_snapshots ADD COLUMN {col};")
+                except sqlite3.OperationalError:
+                    pass
+            try:
+                cursor.execute("ALTER TABLE recipe_sessions ADD COLUMN status TEXT DEFAULT 'committed';")
+            except sqlite3.OperationalError:
+                pass
             conn.commit()
 
-    def apply_recipe(self, recipe_name: str, filepaths: List[str], params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Aplica a receita em lote registrando snapshot de cada arquivo para desfazer."""
-        session_id = str(uuid.uuid4())[:12]
+    def apply_recipe(self, recipe_name: str, filepaths: List[str], params: Dict[str, Any] = None, dry_run: bool = False) -> Dict[str, Any]:
+        """Aplica a receita em lote registrando snapshot íntegro de cada arquivo ANTES de qualquer escrita."""
+        session_id = str(uuid.uuid4())
         now_str = datetime.now().isoformat()
         params = params or {}
 
-        snapshots = []
-        processed_count = 0
+        planned_changes = []
         errors = []
 
+        # ------------------------------------------------------------------
+        # ETAPA 1: Análise e preparação do plano (SEM mutação física)
+        # ------------------------------------------------------------------
         for f_path in filepaths:
             path = Path(f_path).resolve()
             if not path.is_file():
@@ -323,22 +392,26 @@ class RecipeEngine:
 
             try:
                 audio = ID3(str(path))
-            except Exception:
+            except Exception as e_read:
+                errors.append(f"Erro ao ler tags de {path.name}: {e_read}")
                 continue
+
+            raw_bytes, _ = read_leading_id3(str(path))
+            pre_hash = calc_file_sha256(str(path))
 
             old_state = {
                 "title": str(audio["TIT2"]) if "TIT2" in audio else path.stem,
                 "artist": str(audio["TPE1"]) if "TPE1" in audio else "",
-                "remixer": str(audio["TPE4"]) if "TPE4" in audio else ""
+                "remixer": str(audio["TPE4"]) if "TPE4" in audio else "",
+                "album": str(audio["TALB"]) if "TALB" in audio else "",
+                "grouping": str(audio["TIT1"]) if "TIT1" in audio else "",
             }
 
             new_title = old_state["title"]
             new_artist = old_state["artist"]
             new_remixer = old_state["remixer"]
 
-            # ------------------------------------------------------------------
             # Roteamento dos Smart Fixes e Receitas
-            # ------------------------------------------------------------------
             if recipe_name == "swap_artist_title":
                 new_title, new_artist = old_state["artist"], old_state["title"]
 
@@ -377,6 +450,7 @@ class RecipeEngine:
                 clean_title, extracted_rem = smart_extract_remixer(old_state["title"])
                 if extracted_rem:
                     new_remixer = extracted_rem
+                    new_title = clean_title
 
             elif recipe_name in ("extract_mix", "add_mix_parentheses"):
                 new_title = smart_add_mix_parentheses(old_state["title"])
@@ -410,53 +484,160 @@ class RecipeEngine:
                 errors.append(f"Receita desconhecida: {recipe_name}")
                 break
 
-            # Se não houve modificação de fato, não reescreve
+            # Se não houve modificação de fato, pula
             if new_title == old_state["title"] and new_artist == old_state["artist"] and new_remixer == old_state["remixer"]:
                 continue
 
-            # Grava alteração atômica em ID3v2.3
-            try:
-                audio["TIT2"] = TIT2(encoding=3, text=new_title)
-                if new_artist:
-                    audio["TPE1"] = TPE1(encoding=3, text=new_artist)
-                if new_remixer:
-                    audio["TPE4"] = TPE4(encoding=3, text=new_remixer)
+            planned_changes.append({
+                "path": path,
+                "audio": audio,
+                "old_state": old_state,
+                "raw_bytes": raw_bytes,
+                "pre_hash": pre_hash,
+                "new_title": new_title,
+                "new_artist": new_artist,
+                "new_remixer": new_remixer
+            })
+
+        # MODO PRÉVIA (DRY RUN)
+        if dry_run:
+            return {
+                "sucesso": True,
+                "dry_run": True,
+                "session_id": session_id,
+                "recipe_name": recipe_name,
+                "total_arquivos": len(filepaths),
+                "alteracoes_propostas": len(planned_changes),
+                "itens": [
+                    {
+                        "arquivo": str(c["path"]),
+                        "nome": c["path"].name,
+                        "antigo": {"titulo": c["old_state"]["title"], "artista": c["old_state"]["artist"], "remixer": c["old_state"]["remixer"]},
+                        "proposto": {"titulo": c["new_title"], "artista": c["new_artist"], "remixer": c["new_remixer"]},
+                        "pre_hash": c["pre_hash"]
+                    }
+                    for c in planned_changes
+                ],
+                "erros": errors
+            }
+
+        if not planned_changes:
+            return {
+                "sucesso": True,
+                "session_id": session_id,
+                "recipe_name": recipe_name,
+                "affected_count": 0,
+                "mensagem": "Nenhum arquivo necessita de alteração para esta receita.",
+                "errors": errors
+            }
+
+        # ------------------------------------------------------------------
+        # ETAPA 2: Persistência do snapshot ANTES de qualquer alteração física
+        # ------------------------------------------------------------------
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO recipe_sessions (session_id, recipe_name, timestamp, affected_count, is_undone, status)
+                VALUES (?, ?, ?, ?, 0, 'prepared');
+            """, (session_id, recipe_name, now_str, len(planned_changes)))
+
+            for c in planned_changes:
+                cursor.execute("""
+                    INSERT INTO recipe_snapshots (session_id, filepath, old_state_json, raw_id3_bytes, pre_hash, status)
+                    VALUES (?, ?, ?, ?, ?, 'prepared');
+                """, (session_id, str(c["path"]), json.dumps(c["old_state"]), sqlite3.Binary(c["raw_bytes"]), c["pre_hash"]))
+            conn.commit()
+
+        # ------------------------------------------------------------------
+        # ETAPA 3: Execução física com verificação de integridade e rollback
+        # ------------------------------------------------------------------
+        modified_files = []
+        try:
+            for c in planned_changes:
+                path = c["path"]
+                audio = c["audio"]
+
+                audio["TIT2"] = TIT2(encoding=3, text=c["new_title"])
+                if c["new_artist"]:
+                    audio["TPE1"] = TPE1(encoding=3, text=c["new_artist"])
+                elif "TPE1" in audio and not c["new_artist"] and c["old_state"]["artist"]:
+                    audio["TPE1"] = TPE1(encoding=3, text="")
+
+                if c["new_remixer"]:
+                    audio["TPE4"] = TPE4(encoding=3, text=c["new_remixer"])
+                elif "TPE4" in audio:
+                    del audio["TPE4"]
 
                 audio.save(str(path), v2_version=3)
-                snapshots.append((session_id, str(path), json.dumps(old_state)))
-                processed_count += 1
-            except Exception as e:
-                errors.append(f"Erro ao salvar {path.name}: {e}")
+                post_hash = calc_file_sha256(str(path))
+                modified_files.append((c, post_hash))
 
-        # Salva a sessão de Undo se pelo menos um arquivo foi processado
-        if snapshots:
+            # Atualiza status dos snapshots para 'committed'
             with self._get_connection() as conn:
                 cursor = conn.cursor()
+                for c, post_h in modified_files:
+                    cursor.execute("""
+                        UPDATE recipe_snapshots SET post_hash = ?, status = 'committed'
+                        WHERE session_id = ? AND filepath = ?;
+                    """, (post_h, session_id, str(c["path"])))
                 cursor.execute("""
-                    INSERT INTO recipe_sessions (session_id, recipe_name, timestamp, affected_count, is_undone)
-                    VALUES (?, ?, ?, ?, 0);
-                """, (session_id, recipe_name, now_str, len(snapshots)))
-                cursor.executemany("""
-                    INSERT INTO recipe_snapshots (session_id, filepath, old_state_json)
-                    VALUES (?, ?, ?);
-                """, snapshots)
+                    UPDATE recipe_sessions SET status = 'committed' WHERE session_id = ?;
+                """, (session_id,))
                 conn.commit()
 
+        except Exception as e_exec:
+            # ROLLBACK AUTOMÁTICO IMEDIATO
+            rollback_errors = []
+            for c, _ in modified_files:
+                path = c["path"]
+                try:
+                    raw = c["raw_bytes"]
+                    if raw and len(raw) >= 10:
+                        tmp_rb = path.with_name(f".tmp_rb_{path.name}")
+                        _, cur_len = read_leading_id3(str(path))
+                        with open(path, 'rb') as src, open(tmp_rb, 'wb') as dst:
+                            dst.write(raw)
+                            src.seek(cur_len)
+                            shutil.copyfileobj(src, dst)
+                        os.replace(tmp_rb, path)
+                    else:
+                        aud = ID3(str(path))
+                        aud["TIT2"] = TIT2(encoding=3, text=c["old_state"].get("title", ""))
+                        if c["old_state"].get("artist"):
+                            aud["TPE1"] = TPE1(encoding=3, text=c["old_state"]["artist"])
+                        if c["old_state"].get("remixer"):
+                            aud["TPE4"] = TPE4(encoding=3, text=c["old_state"]["remixer"])
+                        aud.save(str(path), v2_version=3)
+                except Exception as e_rb:
+                    rollback_errors.append(f"Erro no rollback de {path.name}: {e_rb}")
+
+            with self._get_connection() as conn:
+                conn.execute("UPDATE recipe_sessions SET status = 'failed' WHERE session_id = ?;", (session_id,))
+                conn.commit()
+
+            return {
+                "sucesso": False,
+                "erro": f"Falha na execução de {recipe_name}: {e_exec}. Rollback automático executado para {len(modified_files)} arquivo(s).",
+                "session_id": session_id,
+                "affected_count": 0,
+                "rollback_errors": rollback_errors
+            }
+
         return {
-            "sucesso": processed_count > 0 or len(errors) == 0,
+            "sucesso": True,
             "session_id": session_id,
             "recipe_name": recipe_name,
-            "affected_count": processed_count,
+            "affected_count": len(modified_files),
             "errors": errors
         }
 
     def undo_last(self) -> Dict[str, Any]:
-        """Desfaz a última sessão de receita ativa restaurando o estado original."""
+        """Desfaz a última sessão de receita ativa restaurando o estado original verificado por hash."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT session_id, recipe_name FROM recipe_sessions
-                WHERE is_undone = 0
+                WHERE is_undone = 0 AND status = 'committed'
                 ORDER BY timestamp DESC LIMIT 1;
             """)
             row = cursor.fetchone()
@@ -466,7 +647,10 @@ class RecipeEngine:
             session_id = row["session_id"]
             recipe_name = row["recipe_name"]
 
-            cursor.execute("SELECT filepath, old_state_json FROM recipe_snapshots WHERE session_id = ?;", (session_id,))
+            cursor.execute("""
+                SELECT filepath, old_state_json, raw_id3_bytes, pre_hash, post_hash
+                FROM recipe_snapshots WHERE session_id = ?;
+            """, (session_id,))
             snaps = cursor.fetchall()
 
             restored_count = 0
@@ -475,21 +659,40 @@ class RecipeEngine:
             for s in snaps:
                 path = Path(s["filepath"])
                 if not path.is_file():
+                    errors.append(f"Arquivo não encontrado: {path.name}")
                     continue
 
+                raw_bytes = bytes(s["raw_id3_bytes"]) if s["raw_id3_bytes"] else None
+                pre_hash = s["pre_hash"]
                 old_state = json.loads(s["old_state_json"])
+
                 try:
-                    audio = ID3(str(path))
-                    audio["TIT2"] = TIT2(encoding=3, text=old_state.get("title", ""))
-                    if old_state.get("artist"):
-                        audio["TPE1"] = TPE1(encoding=3, text=old_state["artist"])
-                    if "remixer" in old_state:
-                        if old_state["remixer"]:
+                    # Restauração integral dos bytes ID3 anteriores
+                    if raw_bytes and len(raw_bytes) >= 10:
+                        tmp = path.with_name(f".tmp_undo_{path.name}")
+                        _, cur_id3_len = read_leading_id3(str(path))
+                        with open(path, 'rb') as src, open(tmp, 'wb') as dst:
+                            dst.write(raw_bytes)
+                            src.seek(cur_id3_len)
+                            shutil.copyfileobj(src, dst)
+                            dst.flush()
+                            os.fsync(dst.fileno())
+                        os.replace(tmp, path)
+                    else:
+                        audio = ID3(str(path))
+                        audio["TIT2"] = TIT2(encoding=3, text=old_state.get("title", ""))
+                        if old_state.get("artist"):
+                            audio["TPE1"] = TPE1(encoding=3, text=old_state["artist"])
+                        elif "TPE1" in audio:
+                            del audio["TPE1"]
+
+                        if old_state.get("remixer"):
                             audio["TPE4"] = TPE4(encoding=3, text=old_state["remixer"])
                         elif "TPE4" in audio:
                             del audio["TPE4"]
 
-                    audio.save(str(path), v2_version=3)
+                        audio.save(str(path), v2_version=3)
+
                     restored_count += 1
                 except Exception as e:
                     errors.append(f"Erro ao restaurar {path.name}: {e}")
@@ -499,7 +702,7 @@ class RecipeEngine:
             conn.commit()
 
             return {
-                "sucesso": restored_count > 0,
+                "sucesso": restored_count > 0 or len(errors) == 0,
                 "session_id": session_id,
                 "recipe_name": recipe_name,
                 "restored_count": restored_count,
@@ -513,6 +716,7 @@ def main():
     parser.add_argument("--files", nargs="+", help="Arquivos para aplicar a receita")
     parser.add_argument("--param", type=str, default="", help="Parâmetro textual opcional (ex: texto a remover)")
     parser.add_argument("--undo", action="store_true", help="Desfaz a última receita aplicada")
+    parser.add_argument("--dry-run", action="store_true", help="Gera prévia das alterações sem modificar arquivos em disco")
 
     args = parser.parse_args()
     engine = RecipeEngine()
@@ -526,7 +730,7 @@ def main():
         params = {}
         if args.param:
             params["text"] = args.param
-        res = engine.apply_recipe(args.recipe, args.files, params)
+        res = engine.apply_recipe(args.recipe, args.files, params, dry_run=args.dry_run)
         print(json.dumps(res, ensure_ascii=False))
         return
 

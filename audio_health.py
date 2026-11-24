@@ -91,7 +91,10 @@ def get_quarantine_dir(serato_dir_str: str = "", file_path: Path = None) -> Path
         except Exception:
             pass
 
-    QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        QUARANTINE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
     return QUARANTINE_DIR
 FFMPEG_CANDIDATES = [
     "/opt/homebrew/bin/ffmpeg",

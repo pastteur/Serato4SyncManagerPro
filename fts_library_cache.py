@@ -14,6 +14,7 @@ import sys
 import os
 import re
 import json
+import uuid
 import sqlite3
 import unicodedata
 from pathlib import Path
@@ -61,8 +62,11 @@ class FTSLibraryCache:
     """Gerenciador do banco SQLite com índice de busca FTS5 para o acervo de áudio."""
 
     def __init__(self, db_path: Optional[Path] = None):
+        env_cache = os.environ.get("SERATO_FTS_CACHE_PATH") or os.environ.get("SERATO_LIBRARY_CACHE_PATH")
         if db_path:
             self.db_path = Path(db_path).resolve()
+        elif env_cache:
+            self.db_path = Path(env_cache).resolve()
         else:
             try:
                 candidate = DEFAULT_CACHE_PATH.resolve()
@@ -78,6 +82,57 @@ class FTSLibraryCache:
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+
+    def rebuild_database(self) -> bool:
+        """Reconstrói os índices FTS5 e recarrega os dados físicos a partir da tabela tracks."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DROP TRIGGER IF EXISTS tracks_ai;")
+            cursor.execute("DROP TRIGGER IF EXISTS tracks_ad;")
+            cursor.execute("DROP TRIGGER IF EXISTS tracks_au;")
+            cursor.execute("DROP TABLE IF EXISTS tracks_fts;")
+
+            cursor.execute("""
+                CREATE VIRTUAL TABLE tracks_fts USING fts5(
+                    title,
+                    artist,
+                    remix_version,
+                    album,
+                    crate_name,
+                    stem,
+                    filename,
+                    content='tracks',
+                    content_rowid='id',
+                    tokenize = 'unicode61 remove_diacritics 1'
+                );
+            """)
+
+            cursor.execute("""
+                CREATE TRIGGER tracks_ai AFTER INSERT ON tracks BEGIN
+                    INSERT INTO tracks_fts(rowid, title, artist, remix_version, album, crate_name, stem, filename)
+                    VALUES (new.id, new.title, new.artist, new.remix_version, new.album, new.crate_name, new.stem, new.filename);
+                END;
+            """)
+
+            cursor.execute("""
+                CREATE TRIGGER tracks_ad AFTER DELETE ON tracks BEGIN
+                    INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, remix_version, album, crate_name, stem, filename)
+                    VALUES('delete', old.id, old.title, old.artist, old.remix_version, old.album, old.crate_name, old.stem, old.filename);
+                END;
+            """)
+
+            cursor.execute("""
+                CREATE TRIGGER tracks_au AFTER UPDATE ON tracks BEGIN
+                    INSERT INTO tracks_fts(tracks_fts, rowid, title, artist, remix_version, album, crate_name, stem, filename)
+                    VALUES('delete', old.id, old.title, old.artist, old.remix_version, old.album, old.crate_name, old.stem, old.filename);
+                    INSERT INTO tracks_fts(rowid, title, artist, remix_version, album, crate_name, stem, filename)
+                    VALUES (new.id, new.title, new.artist, new.remix_version, new.album, new.crate_name, new.stem, new.filename);
+                END;
+            """)
+
+            cursor.execute("INSERT INTO tracks_fts(tracks_fts) VALUES('rebuild');")
+            conn.commit()
+            return True
 
     def _get_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=15.0)
@@ -157,12 +212,19 @@ class FTSLibraryCache:
             """)
             conn.commit()
 
-    def sync_directory(self, base_dir: Path, tag_extractor=None) -> Dict[str, int]:
+    def sync_directory(self, base_dir: Path, tag_extractor=None) -> Dict[str, Any]:
         """
         Indexa incrementalmente a pasta base de áudios.
         Atualiza apenas arquivos novos ou com mtime modificado.
         """
-        stats = {"scanned": 0, "inserted": 0, "updated": 0, "unchanged": 0, "deleted": 0}
+        stats = {
+            "operacao_id": str(uuid.uuid4()),
+            "scanned": 0,
+            "inserted": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "deleted": 0
+        }
         base_dir = Path(base_dir).resolve()
         if not base_dir.is_dir():
             return stats
@@ -191,7 +253,7 @@ class FTSLibraryCache:
                     if ext not in AUDIO_EXTENSIONS:
                         continue
 
-                    full_path = str(Path(root) / f)
+                    full_path = str((Path(root) / f).resolve())
                     seen_paths.add(full_path)
                     stats["scanned"] += 1
 
@@ -272,6 +334,7 @@ class FTSLibraryCache:
         """
         Executa busca por texto completo via FTS5 usando ranking BM25.
         Trata caracteres especiais para evitar erros de sintaxe FTS.
+        Valida existência física no disco para purgar registros fantasma.
         """
         clean_query = re.sub(r'[^\w\s]', ' ', query_string).strip()
         if not clean_query:
@@ -285,6 +348,7 @@ class FTSLibraryCache:
 
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            fetch_limit = limit * 2
             try:
                 cursor.execute("""
                     SELECT t.*, bm25(tracks_fts) AS rank
@@ -293,8 +357,8 @@ class FTSLibraryCache:
                     WHERE tracks_fts MATCH ?
                     ORDER BY rank
                     LIMIT ?;
-                """, (match_expr, limit))
-                return [dict(r) for r in cursor.fetchall()]
+                """, (match_expr, fetch_limit))
+                raw_results = [dict(r) for r in cursor.fetchall()]
             except sqlite3.OperationalError:
                 # Fallback para busca por tokens simples
                 cursor.execute("""
@@ -303,13 +367,31 @@ class FTSLibraryCache:
                     JOIN tracks t ON t.id = f.rowid
                     WHERE tracks_fts MATCH ?
                     LIMIT ?;
-                """, (clean_query, limit))
-                return [dict(r) for r in cursor.fetchall()]
+                """, (clean_query, fetch_limit))
+                raw_results = [dict(r) for r in cursor.fetchall()]
+
+            valid_results = []
+            dead_ids = []
+            for r in raw_results:
+                fpath = r.get("filepath", "")
+                if fpath and Path(fpath).is_file():
+                    valid_results.append(r)
+                    if len(valid_results) >= limit:
+                        break
+                else:
+                    dead_ids.append(r["id"])
+
+            if dead_ids:
+                cursor.executemany("DELETE FROM tracks WHERE id = ?;", [(did,) for did in dead_ids])
+                conn.commit()
+
+            return valid_results
 
     def find_match_candidates(self, title: str, artist: str = "", limit: int = 25) -> List[Dict[str, Any]]:
         """
         Retorna candidatos do catálogo com altíssima pontuação de relevância
         para cruzamento contra listas externas (Spotify, YouTube, etc.).
+        Filtra arquivos inexistentes fisicamente no disco.
         """
         terms = []
         if title:
@@ -328,6 +410,7 @@ class FTSLibraryCache:
         match_expr = " OR ".join(terms[:8])
         with self._get_connection() as conn:
             cursor = conn.cursor()
+            fetch_limit = limit * 2
             try:
                 cursor.execute("""
                     SELECT t.*, bm25(tracks_fts) AS rank
@@ -336,10 +419,27 @@ class FTSLibraryCache:
                     WHERE tracks_fts MATCH ?
                     ORDER BY rank
                     LIMIT ?;
-                """, (match_expr, limit))
-                return [dict(r) for r in cursor.fetchall()]
+                """, (match_expr, fetch_limit))
+                raw_results = [dict(r) for r in cursor.fetchall()]
             except Exception:
                 return []
+
+            valid_results = []
+            dead_ids = []
+            for r in raw_results:
+                fpath = r.get("filepath", "")
+                if fpath and Path(fpath).is_file():
+                    valid_results.append(r)
+                    if len(valid_results) >= limit:
+                        break
+                else:
+                    dead_ids.append(r["id"])
+
+            if dead_ids:
+                cursor.executemany("DELETE FROM tracks WHERE id = ?;", [(did,) for did in dead_ids])
+                conn.commit()
+
+            return valid_results
 
 
 def main():

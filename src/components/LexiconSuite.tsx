@@ -3,7 +3,7 @@ import {
   Search, HardDrive, Trash2, ShieldAlert, Sparkles, RefreshCw, 
   ArrowRight, CheckCircle2, Music, Radio, Key, Tag, Undo2, 
   Play, Pause, AlertTriangle, Layers, Zap, FolderSearch,
-  Flame, Sliders, Wand2, TrendingUp, BarChart2
+  Flame, Sliders, Wand2, TrendingUp, BarChart2, ShieldCheck, Check
 } from 'lucide-react';
 
 interface LexiconSuiteProps {
@@ -54,6 +54,8 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
   const [targetEnergyTag, setTargetEnergyTag] = useState<'grouping' | 'comment' | 'both'>('grouping');
   const [energyLimit, setEnergyLimit] = useState<number>(50);
   const [energyResult, setEnergyResult] = useState<any | null>(null);
+  const [energyPreview, setEnergyPreview] = useState<any | null>(null);
+  const [isCommittingEnergy, setIsCommittingEnergy] = useState<boolean>(false);
 
   // Estados do Set Curator (Ghost Curator)
   const [curatorCrate, setCuratorCrate] = useState<string>('');
@@ -61,6 +63,9 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
   const [curatorMaxTracks, setCuratorMaxTracks] = useState<number>(20);
   const [isCurating, setIsCurating] = useState<boolean>(false);
   const [curatedResult, setCuratedResult] = useState<any | null>(null);
+  const [curatorPreview, setCuratorPreview] = useState<any | null>(null);
+  const [excludeIncomplete, setExcludeIncomplete] = useState<boolean>(false);
+  const [isCommittingCurator, setIsCommittingCurator] = useState<boolean>(false);
 
   // Listener do Progresso de Energia
   useEffect(() => {
@@ -200,15 +205,41 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
     }
   };
 
-  // Dispara Mapeamento de Energia Acústica
-  const handleAnalyzeEnergy = async () => {
+  // ETAPA 1 e 2: Análise Acústica e Apresentação de Prévia (Sem Gravação)
+  const handleAnalyzeEnergyPreview = async () => {
     if (!isTauri || !mp3Path) {
       alert('Selecione o diretório MP3 Master primeiro.');
       return;
     }
     setIsAnalyzingEnergy(true);
-    setEnergyProgress({ processados: 0, total: energyLimit, percentual: 0, faixa_atual: 'Iniciando análise...' });
-    if (onAddLog) onAddLog(`⚡ Iniciando cálculo de Energy (1-10) em lote (${energyLimit} faixas) -> Destino: ${targetEnergyTag.toUpperCase()}...`);
+    setEnergyProgress({ processados: 0, total: energyLimit, percentual: 0, faixa_atual: 'Analisando áudio...' });
+    if (onAddLog) onAddLog(`⚡ Analisando Energy (1-10) em lote (${energyLimit} faixas) para prévia...`);
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('analyze_energy_batch', {
+        mp3Path,
+        limit: energyLimit,
+        write: false,
+        targetTag: targetEnergyTag
+      });
+      const data = JSON.parse(resJson);
+      setEnergyPreview(data);
+      if (onAddLog) {
+        onAddLog(`🔍 Prévia de Energy gerada: ${data.total || 0} faixas analisadas. Aguardando aprovação explícita.`);
+      }
+    } catch (e: any) {
+      alert(`Erro na análise de Energy: ${e}`);
+    } finally {
+      setIsAnalyzingEnergy(false);
+    }
+  };
+
+  // ETAPA 3 e 4: Aprovação e Execução no Botão AJUSTAR
+  const handleCommitEnergy = async () => {
+    if (!energyPreview || !mp3Path) return;
+    setIsCommittingEnergy(true);
+    if (onAddLog) onAddLog(`✍️ Gravando tags de Energy (${targetEnergyTag.toUpperCase()}) aprovadas pelo usuário...`);
 
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -220,25 +251,26 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
       });
       const data = JSON.parse(resJson);
       setEnergyResult(data);
+      setEnergyPreview(null);
       if (onAddLog) {
-        onAddLog(`✅ Análise de Energy concluída: ${data.gravadas || 0} faixas marcadas com sucesso em ID3v2.3 (${targetEnergyTag}).`);
+        onAddLog(`✅ Mapeamento de Energy gravado com sucesso: ${data.gravadas || 0} faixas marcadas no Serato.`);
       }
-      alert(`Mapeamento de Energia concluído!\n${data.gravadas || 0} faixas atualizadas com Energy no Serato.`);
+      alert(`Mapeamento de Energia concluído!\n${data.gravadas || 0} faixas gravadas com sucesso no Serato.`);
     } catch (e: any) {
-      alert(`Erro na análise de Energy: ${e}`);
+      alert(`Erro ao gravar tags de Energy: ${e}`);
     } finally {
-      setIsAnalyzingEnergy(false);
+      setIsCommittingEnergy(false);
     }
   };
 
-  // Dispara Ghost Curator / Set Curator
-  const handleCurateSet = async () => {
+  // ETAPA 1 e 2: Análise e Prévia do Set Curado (Sem Gravação Física)
+  const handleCurateSetPreview = async () => {
     if (!isTauri || !seratoPath || !curatorCrate.trim()) {
       alert('Selecione a pasta _Serato_ e digite o nome de uma Crate de origem.');
       return;
     }
     setIsCurating(true);
-    if (onAddLog) onAddLog(`🎧 Ghost Curator: Gerando set curado da crate [${curatorCrate}] (Perfil: ${curatorProfile})...`);
+    if (onAddLog) onAddLog(`🎧 Ghost Curator: Gerando prévia do set da crate [${curatorCrate}] (Perfil: ${curatorProfile})...`);
 
     try {
       const { invoke } = await import('@tauri-apps/api/core');
@@ -247,22 +279,58 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
         crateName: curatorCrate.trim(),
         profile: curatorProfile,
         maxTracks: curatorMaxTracks,
-        startTrack: null
+        startTrack: null,
+        commit: false,
+        excludeIncomplete
       });
       const data = JSON.parse(resJson);
       if (data.sucesso) {
-        setCuratedResult(data);
+        setCuratorPreview(data);
         if (onAddLog) {
-          onAddLog(`🎯 Ghost Curator concluído: Nova crate [${data.crate_name}] gravada com ${data.total_curated} faixas harmonizadas!`);
+          onAddLog(`🔍 Ghost Curator: Prévia gerada com ${data.total_curated} faixas harmonizadas (Confiança média: ${Math.round((data.confianca_media || 0) * 100)}%). Aguardando aprovação.`);
         }
-        alert(data.mensagem || 'Crate curada gerada com sucesso no Serato!');
       } else {
-        alert(`Erro na curadoria: ${data.erro || 'Falha ao gerar set'}`);
+        alert(`Erro na curadoria: ${data.erro || 'Falha ao analisar set'}`);
       }
     } catch (e: any) {
       alert(`Erro no Ghost Curator: ${e}`);
     } finally {
       setIsCurating(false);
+    }
+  };
+
+  // ETAPA 3 e 4: Aprovação e Execução no Botão AJUSTAR
+  const handleCommitCuratedSet = async () => {
+    if (!curatorPreview || !seratoPath || !curatorCrate.trim()) return;
+    setIsCommittingCurator(true);
+    if (onAddLog) onAddLog(`💾 Gravando Crate curada aprovada [${curatorPreview.crate_name}] no Serato...`);
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('generate_curated_set', {
+        seratoPath,
+        crateName: curatorCrate.trim(),
+        profile: curatorProfile,
+        maxTracks: curatorMaxTracks,
+        startTrack: null,
+        commit: true,
+        excludeIncomplete
+      });
+      const data = JSON.parse(resJson);
+      if (data.sucesso) {
+        setCuratedResult(data);
+        setCuratorPreview(null);
+        if (onAddLog) {
+          onAddLog(`🎯 Ghost Curator concluído: Crate [${data.crate_name}] gravada fisicamente com sucesso!`);
+        }
+        alert(data.mensagem || 'Crate curada gerada e gravada com sucesso no Serato!');
+      } else {
+        alert(`Erro ao gravar Crate: ${data.erro || 'Falha na gravação'}`);
+      }
+    } catch (e: any) {
+      alert(`Erro ao gravar Ghost Curator: ${e}`);
+    } finally {
+      setIsCommittingCurator(false);
     }
   };
 
@@ -510,12 +578,12 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
             </div>
 
             <button
-              onClick={handleAnalyzeEnergy}
+              onClick={handleAnalyzeEnergyPreview}
               disabled={isAnalyzingEnergy || !mp3Path}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500 hover:bg-rose-400 text-black transition shadow cursor-pointer disabled:opacity-50"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isAnalyzingEnergy ? 'animate-spin' : ''}`} />
-              <span>{isAnalyzingEnergy ? 'Analisando...' : 'Mapear Energia'}</span>
+              <span>{isAnalyzingEnergy ? 'Analisando...' : 'Mapear Energia (Prévia)'}</span>
             </button>
           </div>
 
@@ -590,12 +658,12 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
             </div>
 
             <button
-              onClick={handleCurateSet}
+              onClick={handleCurateSetPreview}
               disabled={isCurating || !seratoPath || !curatorCrate.trim()}
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500 hover:bg-indigo-400 text-white transition shadow cursor-pointer disabled:opacity-50"
             >
               <Sparkles className={`w-3.5 h-3.5 ${isCurating ? 'animate-bounce' : ''}`} />
-              <span>{isCurating ? 'Curando...' : 'Gerar Crate Curada'}</span>
+              <span>{isCurating ? 'Curando...' : 'Gerar Prévia de Crate'}</span>
             </button>
           </div>
 
@@ -643,6 +711,20 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
               </select>
             </div>
 
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800">
+              <span className="text-slate-300">Filtrar Incompletas:</span>
+              <label className="flex items-center gap-2 cursor-pointer text-slate-300 text-[11px]">
+                <input
+                  type="checkbox"
+                  checked={excludeIncomplete}
+                  onChange={(e) => setExcludeIncomplete(e.target.checked)}
+                  disabled={isCurating}
+                  className="rounded bg-slate-800 border-slate-700 text-indigo-500 focus:ring-0"
+                />
+                <span>Excluir faixas sem análise acústica confiável</span>
+              </label>
+            </div>
+
             {curatedResult && (
               <div className="p-2 bg-indigo-950/60 border border-indigo-800 rounded text-[11px] text-indigo-300">
                 ✅ Nova Crate <strong>{curatedResult.crate_name}</strong> gerada no Serato com {curatedResult.total_curated} faixas organizadas!
@@ -652,6 +734,192 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
         </div>
 
       </div>
+
+      {/* Modal de Prévia e Aprovação Obrigatória - Energy Engine */}
+      {energyPreview && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-serato-card border border-serato-cardBorder rounded-2xl max-w-lg w-full p-5 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-800">
+              <div className="p-2 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400">
+                <Flame className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  Prévia de Mapeamento: Energy Engine
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 uppercase">
+                    {targetEnergyTag.toUpperCase()}
+                  </span>
+                </h4>
+                <p className="text-xs text-slate-400 font-mono">
+                  Plano: {energyPreview.operacao_id || 'ANALYSIS-PREVIEW'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl space-y-2 text-xs">
+              <div className="flex items-center justify-between text-slate-300">
+                <span>Total de faixas analisadas:</span>
+                <strong className="text-white font-mono">{energyPreview.total || 0} faixas</strong>
+              </div>
+              <div className="flex items-center justify-between text-slate-300">
+                <span>Coluna de destino no Serato:</span>
+                <strong className="text-rose-400 font-mono">
+                  {targetEnergyTag === 'grouping' ? 'Grouping (TIT1)' : targetEnergyTag === 'comment' ? 'Comment (COMM)' : 'Grouping + Comment'}
+                </strong>
+              </div>
+
+              {energyPreview.resultados && energyPreview.resultados.length > 0 && (
+                <div className="space-y-1 pt-1">
+                  <span className="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">
+                    Amostra de Valores Calculados:
+                  </span>
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800 space-y-1 font-mono text-[11px] text-slate-300 max-h-36 overflow-y-auto">
+                    {energyPreview.resultados.slice(0, 10).map((r: any, idx: number) => (
+                      <div key={idx} className="flex justify-between items-center py-0.5 border-b border-slate-900 last:border-0">
+                        <span className="truncate max-w-[280px]">{idx + 1}. {r.nome}</span>
+                        <span className="px-1.5 py-0.2 rounded bg-rose-950 text-rose-300 border border-rose-800 text-[10px] font-bold">
+                          Energy {r.energy || 5} ({Math.round(r.rms_db || -18)} dB)
+                        </span>
+                      </div>
+                    ))}
+                    {energyPreview.resultados.length > 10 && (
+                      <div className="text-slate-500 italic text-[10px] pt-1">
+                        ... e mais {energyPreview.resultados.length - 10} faixa(s) analisada(s).
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="p-2 bg-emerald-950/40 border border-emerald-800/40 rounded text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>Registrado no Journal de auditoria. Suporta restauração instantânea via botão Undo.</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setEnergyPreview(null)}
+                disabled={isCommittingEnergy}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+              >
+                CANCELAR
+              </button>
+              <button
+                type="button"
+                onClick={handleCommitEnergy}
+                disabled={isCommittingEnergy}
+                className="px-5 py-2 rounded-xl bg-rose-500 hover:bg-rose-400 text-black text-xs font-bold transition shadow-lg shadow-rose-500/20 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <Check className="w-4 h-4" />
+                <span>{isCommittingEnergy ? 'Gravando...' : 'AJUSTAR'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Prévia e Aprovação Obrigatória - Ghost Curator */}
+      {curatorPreview && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-serato-card border border-serato-cardBorder rounded-2xl max-w-xl w-full p-5 space-y-4 shadow-2xl animate-in fade-in zoom-in duration-150">
+            <div className="flex items-center gap-2.5 pb-2 border-b border-slate-800">
+              <div className="p-2 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-indigo-400">
+                <Wand2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  Prévia do Set Curado: {curatorPreview.crate_name}
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 uppercase">
+                    {curatorProfile.toUpperCase()}
+                  </span>
+                </h4>
+                <p className="text-xs text-slate-400 font-mono">
+                  Plano: {curatorPreview.operacao_id || 'CURATOR-PLAN'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl space-y-2.5 text-xs">
+              <div className="grid grid-cols-3 gap-2">
+                <div className="p-2 bg-slate-950 rounded border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400">Total de Faixas</div>
+                  <div className="text-base font-bold text-white font-mono">{curatorPreview.total_curated || 0}</div>
+                </div>
+                <div className="p-2 bg-slate-950 rounded border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400">Confiança Média</div>
+                  <div className="text-base font-bold text-emerald-400 font-mono">
+                    {Math.round((curatorPreview.confianca_media || 0) * 100)}%
+                  </div>
+                </div>
+                <div className="p-2 bg-slate-950 rounded border border-slate-800 text-center">
+                  <div className="text-[10px] text-slate-400">Incompletas / Sem Tom</div>
+                  <div className="text-base font-bold text-amber-400 font-mono">
+                    {curatorPreview.faixas_incompletas || 0}
+                  </div>
+                </div>
+              </div>
+
+              {curatorPreview.sequencia && curatorPreview.sequencia.length > 0 && (
+                <div className="space-y-1 pt-1">
+                  <span className="text-[11px] text-slate-400 uppercase tracking-wider font-semibold">
+                    Sequência Harmônica Proposta:
+                  </span>
+                  <div className="bg-slate-950 p-2 rounded border border-slate-800 font-mono text-[11px] text-slate-300 max-h-40 overflow-y-auto space-y-1">
+                    {curatorPreview.sequencia.map((item: any, idx: number) => (
+                      <div key={idx} className="flex items-center justify-between py-0.5 border-b border-slate-900 last:border-0">
+                        <span className="truncate max-w-[260px] text-slate-200">
+                          {item.posicao || idx + 1}. {item.titulo || item.arquivo}
+                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0 text-[10px]">
+                          <span className="px-1 py-0.2 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
+                            {item.camelot || '?'}
+                          </span>
+                          <span className="px-1 py-0.2 rounded bg-slate-800 text-slate-300 font-bold">
+                            {item.bpm ? Math.round(item.bpm) : '?'} BPM
+                          </span>
+                          <span className="px-1 py-0.2 rounded bg-rose-950 text-rose-300">
+                            E{item.energy || 5}
+                          </span>
+                          <span className={`px-1 py-0.2 rounded ${item.confianca >= 0.8 ? 'text-emerald-400' : item.confianca >= 0.5 ? 'text-amber-400' : 'text-rose-400'}`}>
+                            {Math.round((item.confianca || 0) * 100)}%
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="p-2 bg-emerald-950/40 border border-emerald-800/40 rounded text-[11px] text-emerald-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4 shrink-0" />
+                <span>A Crate física Serato só será gravada no disco após sua autorização explícita.</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setCuratorPreview(null)}
+                disabled={isCommittingCurator}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition cursor-pointer"
+              >
+                CANCELAR
+              </button>
+              <button
+                type="button"
+                onClick={handleCommitCuratedSet}
+                disabled={isCommittingCurator}
+                className="px-5 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold transition shadow-lg shadow-indigo-500/20 cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <Check className="w-4 h-4" />
+                <span>{isCommittingCurator ? 'Gravando Crate...' : 'AJUSTAR'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );
