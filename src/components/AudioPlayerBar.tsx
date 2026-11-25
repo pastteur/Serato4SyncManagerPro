@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, Pause, Volume2, VolumeX, X, Disc, FastForward, Rewind } from 'lucide-react';
+import { shouldIgnorePlayerShortcut } from '../utils/playerShortcuts';
 
 export interface PlayingTrackInfo {
   caminho: string;
@@ -146,9 +147,7 @@ export const AudioPlayerBar: React.FC<AudioPlayerBarProps> = ({ track, onClose, 
     if (!track) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Ignora se estiver digitando em input/textarea ou elemento editável
-      const target = e.target as HTMLElement;
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+      if (shouldIgnorePlayerShortcut(e)) {
         return;
       }
 

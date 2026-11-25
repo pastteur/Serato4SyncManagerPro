@@ -288,28 +288,35 @@ def test_sync_falha_em_crate_preserva_antigos_pref_e_cache(tmp_path, monkeypatch
 def test_sync_falha_exclusao_crate_antigo(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
     mp3_dir, serato_dir, logs_dir = _setup_library(tmp_path, ["01_Alpha"])
-    old_crate = _make_valid_crate(serato_dir / "Subcrates" / "99_Obsoleta.crate", ["Old/Track.mp3"])
+    old_crate_1 = _make_valid_crate(serato_dir / "Subcrates" / "98_Obsoleta1.crate", ["Old/Track1.mp3"])
+    old_crate_2 = _make_valid_crate(serato_dir / "Subcrates" / "99_Obsoleta2.crate", ["Old/Track2.mp3"])
     cache_file = logs_dir / ".serato_sync_cache.json"
 
-    real_unlink = Path.unlink
+    real_replace = os.replace
 
-    def fail_old_unlink(self, *args, **kwargs):
-        if self.name == "99_Obsoleta.crate":
-            raise PermissionError("Locked crate")
-        return real_unlink(self, *args, **kwargs)
+    def fail_second_staging_move(src, dst):
+        if Path(src).name == "99_Obsoleta2.crate" and ".staging_delete_" in str(dst):
+            raise PermissionError("Locked crate 2")
+        return real_replace(src, dst)
 
-    monkeypatch.setattr(Path, "unlink", fail_old_unlink)
+    monkeypatch.setattr(serato_macos_app.os, "replace", fail_second_staging_move)
     ok, resumo = serato_macos_app.sincronizar_biblioteca(
         str(mp3_dir), str(serato_dir), str(logs_dir), export_csv=False
     )
     assert ok is False
-    assert old_crate.exists()
+    assert old_crate_1.exists(), "Primeira crate antiga deve ser restaurada do staging"
+    assert old_crate_2.exists(), "Segunda crate antiga deve permanecer intacta"
+    assert not (serato_dir / "Subcrates" / "01_Alpha.crate").exists(), "Crate nova deve sofrer rollback"
     assert not cache_file.exists()
 
 
 def test_sync_falha_neworder_pref(tmp_path, monkeypatch):
     monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
     mp3_dir, serato_dir, logs_dir = _setup_library(tmp_path, ["01_Alpha"])
+    old_crate = _make_valid_crate(serato_dir / "Subcrates" / "99_Obsoleta.crate", ["Old/Track.mp3"])
+    pref_file = serato_dir / "neworder.pref"
+    pref_orig = b"vrsn\x00\x00\x00\x08\x001\x00.\x000\x000"
+    pref_file.write_bytes(pref_orig)
     cache_file = logs_dir / ".serato_sync_cache.json"
 
     real_replace = os.replace
@@ -324,23 +331,100 @@ def test_sync_falha_neworder_pref(tmp_path, monkeypatch):
         str(mp3_dir), str(serato_dir), str(logs_dir), export_csv=False
     )
     assert ok is False
+    assert old_crate.exists(), "Crate antiga deve ser restaurada do staging se neworder.pref falhar"
+    assert pref_file.read_bytes() == pref_orig
+    assert not (serato_dir / "Subcrates" / "01_Alpha.crate").exists()
     assert not cache_file.exists()
 
 
 def test_sync_falha_atualizacao_cache(tmp_path, monkeypatch):
+    """Simula falha real de escrita DENTRO de salvar_cache() original e valida rollback integral."""
     monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
     mp3_dir, serato_dir, logs_dir = _setup_library(tmp_path, ["01_Alpha"])
+    old_crate = _make_valid_crate(serato_dir / "Subcrates" / "99_Obsoleta.crate", ["Old/Track.mp3"])
+    pref_file = serato_dir / "neworder.pref"
+    pref_orig = b"vrsn\x00\x00\x00\x08\x001\x00.\x000\x000"
+    pref_file.write_bytes(pref_orig)
 
-    monkeypatch.setattr(
-        serato_macos_app,
-        "salvar_cache",
-        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("Cache disk full")),
-    )
+    cache_file = logs_dir / ".serato_sync_cache.json"
+    cache_orig = json.dumps({"_meta": {"lib_path": str(mp3_dir.resolve())}, "crates": {"old": 1}})
+    cache_file.write_text(cache_orig, encoding="utf-8")
+
+    real_replace = os.replace
+
+    def fail_cache_replace(src, dst):
+        if Path(dst).name == ".serato_sync_cache.json":
+            raise OSError("Simulated disk failure inside salvar_cache")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(serato_macos_app.os, "replace", fail_cache_replace)
     ok, resumo = serato_macos_app.sincronizar_biblioteca(
         str(mp3_dir), str(serato_dir), str(logs_dir), export_csv=False
     )
     assert ok is False
     assert resumo["sucesso"] is False
+    assert cache_file.read_text(encoding="utf-8") == cache_orig, "Cache original deve ser preservado"
+    assert pref_file.read_bytes() == pref_orig, "neworder.pref deve ser revertido"
+    assert old_crate.exists(), "Crate antiga deve ser restaurada do staging"
+    assert not (serato_dir / "Subcrates" / "01_Alpha.crate").exists(), "Crate nova deve sofrer rollback"
+
+
+def test_sync_broken_symlink_preservado_em_falha_e_removido_em_sucesso(tmp_path, monkeypatch):
+    monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
+    mp3_dir, serato_dir, logs_dir = _setup_library(tmp_path, ["01_Alpha"])
+    broken_link = mp3_dir / "01_Alpha" / "broken_track.mp3"
+    os.symlink(str(tmp_path / "nao_existe.mp3"), str(broken_link))
+    assert broken_link.is_symlink()
+
+    # 1. Em caso de falha na gravação, o symlink quebrado NÃO pode ser removido antes da confirmação
+    monkeypatch.setattr(
+        crate_ops,
+        "write_crate_atomic",
+        lambda *a, **kw: {"sucesso": False, "rollback_confirmado": True, "erro": "Falha simulada"},
+    )
+    ok_fail, _ = serato_macos_app.sincronizar_biblioteca(
+        str(mp3_dir), str(serato_dir), str(logs_dir), export_csv=False
+    )
+    assert ok_fail is False
+    assert broken_link.is_symlink(), "Symlink quebrado não deve ser removido se a transação falhar"
+
+
+def test_smart_crate_plano_imutavel_previa_e_execucao(tmp_path, monkeypatch):
+    import library_tools
+
+    monkeypatch.setattr(library_tools, "SMART_RULES_PATH", tmp_path / "smart_rules.json")
+    monkeypatch.setattr(library_tools, "library_root_for", lambda _: tmp_path)
+    mp3_dir = tmp_path / "MP3"
+    serato_dir = tmp_path / "_Serato_"
+    (serato_dir / "Subcrates").mkdir(parents=True, exist_ok=True)
+    track1 = _make_audio(mp3_dir / "House" / "track1.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00AUDIO_1")
+
+    # 1. Gera prévia (plano imutável)
+    prev = library_tools.create_smart_crate(str(mp3_dir), str(serato_dir), "MinhaSmart", {}, dry_run=True)
+    assert prev["sucesso"] is True
+    assert prev["total"] == 1
+    plano = prev["plano"]
+    assert plano["caminhos"] == ["MP3/House/track1.mp3"]
+    assert plano["plan_id"]
+    assert plano["plan_hash"]
+
+    # 2. Adiciona uma segunda faixa no disco DEPOIS da prévia — execução com plano deve gravar APENAS a da prévia
+    _make_audio(mp3_dir / "House" / "track2_nova.mp3", b"ID3\x03\x00\x00\x00\x00\x00\x00AUDIO_2")
+    res_exec = library_tools.create_smart_crate(
+        str(mp3_dir), str(serato_dir), "MinhaSmart", {}, dry_run=False, plan=plano
+    )
+    assert res_exec["sucesso"] is True
+    assert res_exec["plan_id"] == plano["plan_id"]
+    crate_path = serato_dir / "Subcrates" / "MinhaSmart.crate"
+    _, tracks, _, _ = crate_ops.parse_crate_binary(crate_path.read_bytes())
+    assert len(tracks) == 1
+
+    # 3. Plano adulterado (regras diferentes do hash) deve ser recusado
+    bad_exec = library_tools.create_smart_crate(
+        str(mp3_dir), str(serato_dir), "MinhaSmart", {"bpm_min": 120}, dry_run=False, plan=plano
+    )
+    assert bad_exec["sucesso"] is False
+    assert "Plano" in bad_exec["erro"]
 
 
 def test_sync_dry_run_nao_altera_filesystem(tmp_path, monkeypatch):
