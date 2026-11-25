@@ -113,6 +113,21 @@ def get_journal_db():
         );
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_crate_ops_path ON crate_operacoes(crate_path);")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sync_operacoes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            iniciado_em TEXT NOT NULL,
+            finalizado_em TEXT,
+            mp3_dir TEXT NOT NULL,
+            serato_dir TEXT NOT NULL,
+            dry_run INTEGER NOT NULL DEFAULT 0,
+            estado TEXT NOT NULL,
+            sucesso INTEGER,
+            fases_json TEXT,
+            erros_json TEXT,
+            detalhes_json TEXT
+        );
+    """)
     # Migração idempotente de colunas se a tabela já existir em versão legada
     for col in ["hash_anterior", "hash_posterior", "audio_tail_hash"]:
         try:
@@ -121,6 +136,69 @@ def get_journal_db():
             pass
     conn.commit()
     return conn
+
+
+def record_sync_start(mp3_dir: str, serato_dir: str, dry_run: bool = False) -> int:
+    """Registra o início de uma operação de sincronização no journal."""
+    conn = get_journal_db()
+    with conn:
+        cur = conn.execute(
+            """INSERT INTO sync_operacoes
+               (iniciado_em, mp3_dir, serato_dir, dry_run, estado, fases_json, erros_json)
+               VALUES (?, ?, ?, ?, 'iniciado', '[]', '[]')""",
+            (datetime.now().isoformat(timespec='seconds'), str(mp3_dir), str(serato_dir), 1 if dry_run else 0)
+        )
+        sync_id = cur.lastrowid
+    conn.close()
+    return sync_id
+
+
+def record_sync_step(sync_id, fase: str, status: str, detalhes: str = None):
+    """Registra a transição/resultado de uma fase da sincronização no journal."""
+    if not sync_id:
+        return
+    conn = get_journal_db()
+    with conn:
+        row = conn.execute("SELECT fases_json FROM sync_operacoes WHERE id = ?", (int(sync_id),)).fetchone()
+        fases = []
+        if row and row[0]:
+            try:
+                fases = json.loads(row[0])
+            except Exception:
+                fases = []
+        fases.append({
+            "timestamp": datetime.now().isoformat(timespec='seconds'),
+            "fase": fase,
+            "status": status,
+            "detalhes": detalhes,
+        })
+        conn.execute(
+            "UPDATE sync_operacoes SET estado = ?, fases_json = ? WHERE id = ?",
+            (f"{fase}:{status}", json.dumps(fases, ensure_ascii=False), int(sync_id))
+        )
+    conn.close()
+
+
+def record_sync_finish(sync_id, sucesso: bool, estado: str, erros: list = None, detalhes: dict = None):
+    """Registra o resultado final e eventuais erros da sincronização no journal."""
+    if not sync_id:
+        return
+    conn = get_journal_db()
+    with conn:
+        conn.execute(
+            """UPDATE sync_operacoes
+               SET finalizado_em = ?, estado = ?, sucesso = ?, erros_json = ?, detalhes_json = ?
+               WHERE id = ?""",
+            (
+                datetime.now().isoformat(timespec='seconds'),
+                estado,
+                1 if sucesso else 0,
+                json.dumps(erros or [], ensure_ascii=False),
+                json.dumps(detalhes or {}, ensure_ascii=False),
+                int(sync_id),
+            )
+        )
+    conn.close()
 
 
 def record_crate_operation(crate_path: str, acao: str, hash_anterior: str = None,

@@ -90,6 +90,88 @@ def read_and_validate_crate(crate_path: Path) -> Tuple[bytes, List[str], List[by
     return header, tracks, outros_blocos
 
 
+def restore_crate_from_backup_atomic(crate_path: Path, backup_path: Path, expected_hash: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Restaura uma crate a partir de seu backup com validação SHA-256 pré e pós-restauração
+    e substituição atômica via arquivo temporário + fsync + os.replace.
+    Preserva sempre o arquivo de backup original.
+    """
+    crate_path = Path(crate_path)
+    backup_path = Path(backup_path)
+
+    if not backup_path.exists():
+        return (
+            False,
+            f"ALERTA CRÍTICO: Backup não encontrado em [{backup_path}]. Recuperação manual necessária."
+        )
+
+    try:
+        if backup_path.stat().st_size < 16:
+            return (
+                False,
+                f"ALERTA CRÍTICO: Backup [{backup_path.name}] está vazio ou truncado. Recuperação manual necessária."
+            )
+
+        bak_hash = calc_crate_sha256(backup_path)
+        if expected_hash and bak_hash != expected_hash:
+            return (
+                False,
+                f"ALERTA CRÍTICO: SHA-256 do backup [{backup_path.name}] diverge do original ({bak_hash} != {expected_hash}). Recuperação manual necessária."
+            )
+
+        bak_bytes = backup_path.read_bytes()
+        val_header, _, _, _ = parse_crate_binary(bak_bytes)
+        if val_header is None:
+            return (
+                False,
+                f"ALERTA CRÍTICO: Estrutura binária do backup [{backup_path.name}] é inválida. Recuperação manual necessária."
+            )
+    except Exception as e_pre:
+        return (
+            False,
+            f"ALERTA CRÍTICO: Falha ao validar backup [{backup_path.name}] antes da restauração: {e_pre}. Recuperação manual necessária."
+        )
+
+    tmp_rb = crate_path.with_name(f".tmp_rb_{crate_path.name}_{uuid.uuid4().hex[:8]}")
+    try:
+        with open(backup_path, 'rb') as src, open(tmp_rb, 'wb') as dst:
+            shutil.copyfileobj(src, dst, 65536)
+            dst.flush()
+            os.fsync(dst.fileno())
+
+        if not tmp_rb.exists() or calc_crate_sha256(tmp_rb) != bak_hash:
+            raise IOError("Hash SHA-256 do arquivo temporário de restauração diverge do backup.")
+
+        os.replace(tmp_rb, crate_path)
+
+        if not crate_path.exists():
+            raise IOError("Arquivo restaurado ausente após substituição atômica.")
+
+        restored_hash = calc_crate_sha256(crate_path)
+        if restored_hash != bak_hash or (expected_hash and restored_hash != expected_hash):
+            raise IOError("SHA-256 do arquivo restaurado diverge do backup após substituição.")
+
+        restored_header, _, _, _ = parse_crate_binary(crate_path.read_bytes())
+        if restored_header is None:
+            raise IOError("Estrutura binária do arquivo restaurado inválida após substituição.")
+
+        return (
+            True,
+            f"Rollback atômico confirmado (SHA-256 verificado; backup preservado em {backup_path.name})."
+        )
+    except Exception as e_rb:
+        if tmp_rb.exists():
+            try:
+                tmp_rb.unlink()
+            except Exception:
+                pass
+        return (
+            False,
+            f"ALERTA CRÍTICO: Falha no rollback atômico de [{crate_path.name}]: {e_rb}. "
+            f"Recuperação manual necessária usando o backup preservado em: {backup_path}"
+        )
+
+
 def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                        header_antigo: Optional[bytes] = None,
                        outros_blocos: Optional[List[bytes]] = None,
@@ -210,22 +292,37 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                 tmp.unlink()
             except Exception:
                 pass
-        rollback_msg = "Rollback executado."
+        rollback_ok = False
+        rollback_msg = "Rollback não aplicável."
         if crate_ja_existia and bak.exists():
-            try:
-                shutil.copy2(bak, crate_path)
-                restored_hash = calc_crate_sha256(crate_path)
-                if orig_hash and restored_hash != orig_hash:
-                    rollback_msg = "ALERTA: Rollback executado, porém SHA-256 restaurado diverge do original."
-            except Exception as e_rb:
-                rollback_msg = f"ALERTA: Falha no rollback ({e_rb})."
-        elif not crate_ja_existia and crate_path.exists():
-            try:
-                crate_path.unlink()
-            except Exception:
-                pass
+            rollback_ok, rollback_msg = restore_crate_from_backup_atomic(
+                crate_path, bak, expected_hash=orig_hash
+            )
+        elif crate_ja_existia and not bak.exists():
+            rollback_ok = False
+            rollback_msg = (
+                f"ALERTA CRÍTICO: Backup [{bak}] ausente para rollback de [{crate_path.name}]. "
+                "Recuperação manual necessária."
+            )
+        elif not crate_ja_existia:
+            if crate_path.exists():
+                try:
+                    crate_path.unlink()
+                    rollback_ok = True
+                    rollback_msg = "Rollback executado: arquivo recém-criado removido."
+                except Exception as e_rm:
+                    rollback_ok = False
+                    rollback_msg = (
+                        f"ALERTA CRÍTICO: Falha ao remover crate recém-criada [{crate_path.name}] "
+                        f"({e_rm}). Recuperação manual necessária."
+                    )
+            else:
+                rollback_ok = True
+                rollback_msg = "Rollback não necessário: arquivo destino não havia sido criado."
         return {
             "sucesso": False,
+            "rollback_confirmado": rollback_ok,
+            "backup": str(bak) if crate_ja_existia else None,
             "erro": f"Falha na gravação/validação da crate [{crate_path.name}]: {e}. {rollback_msg}"
         }
 
@@ -234,6 +331,8 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
         "crate": crate_path.name,
         "caminho": str(crate_path),
         "backup": str(bak) if crate_ja_existia else None,
+        "backup_versionado": str(versioned_bak) if crate_ja_existia and versioned_bak else None,
+        "hash_anterior": orig_hash,
         "sobrescrita": crate_ja_existia,
         "hash": post_hash,
         "total": len(track_rel_list)

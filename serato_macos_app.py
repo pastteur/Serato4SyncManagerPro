@@ -406,6 +406,31 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     varredura_incompleta = False
     planos_gravacao = []
     broken_symlinks = []
+    fases_executadas = []
+    rollback_executado = False
+    estado_parcial = False
+    sync_journal_id = None
+
+    if not dry_run:
+        try:
+            import journal
+            sync_journal_id = journal.record_sync_start(str(path_mp3), str(path_serato), dry_run=False)
+        except Exception as e_j:
+            erros_gravacao.append(f"Falha ao iniciar registro no Journal: {e_j}")
+
+    def _log_fase(fase: str, status: str, detalhes: str = None):
+        fases_executadas.append({"fase": fase, "status": status, "detalhes": detalhes})
+        if not dry_run and sync_journal_id:
+            try:
+                import journal
+                journal.record_sync_step(sync_journal_id, fase, status, detalhes)
+            except Exception as e_js:
+                erros_gravacao.append(f"Falha ao registrar fase '{fase}' no Journal: {e_js}")
+
+    # ==========================================================================
+    # FASE 1: VARREDURA (SOMENTE LEITURA)
+    # ==========================================================================
+    _log_fase("varredura", "iniciada")
 
     is_external = str(path_serato).startswith("/Volumes/")
     if is_external:
@@ -624,25 +649,77 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             })
 
     # ==========================================================================
-    # FASE 2: EXECUÇÃO TRANSACIONAL (SOMENTE APÓS VARREDURA 100% ÍNTEGRA)
+    # FASE 2: PLANEJAMENTO
     # ==========================================================================
+    crates_para_deletar = []
+    crates_novas = []
     if varredura_incompleta:
+        _log_fase("varredura", "falha", f"{len(erros_leitura)} erro(s) de leitura")
+        _log_fase("planejamento", "cancelado", "Varredura incompleta")
         print(
             f"\n🛡️ [PROTEÇÃO DE INTEGRIDADE] Varredura incompleta ({len(erros_leitura)} erro(s)). "
-            "Fase 2 cancelada: nenhuma crate foi modificada ou removida.",
+            "Fases seguintes canceladas: nenhuma crate foi modificada ou removida.",
             flush=True
         )
     else:
-        for sym in broken_symlinks:
-            try:
-                sym.unlink()
-            except OSError:
-                pass
+        _log_fase("varredura", "concluida", f"{total_faixas} faixas mapeadas")
+        crates_para_deletar = [
+            antiga for antiga in sorted(list(crates_fisicas_antigas))
+            if antiga not in crates_processadas_agora
+        ]
+        crates_novas = [
+            nova for nova in sorted(list(crates_processadas_agora))
+            if nova not in crates_fisicas_antigas
+        ]
+        _log_fase(
+            "planejamento",
+            "concluida",
+            f"{len(planos_gravacao)} crate(s) para gravar, {len(crates_para_deletar)} para remover, {len(crates_novas)} nova(s)"
+        )
 
-        if not dry_run and planos_gravacao:
-            from crate_ops import write_crate_atomic
+    # ==========================================================================
+    # FASE 3: VALIDAÇÃO PRÉVIA
+    # ==========================================================================
+    validacao_previa_ok = (not varredura_incompleta) and (not erros_gravacao)
+    if validacao_previa_ok and not dry_run:
+        try:
+            if not crates_dir.exists() or not os.access(str(crates_dir), os.W_OK):
+                raise PermissionError(f"Diretório de crates sem permissão de escrita: {crates_dir}")
+            for plano in planos_gravacao:
+                if not plano.get("nome_crate"):
+                    raise ValueError("Plano de gravação contém crate sem nome.")
+                for tr in plano.get("faixas_finais_ordenadas", []):
+                    if not isinstance(tr, str) or not tr.strip():
+                        raise ValueError(f"Caminho de faixa inválido no plano da crate {plano['nome_crate']}.")
+            _log_fase("validacao_previa", "concluida")
+        except Exception as e_val:
+            validacao_previa_ok = False
+            err_val = f"Falha na validação prévia: {e_val}"
+            erros_gravacao.append(err_val)
+            _log_fase("validacao_previa", "falha", err_val)
+            print(f"\n❌ [VALIDAÇÃO PRÉVIA] {err_val}", file=sys.stderr, flush=True)
+    elif validacao_previa_ok and dry_run:
+        _log_fase("validacao_previa", "simulada")
+    else:
+        _log_fase("validacao_previa", "cancelada")
+
+    # ==========================================================================
+    # FASE 4: GRAVAÇÃO TRANSACIONAL
+    # ==========================================================================
+    crates_gravadas_nesta_sessao = []
+    if validacao_previa_ok:
+        if not dry_run:
+            for sym in broken_symlinks:
+                try:
+                    sym.unlink()
+                except OSError:
+                    pass
+
+        import crate_ops
 
         prefixo_log = "🔍 [ANÁLISE] " if dry_run else ""
+        _log_fase("gravacao", "iniciada" if not dry_run else "simulada")
+
         for plano in planos_gravacao:
             caminho_crate = plano["caminho_crate"]
             nome_crate = plano["nome_crate"]
@@ -672,7 +749,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     print(f"      ... (-{len(faixas_removidas) - 3} outras faixas)", flush=True)
 
             if not dry_run:
-                res = write_crate_atomic(
+                res = crate_ops.write_crate_atomic(
                     caminho_crate,
                     plano["faixas_finais_ordenadas"],
                     header_antigo=plano["header_antigo"],
@@ -681,6 +758,13 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                 )
                 if res.get("sucesso"):
                     total_crates_gravadas += 1
+                    crates_gravadas_nesta_sessao.append({
+                        "caminho_crate": caminho_crate,
+                        "sobrescrita": bool(res.get("sobrescrita")),
+                        "backup": res.get("backup"),
+                        "hash_anterior": res.get("hash_anterior"),
+                        "qtd_esperada": len(plano["faixas_finais_ordenadas"]),
+                    })
                     try:
                         tamanho_gravado = caminho_crate.stat().st_size
                     except OSError:
@@ -697,33 +781,94 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     err_msg = res.get("erro", f"Falha desconhecida ao gravar crate {nome_crate}")
                     erros_gravacao.append(err_msg)
                     print(f"   ❌ Erro ao gravar crate {nome_crate}: {err_msg}", file=sys.stderr, flush=True)
+                    print("   🛑 Interrompendo gravações restantes para preservar integridade transacional.", file=sys.stderr, flush=True)
+                    break
             else:
                 total_crates_gravadas += 1
                 if not faixas_adicionadas and not faixas_removidas:
                     print(f"   🔍 [ANÁLISE] Crate seria atualizada: {nome_exibicao} ({qtd_arquivos} faixas)", flush=True)
 
-    # Auditoria de crates deletadas
-    for antiga in sorted(list(crates_fisicas_antigas)):
-        if antiga not in crates_processadas_agora:
-            if varredura_incompleta:
-                print(f"   🛡️ [PROTEÇÃO] Crate física '{antiga}' preservada: varredura do scanner foi parcial.", flush=True)
-                continue
+        if not dry_run and erros_gravacao:
+            _log_fase("gravacao", "falha", "; ".join(erros_gravacao))
+        elif not dry_run:
+            _log_fase("gravacao", "concluida", f"{total_crates_gravadas} crate(s) gravada(s)")
 
-            if not dry_run:
+    # ==========================================================================
+    # FASE 5: VERIFICAÇÃO, EXCLUSÃO DE ANTIGAS E neworder.pref
+    # ==========================================================================
+    if not dry_run and not varredura_incompleta and not erros_gravacao:
+        # 5.1 Verificação pós-gravação de todas as crates gravadas nesta sessão
+        for item_grav in crates_gravadas_nesta_sessao:
+            c_path = item_grav["caminho_crate"]
+            try:
+                if not c_path.exists() or c_path.stat().st_size < 16:
+                    raise IOError(f"Crate gravada ausente ou truncada: {c_path.name}")
+                v_hdr, v_tracks, _, _ = crate_ops.parse_crate_binary(c_path.read_bytes())
+                if v_hdr is None or len(v_tracks) != item_grav["qtd_esperada"]:
+                    raise IOError(f"Divergência estrutural pós-gravação em {c_path.name}")
+            except Exception as e_ver:
+                erros_gravacao.append(f"Falha na verificação pós-gravação: {e_ver}")
+                break
+
+        if erros_gravacao:
+            _log_fase("verificacao", "falha", "; ".join(erros_gravacao))
+        else:
+            _log_fase("verificacao", "concluida")
+
+    # Rollback de sessão se houve falha na gravação ou verificação
+    if not dry_run and erros_gravacao and crates_gravadas_nesta_sessao:
+        rollback_falhas = []
+        for item_grav in reversed(crates_gravadas_nesta_sessao):
+            c_path = item_grav["caminho_crate"]
+            if item_grav["sobrescrita"] and item_grav.get("backup"):
+                rb_ok, rb_msg = crate_ops.restore_crate_from_backup_atomic(
+                    c_path,
+                    Path(item_grav["backup"]),
+                    expected_hash=item_grav.get("hash_anterior"),
+                )
+                if not rb_ok:
+                    rollback_falhas.append(rb_msg)
+            elif not item_grav["sobrescrita"] and c_path.exists():
                 try:
-                    (crates_dir / antiga).unlink()
-                except Exception:
-                    pass
-            nome_amigavel = antiga.replace(".crate", "").replace("%%", " -> ")
-            msg_del = f"🚨 Crate COMPLETA Deletada do HD: [{nome_amigavel}]"
-            if dry_run:
-                msg_del = f"🔍 [ANÁLISE] {msg_del}"
-            print(f"   {msg_del}", flush=True)
-            movimentacoes_log.append(msg_del)
+                    c_path.unlink()
+                except Exception as e_unlink:
+                    rollback_falhas.append(f"Falha ao remover crate recém-criada {c_path.name}: {e_unlink}")
+        rollback_executado = True
+        if rollback_falhas:
+            estado_parcial = True
+            erros_gravacao.extend(rollback_falhas)
+            _log_fase("rollback_sessao", "parcial", "; ".join(rollback_falhas))
+        else:
+            _log_fase("rollback_sessao", "concluido", f"{len(crates_gravadas_nesta_sessao)} crate(s) revertida(s)")
 
-    # Crates novas criadas
-    for nova in sorted(list(crates_processadas_agora)):
-        if nova not in crates_fisicas_antigas:
+    # 5.2 Auditoria / Exclusão de crates antigas (somente se ZERO erros até aqui)
+    for antiga in crates_para_deletar:
+        if varredura_incompleta:
+            print(f"   🛡️ [PROTEÇÃO] Crate física '{antiga}' preservada: varredura do scanner foi parcial.", flush=True)
+            continue
+        if erros_gravacao:
+            print(f"   🛡️ [PROTEÇÃO] Crate física '{antiga}' preservada devido a falhas na gravação.", flush=True)
+            continue
+
+        if not dry_run:
+            try:
+                (crates_dir / antiga).unlink()
+            except Exception as e_del:
+                err_del = f"Falha ao excluir crate antiga '{antiga}': {e_del}"
+                erros_gravacao.append(err_del)
+                estado_parcial = True
+                print(f"   ❌ {err_del}", file=sys.stderr, flush=True)
+                continue
+        nome_amigavel = antiga.replace(".crate", "").replace("%%", " -> ")
+        msg_del = f"🚨 Crate COMPLETA Deletada do HD: [{nome_amigavel}]"
+        if dry_run:
+            msg_del = f"🔍 [ANÁLISE] {msg_del}"
+        print(f"   {msg_del}", flush=True)
+        movimentacoes_log.append(msg_del)
+
+    # Crates novas criadas (log informativo; em erro de gravação não reporta criação concluída)
+    if not erros_gravacao:
+        for nova in crates_novas:
             nome_amigavel = nova.replace(".crate", "").replace("%%", " -> ")
             msg_new = f"📂 Nova Crate COMPLETA Criada: [{nome_amigavel}]"
             if dry_run:
@@ -768,7 +913,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
         if item not in lista_pref_final:
             lista_pref_final.append(item)
 
-    if not dry_run and not varredura_incompleta:
+    if not dry_run and not varredura_incompleta and not erros_gravacao:
         blocos_nior = []
         for item in lista_pref_final:
             item_limpo = item.replace("[", "").replace("]", "").replace("'", "").replace('"', "")
@@ -787,30 +932,51 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                 pass
 
         if pref_alterado:
-            tmp_pref = neworder_file.with_suffix('.tmp')
+            tmp_pref = neworder_file.with_name(f".tmp_neworder_{os.getpid()}.pref")
             try:
                 with open(tmp_pref, 'wb') as f:
                     f.write(novo_conteudo_pref)
                     f.flush()
                     os.fsync(f.fileno())
-                shutil.move(tmp_pref, neworder_file)
+                os.replace(tmp_pref, neworder_file)
                 print("   ✓ neworder.pref atualizado com preservação da organização existente.", flush=True)
             except Exception as e:
-                print(f"   ❌ Erro ao atualizar neworder.pref: {e}", file=sys.stderr, flush=True)
+                if tmp_pref.exists():
+                    try:
+                        tmp_pref.unlink()
+                    except Exception:
+                        pass
+                err_pref = f"Erro ao atualizar neworder.pref: {e}"
+                erros_gravacao.append(err_pref)
+                estado_parcial = True
+                print(f"   ❌ {err_pref}", file=sys.stderr, flush=True)
         else:
             print("   🔒 neworder.pref inalterado (HD protegido contra escrita redundante).", flush=True)
 
-        # Salva cache somente se a varredura for completa e sem erros
-        salvar_cache(cache_file, novo_cache, lib_path=str(path_mp3))
+        # Salva cache somente se a varredura E todas as gravações forem 100% íntegras
+        if not erros_gravacao:
+            try:
+                salvar_cache(cache_file, novo_cache, lib_path=str(path_mp3))
+            except Exception as e_cache:
+                erros_gravacao.append(f"Erro ao atualizar cache de sincronização: {e_cache}")
+                estado_parcial = True
+                print(f"   ❌ Erro ao atualizar cache: {e_cache}", file=sys.stderr, flush=True)
     else:
         if dry_run:
             print("   🔍 [MODO ANÁLISE] neworder.pref e cache não foram alterados (somente leitura).", flush=True)
         elif varredura_incompleta:
             print("   🛡️ [PROTEÇÃO] neworder.pref e cache não atualizados devido a falhas parciais na varredura.", flush=True)
+        elif erros_gravacao:
+            print("   🛡️ [PROTEÇÃO] neworder.pref e cache preservados sem alteração devido a erros de gravação.", flush=True)
 
-    # EXPORTAÇÃO CSV DE DUPLICADOS (Somente fora do dry_run)
+    # ==========================================================================
+    # FASE 6: FINALIZAÇÃO
+    # ==========================================================================
+    operacao_ok = (not varredura_incompleta) and (not erros_gravacao)
+
+    # EXPORTAÇÃO CSV DE DUPLICADOS (Somente fora do dry_run e quando operacao_ok)
     csv_gerado_path = None
-    if export_csv and relatorio_duplicados and not dry_run:
+    if export_csv and relatorio_duplicados and not dry_run and operacao_ok:
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         csv_file = path_logs / f"relatorio_duplicados_{ts}.csv"
         try:
@@ -833,6 +999,12 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     if varredura_incompleta:
         print(f"   ⚠️ ESTADO: PARCIAL COM {len(erros_leitura)} ERROS DE LEITURA.", flush=True)
         print("   🔒 Gravações destrutivas foram bloqueadas preventivamente para evitar exclusões indevidas.", flush=True)
+    elif erros_gravacao:
+        print(f"   ❌ ESTADO: FALHA NA SINCRONIZAÇÃO ({len(erros_gravacao)} erro(s) crítico(s)).", flush=True)
+        if rollback_executado and not estado_parcial:
+            print("   ↩️ Rollback das crates alteradas nesta sessão foi confirmado.", flush=True)
+        elif estado_parcial:
+            print("   ⚠️ ATENÇÃO: Estado parcial detectado. Verifique o Journal e os backups (.bak) antes de prosseguir.", flush=True)
     elif total_crates_gravadas == 0 and crates_inalteradas > 0 and not movimentacoes_log:
         print("   ℹ️  Nenhum arquivo ou pasta foi alterado desde o último sync.", flush=True)
         print("   🔒 HD protegido contra escritas desnecessárias.", flush=True)
@@ -844,15 +1016,43 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
 
     print(f"   📂 Total de {total_faixas} faixa(s) mapeada(s)!", flush=True)
     if dry_run:
-        print("🔍 Pré-avaliação concluída com sucesso! Nenhuma alteração física realizada.\n", flush=True)
+        if operacao_ok:
+            print("🔍 Pré-avaliação concluída com sucesso! Nenhuma alteração física realizada.\n", flush=True)
+        else:
+            print("⚠️ Pré-avaliação concluída com erros de leitura. Nenhuma alteração física realizada.\n", flush=True)
     else:
-        print("🎯 Sincronização concluída com sucesso! Pode abrir o Serato DJ Pro.\n", flush=True)
+        if operacao_ok:
+            print("🎯 Sincronização concluída com sucesso! Pode abrir o Serato DJ Pro.\n", flush=True)
+        else:
+            print("❌ Sincronização NÃO foi concluída devido a erros críticos. Nenhuma alteração final foi confirmada.\n", flush=True)
 
-    operacao_ok = (not varredura_incompleta) and (not erros_gravacao)
+    estado_final = "completo" if operacao_ok else ("estado_parcial" if estado_parcial else "falha")
+    _log_fase("finalizacao", "concluida" if operacao_ok else "falha", estado_final)
+
+    if not dry_run and sync_journal_id:
+        try:
+            import journal
+            journal.record_sync_finish(
+                sync_journal_id,
+                sucesso=operacao_ok,
+                estado=estado_final,
+                erros=erros_leitura + erros_gravacao,
+                detalhes={
+                    "total_faixas": total_faixas,
+                    "crates_gravadas": total_crates_gravadas,
+                    "rollback_executado": rollback_executado,
+                    "estado_parcial": estado_parcial,
+                },
+            )
+        except Exception:
+            pass
 
     resumo_dados = {
         "sucesso": operacao_ok,
         "status_analise": "parcial_com_erros" if not operacao_ok else "completo",
+        "estado_parcial": estado_parcial,
+        "rollback_executado": rollback_executado,
+        "fases": fases_executadas,
         "erros_leitura": erros_leitura,
         "erros_gravacao": erros_gravacao,
         "dry_run": dry_run,
