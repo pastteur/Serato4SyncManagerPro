@@ -3579,6 +3579,8 @@ mod commands {
         limit: usize,
         write: bool,
         target_tag: String,
+        serato_path: Option<String>,
+        crate_name: Option<String>,
     ) -> Result<String, String> {
         let _guard = if write {
             Some(bloqueio_serato_e_concorrencia(Some(&app), "gravar Energy nas tags")?)
@@ -3592,6 +3594,12 @@ mod commands {
         cmd.arg(&script).arg("--energy-batch").arg(&mp3_path);
         cmd.arg("--limit").arg(limit.to_string());
         cmd.arg("--target-tag").arg(target_tag);
+        if let (Some(sp), Some(cn)) = (serato_path, crate_name) {
+            if !sp.trim().is_empty() && !cn.trim().is_empty() {
+                cmd.arg("--serato").arg(sp.trim());
+                cmd.arg("--crate").arg(cn.trim());
+            }
+        }
         if write {
             cmd.arg("--write");
         }

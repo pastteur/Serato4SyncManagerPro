@@ -440,17 +440,36 @@ def write_energy_tag(filepath, energy: int, target_tag: str = "grouping", overwr
         }
 
 
-def analyze_energy_batch(folder, limit=50, write=True, target_tag="grouping", emit=True):
-    """Analisa e opcionalmente grava Energy para lote de arquivos."""
-    root = Path(os.path.expanduser(folder))
+def analyze_energy_batch(folder, limit=50, write=True, target_tag="grouping", emit=True,
+                         serato_dir="", crate_name=""):
+    """Analisa e opcionalmente grava Energy para lote de arquivos (biblioteca ou crate específica)."""
     files = []
-    for dirpath, dirnames, filenames in os.walk(str(root)):
-        dirnames[:] = [d for d in dirnames if not d.startswith('.')]
-        for f in filenames:
-            if f.startswith('.') or Path(f).suffix.lower() != ".mp3":
-                continue
-            files.append(Path(dirpath) / f)
-    files.sort()
+    if serato_dir and crate_name:
+        from crate_ops import get_crate_path, library_root_for
+        from serato_macos_app import parse_crate_binary
+        serato = Path(os.path.expanduser(str(serato_dir))).resolve()
+        crate_path = get_crate_path(serato / "Subcrates", crate_name)
+        if not crate_path.exists():
+            err = {"tipo": "fim", "sucesso": False, "total": 0, "analisadas": 0, "gravadas": 0,
+                   "erros": 1, "resultados": [], "erro": f"Crate não encontrada: {crate_name}"}
+            if emit:
+                print(json.dumps(err, ensure_ascii=False), flush=True)
+            return err
+        _, rel_paths, _, _ = parse_crate_binary(crate_path.read_bytes())
+        lib_root = library_root_for(serato)
+        for rel in rel_paths:
+            p = lib_root / rel
+            if p.is_file() and p.suffix.lower() == ".mp3":
+                files.append(p)
+    else:
+        root = Path(os.path.expanduser(folder))
+        for dirpath, dirnames, filenames in os.walk(str(root)):
+            dirnames[:] = [d for d in dirnames if not d.startswith('.')]
+            for f in filenames:
+                if f.startswith('.') or Path(f).suffix.lower() != ".mp3":
+                    continue
+                files.append(Path(dirpath) / f)
+        files.sort()
 
     if limit and int(limit) > 0:
         files = files[: int(limit)]
@@ -862,7 +881,8 @@ def main():
 
     if args.energy_batch:
         final = analyze_energy_batch(args.energy_batch, limit=args.limit, write=args.write,
-                                     target_tag=args.target_tag, emit=True)
+                                     target_tag=args.target_tag, emit=True,
+                                     serato_dir=args.serato, crate_name=args.crate)
         sys.exit(0)
 
     if args.analyze:

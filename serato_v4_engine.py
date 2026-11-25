@@ -47,10 +47,35 @@ class SeratoV4Engine:
                 candidates.append(ext_app_sup)
 
             selected_dir = None
+            # Prioridade 1: pasta com master.sqlite ou root.sqlite (banco principal v4)
             for c in candidates:
-                if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite") or self._safe_exists(c / "location.sqlite"):
+                if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite"):
                     selected_dir = c
                     break
+
+            # Prioridade 2: se foi passada uma pasta _Serato_ (que só tem .crates ou location.sqlite),
+            # o Serato DJ Pro 4 armazena master.sqlite/root.sqlite no Application Support do usuário
+            if not selected_dir and (cand.name == "_Serato_" or self._safe_exists(cand / "Subcrates")):
+                sys_candidates = []
+                if sys.platform == "darwin":
+                    sys_candidates.extend([
+                        DEFAULT_MACOS_SERATO_V4,
+                        Path.home() / "Library" / "Application Support" / "Serato" / "Library",
+                        Path.home() / "Library" / "Application Support" / "Serato"
+                    ])
+                elif sys.platform == "win32" and DEFAULT_WIN_SERATO_V4:
+                    sys_candidates.append(DEFAULT_WIN_SERATO_V4)
+                for c in sys_candidates:
+                    if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite"):
+                        selected_dir = c
+                        break
+
+            # Prioridade 3: fallback para diretórios que contenham apenas location.sqlite (ex: testes isolados)
+            if not selected_dir:
+                for c in candidates:
+                    if self._safe_exists(c / "location.sqlite"):
+                        selected_dir = c
+                        break
 
             self.library_dir = selected_dir if selected_dir else (cand / "Library" if self._safe_exists(cand / "Library") else cand)
         else:
@@ -169,8 +194,16 @@ class SeratoV4Engine:
             try:
                 cursor.execute("SELECT uuid FROM serato_db LIMIT 1;")
                 uuid_row = cursor.fetchone()
-                if uuid_row:
-                    report["db_uuid"] = str(uuid_row[0])
+                if uuid_row and uuid_row[0] is not None:
+                    raw_uuid = uuid_row[0]
+                    if isinstance(raw_uuid, (bytes, bytearray)):
+                        if len(raw_uuid) == 16:
+                            import uuid as _uuid
+                            report["db_uuid"] = str(_uuid.UUID(bytes=bytes(raw_uuid)))
+                        else:
+                            report["db_uuid"] = bytes(raw_uuid).hex()
+                    else:
+                        report["db_uuid"] = str(raw_uuid)
             except sqlite3.OperationalError:
                 # Tabela pode ter outro nome ou estar em root.sqlite
                 pass

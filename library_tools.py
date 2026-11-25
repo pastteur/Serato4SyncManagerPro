@@ -191,15 +191,34 @@ def read_track_meta(filepath):
     tags = audio.tags
     if tags is not None:
         try:
+            bpm_raw = None
             if "TBPM" in tags:
-                bpm_txt = str(tags["TBPM"]).split(".")[0].strip()
-                if bpm_txt.isdigit() and int(bpm_txt) > 0:
-                    meta["bpm"] = int(bpm_txt)
+                bpm_raw = str(tags["TBPM"])
+            elif hasattr(tags, "get") and tags.get("BPM"):
+                v = tags.get("BPM")
+                bpm_raw = str(v[0] if isinstance(v, (list, tuple)) else v)
+            elif hasattr(tags, "get") and tags.get("tmpo"):
+                v = tags.get("tmpo")
+                bpm_raw = str(v[0] if isinstance(v, (list, tuple)) else v)
+            if bpm_raw:
+                bpm_clean = bpm_raw.replace(",", ".").strip()
+                bpm_num = float(bpm_clean)
+                if bpm_num > 0:
+                    meta["bpm"] = int(round(bpm_num))
         except Exception:
             pass
         try:
+            key_raw = None
             if "TKEY" in tags:
-                meta["camelot"] = _normalize_key_to_camelot(str(tags["TKEY"]))
+                key_raw = str(tags["TKEY"])
+            elif hasattr(tags, "get"):
+                for k_field in ("INITIALKEY", "KEY", "initialkey", "key"):
+                    if tags.get(k_field):
+                        v = tags.get(k_field)
+                        key_raw = str(v[0] if isinstance(v, (list, tuple)) else v)
+                        break
+            if key_raw:
+                meta["camelot"] = _normalize_key_to_camelot(key_raw)
         except Exception:
             pass
         try:
@@ -216,16 +235,66 @@ def _normalize_key_to_camelot(text):
     t = (text or "").strip()
     if not t:
         return ""
-    if re.fullmatch(r"\d{1,2}[AB]", t.upper()):
-        return t.upper()
-    return _NAME_TO_CAMELOT_CODE.get(t.lower(), "")
+    u = t.upper().strip()
+    # Camelot: 1A..12B ou 01A..09B
+    m_cam = re.fullmatch(r"0?(\d{1,2}[AB])", u)
+    if m_cam:
+        code = m_cam.group(1)
+        num = int(code[:-1])
+        if 1 <= num <= 12:
+            return code
+    # OpenKey: 1d..12d (major = B) / 1m..12m (minor = A)
+    m_ok = re.fullmatch(r"0?(\d{1,2})([DM])", u)
+    if m_ok:
+        num = int(m_ok.group(1))
+        mode_ok = m_ok.group(2)
+        if 1 <= num <= 12:
+            # OpenKey 1d = Camelot 8B (offset +7 mod 12)
+            cam_num = ((num + 6) % 12) + 1
+            return f"{cam_num}{'B' if mode_ok == 'D' else 'A'}"
+    # Notação musical padrão (ex: C, Am, C#m, Db, F#m, Bb, Eb, etc.)
+    if t.lower() in _NAME_TO_CAMELOT_CODE:
+        return _NAME_TO_CAMELOT_CODE[t.lower()]
+    return ""
 
 
 _NAME_TO_CAMELOT_CODE = {}
+_ENHARMONICS_MAJOR = {
+    0: ["c", "c major", "cmaj", "b#"],
+    1: ["c#", "db", "c# major", "db major", "c#maj", "dbmaj"],
+    2: ["d", "d major", "dmaj"],
+    3: ["d#", "eb", "d# major", "eb major", "d#maj", "ebmaj"],
+    4: ["e", "e major", "emaj", "fb"],
+    5: ["f", "f major", "fmaj", "e#"],
+    6: ["f#", "gb", "f# major", "gb major", "f#maj", "gbmaj"],
+    7: ["g", "g major", "gmaj"],
+    8: ["g#", "ab", "g# major", "ab major", "g#maj", "abmaj"],
+    9: ["a", "a major", "amaj"],
+    10: ["a#", "bb", "a# major", "bb major", "a#maj", "bbmaj"],
+    11: ["b", "b major", "bmaj", "cb"],
+}
+_ENHARMONICS_MINOR = {
+    0: ["cm", "c minor", "cmin", "b#m"],
+    1: ["c#m", "dbm", "c# minor", "db minor", "c#min", "dbmin"],
+    2: ["dm", "d minor", "dmin"],
+    3: ["d#m", "ebm", "d# minor", "eb minor", "d#min", "ebmin"],
+    4: ["em", "e minor", "emin", "fbm"],
+    5: ["fm", "f minor", "fmin", "e#m"],
+    6: ["f#m", "gbm", "f# minor", "gb minor", "f#min", "gbmin"],
+    7: ["gm", "g minor", "gmin"],
+    8: ["g#m", "abm", "g# minor", "ab minor", "g#min", "abmin"],
+    9: ["am", "a minor", "amin"],
+    10: ["a#m", "bbm", "a# minor", "bb minor", "a#min", "bbmin"],
+    11: ["bm", "b minor", "bmin", "cbm"],
+}
 for _t, _c in CAMELOT_MAJOR.items():
     _NAME_TO_CAMELOT_CODE["%s major" % PITCH_NAMES[_t].lower()] = _c
+    for _alias in _ENHARMONICS_MAJOR.get(_t, []):
+        _NAME_TO_CAMELOT_CODE[_alias] = _c
 for _t, _c in CAMELOT_MINOR.items():
     _NAME_TO_CAMELOT_CODE["%s minor" % PITCH_NAMES[_t].lower()] = _c
+    for _alias in _ENHARMONICS_MINOR.get(_t, []):
+        _NAME_TO_CAMELOT_CODE[_alias] = _c
 
 
 # ------------------------------------------------------------------------------

@@ -7,9 +7,16 @@ import {
 } from 'lucide-react';
 import { OrphanFilesModal } from './OrphanFilesModal';
 
+interface AvailableCrateOption {
+  nome_crate: string;
+  nome_exibicao: string;
+  total_faixas: number;
+}
+
 interface LexiconSuiteProps {
   mp3Path?: string;
   seratoPath?: string;
+  availableCrates?: AvailableCrateOption[];
   onPlayTrack?: (track: { url: string; nome: string; artista?: string }) => void;
   onOpenFileInFinder?: (filePath: string) => void;
   onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
@@ -20,6 +27,7 @@ interface LexiconSuiteProps {
 export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
   mp3Path,
   seratoPath,
+  availableCrates = [],
   onPlayTrack,
   onOpenFileInFinder,
   onMoveToTrash,
@@ -59,9 +67,16 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
   } | null>(null);
   const [targetEnergyTag, setTargetEnergyTag] = useState<'grouping' | 'comment' | 'both'>('grouping');
   const [energyLimit, setEnergyLimit] = useState<number>(50);
+  const [energyCrate, setEnergyCrate] = useState<string>('');
   const [energyResult, setEnergyResult] = useState<any | null>(null);
   const [energyPreview, setEnergyPreview] = useState<any | null>(null);
   const [isCommittingEnergy, setIsCommittingEnergy] = useState<boolean>(false);
+
+  const sortedCrates = React.useMemo(() => {
+    return [...availableCrates].sort((a, b) =>
+      (a.nome_exibicao || a.nome_crate).localeCompare(b.nome_exibicao || b.nome_crate, undefined, { numeric: true })
+    );
+  }, [availableCrates]);
 
   // Estados do Set Curator (Ghost Curator)
   const [curatorCrate, setCuratorCrate] = useState<string>('');
@@ -227,7 +242,9 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
         mp3Path,
         limit: energyLimit,
         write: false,
-        targetTag: targetEnergyTag
+        targetTag: targetEnergyTag,
+        seratoPath: energyCrate && seratoPath ? seratoPath : null,
+        crateName: energyCrate || null
       });
       const data = JSON.parse(resJson);
       setEnergyPreview(data);
@@ -253,7 +270,9 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
         mp3Path,
         limit: energyLimit,
         write: true,
-        targetTag: targetEnergyTag
+        targetTag: targetEnergyTag,
+        seratoPath: energyCrate && seratoPath ? seratoPath : null,
+        crateName: energyCrate || null
       });
       const data = JSON.parse(resJson);
       setEnergyResult(data);
@@ -605,6 +624,23 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
 
           <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-xs space-y-2">
             <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300">Crate / Subcrate Alvo:</span>
+              <select
+                value={energyCrate}
+                onChange={(e) => setEnergyCrate(e.target.value)}
+                disabled={isAnalyzingEnergy}
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white font-mono text-[11px] max-w-[240px] focus:outline-none focus:border-rose-400 cursor-pointer"
+              >
+                <option value="">Toda a Biblioteca (Pasta Master)</option>
+                {sortedCrates.map(c => (
+                  <option key={c.nome_crate} value={c.nome_crate}>
+                    {c.nome_exibicao || c.nome_crate.replace(/%%/g, ' > ')} ({c.total_faixas})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
               <span className="text-slate-300">Coluna Alvo no Serato:</span>
               <select
                 value={targetEnergyTag}
@@ -685,16 +721,24 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
 
           <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-xs space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-slate-300">Crate de Origem:</span>
-              <input
-                type="text"
+              <span className="text-slate-300">Crate de Origem (Existente):</span>
+              <select
                 value={curatorCrate}
                 onChange={(e) => setCuratorCrate(e.target.value)}
-                placeholder="Ex: Funk%%12 ou Sertanejo"
                 disabled={isCurating}
-                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white text-xs w-48 focus:outline-none focus:border-indigo-400"
-              />
+                className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white font-mono text-[11px] w-56 focus:outline-none focus:border-indigo-400 cursor-pointer"
+              >
+                <option value="">Selecione uma Crate...</option>
+                {sortedCrates.map(c => (
+                  <option key={c.nome_crate} value={c.nome_crate}>
+                    {c.nome_exibicao || c.nome_crate.replace(/%%/g, ' > ')} ({c.total_faixas})
+                  </option>
+                ))}
+              </select>
             </div>
+            <p className="text-[10px] text-slate-500">
+              💡 O Ghost Curator lê as faixas da crate selecionada acima e cria automaticamente uma nova playlist curada com o perfil escolhido.
+            </p>
 
             <div className="flex items-center justify-between gap-2">
               <span className="text-slate-300">Curva de Energia (Flow):</span>

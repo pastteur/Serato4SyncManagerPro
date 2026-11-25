@@ -797,7 +797,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'tagDoctor' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'tagDoctor' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <TagDoctor
                 mp3Path={mp3Path}
                 onAddLog={addLog}
@@ -806,7 +806,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'soundSeal' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'soundSeal' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <SoundSeal
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
@@ -817,7 +817,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'matcher' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'matcher' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <TrackMatcher
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
@@ -827,7 +827,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'health' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'health' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <AudioHealth
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
@@ -837,7 +837,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'autoCue' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'autoCue' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <AutoCueGenerator
                 mp3Path={mp3Path}
                 onAddLog={addLog}
@@ -846,7 +846,7 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'library' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'library' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <LibraryTools
                 onAddLog={addLog}
                 mp3Path={mp3Path}
@@ -855,17 +855,22 @@ export const App: React.FC = () => {
               />
             </div>
 
-            <div className={activeTab === 'backups' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'backups' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
               <BackupManager
                 onAddLog={addLog}
                 onOpenLogsFolder={handleOpenLogsFolder}
               />
             </div>
 
-            <div className={activeTab === 'lexiconSuite' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
+            <div className={activeTab === 'lexiconSuite' ? 'flex-1 min-h-0 overflow-y-auto pr-1 pb-4' : 'hidden'}>
               <LexiconSuite
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
+                availableCrates={Object.values(summary?.crates_arvore || {}).map(c => ({
+                  nome_crate: c.nome_crate,
+                  nome_exibicao: c.nome_exibicao,
+                  total_faixas: c.total_faixas
+                }))}
                 onPlayTrack={(track) => setActivePlayingTrack({ caminho: track.url, nome: track.nome, artista: track.artista })}
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onMoveToTrash={handleMoveToTrash}
