@@ -38,6 +38,9 @@
     "targets": [
       "app"
     ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
     "resources": {
       "../serato_macos_app.py": "serato_macos_app.py",
       "../tag_doctor.py": "tag_doctor.py",

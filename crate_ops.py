@@ -108,17 +108,21 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
         # 1. Valida se a crate original é íntegra antes de qualquer alteração
         try:
             orig_data = crate_path.read_bytes()
-            if orig_data:
-                h_check, _, _, ob_check = parse_crate_binary(orig_data)
-                if h_check is None:
-                    return {
-                        "sucesso": False,
-                        "erro": f"Crate original [{crate_path.name}] está corrompida ou ilegível. Gravação cancelada para evitar perda de dados."
-                    }
-                if header_antigo is None:
-                    header_antigo = h_check
-                if outros_blocos is None:
-                    outros_blocos = ob_check
+            if len(orig_data) == 0:
+                return {
+                    "sucesso": False,
+                    "erro": f"Crate original [{crate_path.name}] está vazia (0 bytes / inválida). Substituição silenciosa cancelada."
+                }
+            h_check, _, _, ob_check = parse_crate_binary(orig_data)
+            if h_check is None:
+                return {
+                    "sucesso": False,
+                    "erro": f"Crate original [{crate_path.name}] está corrompida ou ilegível. Gravação cancelada para evitar perda de dados."
+                }
+            if header_antigo is None:
+                header_antigo = h_check
+            if outros_blocos is None:
+                outros_blocos = ob_check
         except Exception as e_check:
             return {
                 "sucesso": False,
@@ -185,7 +189,7 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
 
         post_hash = calc_crate_sha256(crate_path)
 
-        # 6. Registro no Journal
+        # 6. Registro obrigatório no Journal
         try:
             import journal
             journal.record_crate_operation(
@@ -196,24 +200,33 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                 backup_path=str(versioned_bak or bak) if crate_ja_existia else None,
                 total_tracks=len(track_rel_list)
             )
-        except Exception:
-            pass
+        except Exception as e_journal:
+            raise IOError(f"Falha ao registrar operação no Journal: {e_journal}")
 
     except Exception as e:
-        # Rollback automático restaurando backup se existia
+        # Rollback automático restaurando backup se existia, ou removendo arquivo recém-criado
         if tmp.exists():
             try:
                 tmp.unlink()
             except Exception:
                 pass
+        rollback_msg = "Rollback executado."
         if crate_ja_existia and bak.exists():
             try:
                 shutil.copy2(bak, crate_path)
+                restored_hash = calc_crate_sha256(crate_path)
+                if orig_hash and restored_hash != orig_hash:
+                    rollback_msg = "ALERTA: Rollback executado, porém SHA-256 restaurado diverge do original."
+            except Exception as e_rb:
+                rollback_msg = f"ALERTA: Falha no rollback ({e_rb})."
+        elif not crate_ja_existia and crate_path.exists():
+            try:
+                crate_path.unlink()
             except Exception:
                 pass
         return {
             "sucesso": False,
-            "erro": f"Falha na gravação/validação da crate [{crate_path.name}]: {e}. Rollback executado."
+            "erro": f"Falha na gravação/validação da crate [{crate_path.name}]: {e}. {rollback_msg}"
         }
 
     return {

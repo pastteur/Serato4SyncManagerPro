@@ -131,7 +131,7 @@ def criar_tag_tlv(tag_str: str, valor_str: str) -> bytes:
     return tag_bytes + tamanho_bytes + valor_bytes
 
 
-def parse_crate_binary(data: bytes):
+def parse_crate_binary(data: bytes, strict: bool = False):
     """
     Analisa estruturalmente um arquivo binário .crate do Serato.
     Retorna:
@@ -139,19 +139,24 @@ def parse_crate_binary(data: bytes):
       faixas_ordenadas: Lista de caminhos relativos em sua ordem original no crate.
       blocos_otrk: Lista de tuplas (caminho_relativo, bloco_otrk_bytes).
       outros_blocos: Lista de blocos binários não-otrk preservados integralmente (ex: ovct, osrt).
-    Valida rigorosamente os cabeçalhos e tamanhos de blocos.
+    Rejeita estruturas truncadas, tamanhos inválidos ou bytes residuais não interpretáveis.
     """
-    if len(data) < 8 or not data.startswith(b'vrsn'):
+    def _fail(msg: str):
+        if strict:
+            raise ValueError(msg)
         return None, [], [], []
+
+    if not data or len(data) < 8 or not data.startswith(b'vrsn'):
+        return _fail("Cabeçalho vrsn ausente ou inválido.")
 
     try:
         vrsn_len = struct.unpack('>I', data[4:8])[0]
         header_end = 8 + vrsn_len
         if header_end > len(data):
-            return None, [], [], []
+            return _fail(f"Cabeçalho vrsn truncado (esperado {header_end}, disponível {len(data)} bytes).")
         header_bytes = data[:header_end]
-    except Exception:
-        return None, [], [], []
+    except Exception as e:
+        return _fail(f"Falha ao decodificar cabeçalho vrsn: {e}")
 
     faixas_ordenadas = []
     blocos_otrk = []
@@ -160,17 +165,22 @@ def parse_crate_binary(data: bytes):
     idx = header_end
     total_len = len(data)
 
-    while idx + 8 <= total_len:
+    while idx < total_len:
+        if idx + 8 > total_len:
+            return _fail(f"Bytes residuais não interpretáveis no final da crate ({total_len - idx} bytes).")
+
         tag = data[idx:idx+4]
         try:
             block_len = struct.unpack('>I', data[idx+4:idx+8])[0]
-        except Exception:
-            break
+        except Exception as e:
+            return _fail(f"Falha ao ler tamanho do bloco em offset {idx}: {e}")
 
         block_end = idx + 8 + block_len
         if block_end > total_len:
-            # Bloco truncado; interrompe sem corromper
-            break
+            return _fail(
+                f"Bloco '{tag.decode('ascii', errors='replace')}' truncado "
+                f"(esperado até {block_end}, arquivo tem {total_len} bytes)."
+            )
 
         raw_block = data[idx:block_end]
 
@@ -179,23 +189,28 @@ def parse_crate_binary(data: bytes):
             otrk_payload = data[idx+8:block_end]
             p_idx = 0
             found_ptrk = False
-            while p_idx + 8 <= len(otrk_payload):
+            while p_idx < len(otrk_payload):
+                if p_idx + 8 > len(otrk_payload):
+                    return _fail("Sub-bloco interno de 'otrk' truncado ou bytes residuais.")
                 p_tag = otrk_payload[p_idx:p_idx+4]
                 try:
                     p_len = struct.unpack('>I', otrk_payload[p_idx+4:p_idx+8])[0]
-                except Exception:
-                    break
+                except Exception as e:
+                    return _fail(f"Falha ao ler tamanho de sub-bloco em 'otrk': {e}")
                 p_end = p_idx + 8 + p_len
-                if p_end <= len(otrk_payload) and p_tag == b'ptrk':
+                if p_end > len(otrk_payload):
+                    return _fail(
+                        f"Sub-bloco '{p_tag.decode('ascii', errors='replace')}' truncado dentro de 'otrk'."
+                    )
+                if p_tag == b'ptrk':
                     try:
                         path_str = otrk_payload[p_idx+8:p_end].decode('utf-16-be')
                         norm_path = normalizar_nfc(path_str)
                         faixas_ordenadas.append(norm_path)
                         blocos_otrk.append((norm_path, raw_block))
                         found_ptrk = True
-                        break
-                    except UnicodeDecodeError:
-                        pass
+                    except UnicodeDecodeError as e:
+                        return _fail(f"Caminho 'ptrk' com codificação UTF-16-BE inválida: {e}")
                 p_idx = p_end
 
             if not found_ptrk:
@@ -387,7 +402,10 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     movimentacoes_log = []
 
     erros_leitura = []
+    erros_gravacao = []
     varredura_incompleta = False
+    planos_gravacao = []
+    broken_symlinks = []
 
     is_external = str(path_serato).startswith("/Volumes/")
     if is_external:
@@ -424,10 +442,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             if caminho_completo.suffix.lower() in AUDIO_EXTENSIONS:
                 if caminho_completo.is_symlink() and not caminho_completo.exists():
                     if not dry_run:
-                        try:
-                            caminho_completo.unlink()
-                        except OSError:
-                            pass
+                        broken_symlinks.append(caminho_completo)
                     continue
 
                 try:
@@ -585,7 +600,57 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             faixas_adicionadas = conjunto_novo - faixas_antigas_set
             faixas_removidas = faixas_antigas_set - conjunto_novo
 
-            prefixo_log = "🔍 [ANÁLISE] " if dry_run else ""
+            # Preserva ordenação original: mantém faixas que já existiam na mesma ordem, adiciona novas no final
+            if faixas_antigas_ordenadas:
+                faixas_finais_ordenadas = [f for f in faixas_antigas_ordenadas if f in conjunto_novo]
+                novas_para_adicionar = [f for f in musicas_pasta_relativas if f not in set(faixas_finais_ordenadas)]
+                faixas_finais_ordenadas.extend(novas_para_adicionar)
+            else:
+                faixas_finais_ordenadas = list(musicas_pasta_relativas)
+
+            planos_gravacao.append({
+                "caminho_crate": caminho_crate,
+                "nome_crate": nome_crate,
+                "nome_exibicao": nome_exibicao,
+                "faixas_finais_ordenadas": faixas_finais_ordenadas,
+                "header_antigo": header_antigo,
+                "outros_blocos": outros_blocos,
+                "chave_cache": chave_cache,
+                "qtd_arquivos": qtd_arquivos,
+                "tamanho_total_pasta": tamanho_total_pasta,
+                "sig_pasta": sig_pasta,
+                "faixas_adicionadas": faixas_adicionadas,
+                "faixas_removidas": faixas_removidas,
+            })
+
+    # ==========================================================================
+    # FASE 2: EXECUÇÃO TRANSACIONAL (SOMENTE APÓS VARREDURA 100% ÍNTEGRA)
+    # ==========================================================================
+    if varredura_incompleta:
+        print(
+            f"\n🛡️ [PROTEÇÃO DE INTEGRIDADE] Varredura incompleta ({len(erros_leitura)} erro(s)). "
+            "Fase 2 cancelada: nenhuma crate foi modificada ou removida.",
+            flush=True
+        )
+    else:
+        for sym in broken_symlinks:
+            try:
+                sym.unlink()
+            except OSError:
+                pass
+
+        if not dry_run and planos_gravacao:
+            from crate_ops import write_crate_atomic
+
+        prefixo_log = "🔍 [ANÁLISE] " if dry_run else ""
+        for plano in planos_gravacao:
+            caminho_crate = plano["caminho_crate"]
+            nome_crate = plano["nome_crate"]
+            nome_exibicao = plano["nome_exibicao"]
+            faixas_adicionadas = plano["faixas_adicionadas"]
+            faixas_removidas = plano["faixas_removidas"]
+            qtd_arquivos = plano["qtd_arquivos"]
+
             if faixas_adicionadas:
                 total_faixas_adicionadas += len(faixas_adicionadas)
                 msg_add = f"{prefixo_log}🆕 {len(faixas_adicionadas)} nova(s) faixa(s) para a Crate [{nome_exibicao}]"
@@ -597,82 +662,45 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     print(f"      ... (+{len(faixas_adicionadas) - 3} outras faixas)", flush=True)
 
             if faixas_removidas:
-                # Se a varredura teve erro de acesso, NÃO propõe exclusão de faixas!
-                if varredura_incompleta:
-                    print(f"   ⚠️ [PROTEÇÃO] Remoções suspensas na crate [{nome_exibicao}] devido a erros de leitura no scanner.", flush=True)
-                else:
-                    total_faixas_removidas += len(faixas_removidas)
-                    msg_rem = f"{prefixo_log}🗑️ {len(faixas_removidas)} faixa(s) removida(s) da Crate [{nome_exibicao}]"
-                    print(f"   {msg_rem}", flush=True)
-                    movimentacoes_log.append(msg_rem)
-                    for f_item in sorted(list(faixas_removidas))[:3]:
-                        print(f"      - {Path(f_item).name}", flush=True)
-                    if len(faixas_removidas) > 3:
-                        print(f"      ... (-{len(faixas_removidas) - 3} outras faixas)", flush=True)
+                total_faixas_removidas += len(faixas_removidas)
+                msg_rem = f"{prefixo_log}🗑️ {len(faixas_removidas)} faixa(s) removida(s) da Crate [{nome_exibicao}]"
+                print(f"   {msg_rem}", flush=True)
+                movimentacoes_log.append(msg_rem)
+                for f_item in sorted(list(faixas_removidas))[:3]:
+                    print(f"      - {Path(f_item).name}", flush=True)
+                if len(faixas_removidas) > 3:
+                    print(f"      ... (-{len(faixas_removidas) - 3} outras faixas)", flush=True)
 
-            # Preserva ordenação original: mantém faixas que já existiam na mesma ordem, adiciona novas no final
-            if faixas_antigas_ordenadas:
-                faixas_finais_ordenadas = [f for f in faixas_antigas_ordenadas if f in conjunto_novo]
-                novas_para_adicionar = [f for f in musicas_pasta_relativas if f not in set(faixas_finais_ordenadas)]
-                faixas_finais_ordenadas.extend(novas_para_adicionar)
-            else:
-                faixas_finais_ordenadas = list(musicas_pasta_relativas)
-
-            tamanho_gravado = crate_tamanho
             if not dry_run:
-                # Bloqueia gravação se varredura for incompleta
-                if varredura_incompleta:
-                    print(f"   ⚠️ Gravação de '{nome_crate}' bloqueada por segurança (varredura incompleta).", flush=True)
-                else:
-                    tmp_crate = caminho_crate.with_suffix('.tmp')
-                    bak_crate = caminho_crate.with_suffix('.bak')
+                res = write_crate_atomic(
+                    caminho_crate,
+                    plano["faixas_finais_ordenadas"],
+                    header_antigo=plano["header_antigo"],
+                    outros_blocos=plano["outros_blocos"],
+                    action_name="sync_crate"
+                )
+                if res.get("sucesso"):
+                    total_crates_gravadas += 1
                     try:
-                        with open(tmp_crate, 'wb') as f:
-                            # Preserva cabeçalho vrsn original se existente, ou usa o padrão Serato
-                            if header_antigo and len(header_antigo) >= 8:
-                                f.write(header_antigo)
-                            else:
-                                f.write(b'vrsn\x00\x00\x00\x08\x001\x00.\x000\x000')
-
-                            # Preserva blocos não-otrk existentes (ovct, osrt, etc.)
-                            for b_extra in outros_blocos:
-                                f.write(b_extra)
-
-                            # Grava registros otrk/ptrk na ordem validada
-                            for mus in faixas_finais_ordenadas:
-                                ptrk = criar_tag_tlv('ptrk', mus)
-                                otrk = b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
-                                f.write(otrk)
-
-                            f.flush()
-                            os.fsync(f.fileno())
-
-                        tamanho_gravado = tmp_crate.stat().st_size
-
-                        # Backup prévio atômico se a crate já existia
-                        if caminho_crate.exists():
-                            try:
-                                shutil.copy2(caminho_crate, bak_crate)
-                            except Exception:
-                                pass
-
-                        shutil.move(tmp_crate, caminho_crate)
-                        total_crates_gravadas += 1
-                        if not faixas_adicionadas and not faixas_removidas:
-                            print(f"   🔹 Crate atualizada: {nome_exibicao} ({qtd_arquivos} faixas)", flush=True)
-                    except Exception as e:
-                        print(f"   ❌ Erro ao gravar crate {nome_crate}: {e}", file=sys.stderr, flush=True)
+                        tamanho_gravado = caminho_crate.stat().st_size
+                    except OSError:
+                        tamanho_gravado = 0
+                    novo_cache[plano["chave_cache"]] = {
+                        "qtd": qtd_arquivos,
+                        "bytes": plano["tamanho_total_pasta"],
+                        "sig": plano["sig_pasta"],
+                        "crate_bytes": tamanho_gravado
+                    }
+                    if not faixas_adicionadas and not faixas_removidas:
+                        print(f"   🔹 Crate atualizada: {nome_exibicao} ({qtd_arquivos} faixas)", flush=True)
+                else:
+                    err_msg = res.get("erro", f"Falha desconhecida ao gravar crate {nome_crate}")
+                    erros_gravacao.append(err_msg)
+                    print(f"   ❌ Erro ao gravar crate {nome_crate}: {err_msg}", file=sys.stderr, flush=True)
             else:
                 total_crates_gravadas += 1
                 if not faixas_adicionadas and not faixas_removidas:
                     print(f"   🔍 [ANÁLISE] Crate seria atualizada: {nome_exibicao} ({qtd_arquivos} faixas)", flush=True)
-
-            novo_cache[chave_cache] = {
-                "qtd": qtd_arquivos,
-                "bytes": tamanho_total_pasta,
-                "sig": sig_pasta,
-                "crate_bytes": tamanho_gravado
-            }
 
     # Auditoria de crates deletadas
     for antiga in sorted(list(crates_fisicas_antigas)):
@@ -820,10 +848,13 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     else:
         print("🎯 Sincronização concluída com sucesso! Pode abrir o Serato DJ Pro.\n", flush=True)
 
+    operacao_ok = (not varredura_incompleta) and (not erros_gravacao)
+
     resumo_dados = {
-        "sucesso": not varredura_incompleta,
-        "status_analise": "parcial_com_erros" if varredura_incompleta else "completo",
+        "sucesso": operacao_ok,
+        "status_analise": "parcial_com_erros" if not operacao_ok else "completo",
         "erros_leitura": erros_leitura,
+        "erros_gravacao": erros_gravacao,
         "dry_run": dry_run,
         "total_faixas": total_faixas,
         "crates_gravadas": total_crates_gravadas,
@@ -838,7 +869,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     }
 
     # No Dry Run: NÃO grava resumo em disco!
-    if not dry_run and not varredura_incompleta:
+    if not dry_run and operacao_ok:
         resumo_path = path_logs / ".serato_sync_summary.json"
         try:
             with open(resumo_path, "w", encoding="utf-8") as rf:
@@ -849,7 +880,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     if emit_json_summary:
         print(f"__PAYLOAD_JSON_SUMMARY__{json.dumps(resumo_dados)}", flush=True)
 
-    return (not varredura_incompleta), resumo_dados
+    return operacao_ok, resumo_dados
 
 
 def main():
