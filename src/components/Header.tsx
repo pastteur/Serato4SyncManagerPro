@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Disc3, ShieldCheck, Cpu, HardDrive, Activity, Radio, BookOpen, FileText, Database } from 'lucide-react';
 import { SeratoV4AuditModal } from './SeratoV4AuditModal';
+import { GeneralDiagnosisModal } from './GeneralDiagnosisModal';
 
 interface HeaderProps {
   isRunning: boolean;
@@ -26,6 +27,7 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, 
   const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
   const [isExportingReport, setIsExportingReport] = useState<boolean>(false);
   const [isV4ModalOpen, setIsV4ModalOpen] = useState<boolean>(false);
+  const [isDiagnosisModalOpen, setIsDiagnosisModalOpen] = useState<boolean>(false);
   
   const [telemetry, setTelemetry] = useState<SystemTelemetry>({
     cpu_percent: 0,
@@ -187,13 +189,12 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, 
         {mp3Path && (
           <button
             type="button"
-            onClick={handleExportDiagnosis}
-            disabled={isExportingReport || isRunning}
-            className="flex items-center gap-1.5 text-[11px] font-bold text-black bg-gradient-to-r from-amber-400 to-serato-gold hover:opacity-90 px-2.5 py-1.5 rounded-lg shadow-sm transition disabled:opacity-50 cursor-pointer"
-            title="Gera um dashboard executivo HTML da biblioteca e abre no Finder / Navegador"
+            onClick={() => setIsDiagnosisModalOpen(true)}
+            className="flex items-center gap-1.5 text-[11px] font-bold text-black bg-gradient-to-r from-amber-400 to-serato-gold hover:opacity-90 px-2.5 py-1.5 rounded-lg shadow-sm transition cursor-pointer"
+            title="Abre o painel executivo de Diagnóstico Geral da biblioteca (BPM, Tom, Cues e Integridade)"
           >
             <FileText className="w-3.5 h-3.5" />
-            <span>{isExportingReport ? 'Gerando...' : 'Diagnóstico Geral'}</span>
+            <span>Diagnóstico Geral</span>
           </button>
         )}
         <div className="flex items-center space-x-1.5 text-[11px] text-slate-400 bg-serato-card px-2.5 py-1.5 rounded-lg border border-serato-cardBorder font-sans">
@@ -219,6 +220,14 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, 
         isOpen={isV4ModalOpen}
         onClose={() => setIsV4ModalOpen(false)}
         seratoPath={seratoPath}
+      />
+
+      <GeneralDiagnosisModal
+        isOpen={isDiagnosisModalOpen}
+        onClose={() => setIsDiagnosisModalOpen(false)}
+        mp3Path={mp3Path || ''}
+        seratoPath={seratoPath || ''}
+        onAddLog={onAddLog}
       />
     </header>
   );

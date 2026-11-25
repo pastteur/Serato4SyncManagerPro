@@ -8,6 +8,7 @@ interface SeratoV4Report {
   master_exists: boolean;
   root_exists: boolean;
   location_exists: boolean;
+  locations_count?: number;
   db_uuid: string | null;
   user_version: number | null;
   autosync_disabled: number | null;
@@ -167,9 +168,15 @@ export const SeratoV4AuditModal: React.FC<SeratoV4AuditModalProps> = ({
                   </span>
                 </div>
                 <div className="flex items-center justify-between text-slate-300 font-mono text-[11px]">
-                  <span>location.sqlite:</span>
+                  <span>root.sqlite:</span>
+                  <span className={report.root_exists ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
+                    {report.root_exists ? 'PRESENTE' : 'AUSENTE'}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between text-slate-300 font-mono text-[11px]">
+                  <span>Entidade de Localizações:</span>
                   <span className={report.location_exists ? 'text-emerald-400 font-bold' : 'text-slate-500'}>
-                    {report.location_exists ? 'PRESENTE' : 'AUSENTE'}
+                    {report.location_exists ? `PRESENTE (${report.locations_count ? `${report.locations_count} locais` : 'OK'})` : 'AUSENTE'}
                   </span>
                 </div>
               </div>

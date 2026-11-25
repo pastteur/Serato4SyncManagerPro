@@ -5,11 +5,14 @@ import {
   Play, Pause, AlertTriangle, Layers, Zap, FolderSearch,
   Flame, Sliders, Wand2, TrendingUp, BarChart2, ShieldCheck, Check
 } from 'lucide-react';
+import { OrphanFilesModal } from './OrphanFilesModal';
 
 interface LexiconSuiteProps {
   mp3Path?: string;
   seratoPath?: string;
   onPlayTrack?: (track: { url: string; nome: string; artista?: string }) => void;
+  onOpenFileInFinder?: (filePath: string) => void;
+  onMoveToTrash?: (filePath: string, itemId: string) => Promise<boolean>;
   onAddLog?: (msg: string) => void;
   onOpenPioneerExport?: () => void;
 }
@@ -18,6 +21,8 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
   mp3Path,
   seratoPath,
   onPlayTrack,
+  onOpenFileInFinder,
+  onMoveToTrash,
   onAddLog,
   onOpenPioneerExport
 }) => {
@@ -32,6 +37,7 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
   // Estados dos Arquivos Órfãos
   const [orphanReport, setOrphanReport] = useState<any | null>(null);
   const [isScanningOrphans, setIsScanningOrphans] = useState<boolean>(false);
+  const [isOrphanModalOpen, setIsOrphanModalOpen] = useState<boolean>(false);
 
   // Estados do DeckWatch
   const [deckwatchTrack, setDeckwatchTrack] = useState<any | null>(null);
@@ -461,6 +467,16 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
               <p className="text-[11px] text-slate-500">
                 Essas faixas estão no HD mas não foram adicionadas a nenhuma playlist do Serato.
               </p>
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsOrphanModalOpen(true)}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-bold bg-amber-400 hover:bg-amber-300 text-black transition cursor-pointer shadow-sm"
+                >
+                  <FolderSearch className="w-4 h-4" />
+                  <span>Visualizar, Reproduzir & Tratar Órfãos</span>
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -920,6 +936,24 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
           </div>
         </div>
       )}
+
+      {/* Modal de Gerenciamento Completo de Órfãos (Visualizar, Reproduzir, Finder, Excluir) */}
+      <OrphanFilesModal
+        isOpen={isOrphanModalOpen}
+        onClose={() => setIsOrphanModalOpen(false)}
+        report={orphanReport}
+        mp3Path={mp3Path || ''}
+        seratoPath={seratoPath || ''}
+        onOpenFileInFinder={onOpenFileInFinder}
+        onPlayTrack={(track) => {
+          if (onPlayTrack) {
+            onPlayTrack({ url: track.caminho, nome: track.nome, artista: track.artista });
+          }
+        }}
+        onMoveToTrash={onMoveToTrash}
+        onAddLog={onAddLog}
+        onUpdateReport={(updated) => setOrphanReport(updated)}
+      />
 
     </div>
   );

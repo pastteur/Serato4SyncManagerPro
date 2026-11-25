@@ -15,6 +15,7 @@ interface CrateTreePreviewProps {
   onPlayTrack?: (track: PlayingTrackInfo) => void;
   seratoPath?: string;
   onAddLog?: (message: string) => void;
+  onRefreshCrates?: () => void;
 }
 
 export interface EnrichedCrateTrack extends CrateTrack {
@@ -28,7 +29,8 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
   onOpenFileInFinder, 
   onPlayTrack,
   seratoPath,
-  onAddLog
+  onAddLog,
+  onRefreshCrates
 }) => {
   // Estado de seleção: '__ALL__' seleciona a biblioteca geral com todas as músicas alocadas
   const [selectedCrateKey, setSelectedCrateKey] = useState<string>('__ALL__');
@@ -70,63 +72,12 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     return item.nome_crate.split('%%').length;
   };
 
-  // Mapa de Crates do resumo ou dados de demonstração
+  // Mapa de Crates do resumo real da biblioteca Serato
   const cratesMap: Record<string, CrateTreeItem> = useMemo(() => {
     if (summary?.crates_arvore && Object.keys(summary.crates_arvore).length > 0) {
       return summary.crates_arvore;
     }
-
-    // Dados de demonstração refletindo estrutura real do Serato 4
-    return {
-      'Sertanejo%%41': {
-        nome_crate: 'Sertanejo%%41',
-        nome_exibicao: 'Sertanejo -> 41',
-        master: 'Sertanejo',
-        subcrate: '41',
-        total_faixas: 4,
-        faixas: [
-          { nome: '01 - Modão Raiz Acústico.mp3', caminho_rel: 'Music/MP3/Sertanejo/41/01 - Modão Raiz Acústico.mp3', formato: 'MP3' },
-          { nome: '02 - Solteiro Forçado (Ao Vivo).mp3', caminho_rel: 'Music/MP3/Sertanejo/41/02 - Solteiro Forçado (Ao Vivo).mp3', formato: 'MP3' },
-          { nome: '03 - Barulho do Foguete.mp3', caminho_rel: 'Music/MP3/Sertanejo/41/03 - Barulho do Foguete.mp3', formato: 'MP3' },
-          { nome: '04 - Canudinho (Remix Club).flac', caminho_rel: 'Music/MP3/Sertanejo/41/04 - Canudinho (Remix Club).flac', formato: 'FLAC' },
-        ]
-      },
-      'Sertanejo%%40': {
-        nome_crate: 'Sertanejo%%40',
-        nome_exibicao: 'Sertanejo -> 40',
-        master: 'Sertanejo',
-        subcrate: '40',
-        total_faixas: 3,
-        faixas: [
-          { nome: '01 - Oi Balde.mp3', caminho_rel: 'Music/MP3/Sertanejo/40/01 - Oi Balde.mp3', formato: 'MP3' },
-          { nome: '02 - Erro Gostoso.wav', caminho_rel: 'Music/MP3/Sertanejo/40/02 - Erro Gostoso.wav', formato: 'WAV' },
-          { nome: '03 - Leão (Versão Estendida).mp3', caminho_rel: 'Music/MP3/Sertanejo/40/03 - Leão (Versão Estendida).mp3', formato: 'MP3' },
-        ]
-      },
-      'Pop Rock%%EMO%%01': {
-        nome_crate: 'Pop Rock%%EMO%%01',
-        nome_exibicao: 'Pop Rock -> EMO -> 01',
-        master: 'Pop Rock',
-        subcrate: 'EMO%%01',
-        total_faixas: 3,
-        faixas: [
-          { nome: '01 - Welcome To The Black Parade.mp3', caminho_rel: 'Music/MP3/Pop Rock/EMO/01/01 - Welcome To The Black Parade.mp3', formato: 'MP3' },
-          { nome: '02 - Misery Business.mp3', caminho_rel: 'Music/MP3/Pop Rock/EMO/01/02 - Misery Business.mp3', formato: 'MP3' },
-          { nome: '03 - In The End (2026 Remaster).wav', caminho_rel: 'Music/MP3/Pop Rock/EMO/01/03 - In The End (2026 Remaster).wav', formato: 'WAV' },
-        ]
-      },
-      'Funk%%MegaFunk%%12': {
-        nome_crate: 'Funk%%MegaFunk%%12',
-        nome_exibicao: 'Funk -> MegaFunk -> 12',
-        master: 'Funk',
-        subcrate: 'MegaFunk%%12',
-        total_faixas: 2,
-        faixas: [
-          { nome: '01 - MegaFunk SC Especial Verão.mp3', caminho_rel: 'Music/MP3/Funk/MegaFunk/12/01 - MegaFunk SC Especial Verão.mp3', formato: 'MP3' },
-          { nome: '02 - Montagem Anos 2000.mp3', caminho_rel: 'Music/MP3/Funk/MegaFunk/12/02 - Montagem Anos 2000.mp3', formato: 'MP3' },
-        ]
-      }
-    };
+    return {};
   }, [summary]);
 
   // Contagem de subcrates aninhadas em toda a biblioteca
@@ -411,7 +362,7 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
                 Playlists ({Object.keys(groupedCrates).length})
               </span>
               
-              {/* Botões Rápidos de Expandir / Recolher */}
+              {/* Botões Rápidos de Expandir / Recolher / Recarregar */}
               <div className="flex items-center gap-1 ml-1">
                 <button
                   type="button"
@@ -429,6 +380,16 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
                 >
                   <ChevronsUp className="w-3 h-3 text-slate-400" />
                 </button>
+                {onRefreshCrates && (
+                  <button
+                    type="button"
+                    onClick={onRefreshCrates}
+                    className="p-1 rounded bg-serato-dark hover:bg-slate-700 text-slate-400 hover:text-white transition cursor-pointer"
+                    title="Recarregar crates da pasta Serato"
+                  >
+                    <Sparkles className="w-3 h-3 text-amber-400" />
+                  </button>
+                )}
               </div>
             </div>
 
@@ -497,7 +458,24 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
             )}
 
             {/* Árvore de Masters e Subcrates (Minimizadas por Padrão) */}
-            {Object.keys(groupedCrates).sort().map(master => {
+            {Object.keys(cratesMap).length === 0 ? (
+              <div className="py-12 px-4 text-center text-slate-400 space-y-3">
+                <Disc className="w-8 h-8 mx-auto text-slate-600 opacity-60" />
+                <p className="text-xs font-semibold text-slate-300">Nenhuma crate carregada em memória.</p>
+                <p className="text-[11px] text-slate-500">
+                  Carregue suas crates reais a partir da pasta _Serato_ configurada.
+                </p>
+                {onRefreshCrates && (
+                  <button
+                    type="button"
+                    onClick={onRefreshCrates}
+                    className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan/20 text-serato-cyan border border-serato-cyan/40 hover:bg-serato-cyan/30 transition cursor-pointer"
+                  >
+                    Carregar Crates do Disco
+                  </button>
+                )}
+              </div>
+            ) : Object.keys(groupedCrates).sort().map(master => {
               const subcrates = groupedCrates[master];
               const isExpanded = expandedMasters.has(master) || !!crateSearch.trim() || filterMode === 'nested';
               const nestedCountInMaster = subcrates.filter(isNestedSubcrate).length;

@@ -470,22 +470,77 @@ def rewrite_crate_order(serato_dir: str, crate_name: str, ordered_tracks: List[s
     return res
 
 
+def list_crates_tree(serato_dir: str) -> Dict[str, Any]:
+    """Varre todas as crates de Subcrates e retorna o mapa completo no formato crates_arvore."""
+    s_path = Path(os.path.expanduser(serato_dir)).resolve()
+    subcrates_dir = s_path / "Subcrates" if (s_path / "Subcrates").exists() else s_path
+    if not subcrates_dir.exists():
+        return {"sucesso": False, "erro": f"Pasta Subcrates não encontrada em: {serato_dir}", "crates_arvore": {}}
+
+    tree = {}
+    total_tracks = 0
+
+    for f in sorted(subcrates_dir.glob("*.crate")):
+        if f.name.startswith("._") or f.name.startswith("."):
+            continue
+        crate_name = f.stem
+        try:
+            _, tracks, _ = read_and_validate_crate(f)
+        except Exception:
+            continue
+
+        parts = crate_name.split("%%")
+        master = parts[0]
+        subcrate = " -> ".join(parts[1:]) if len(parts) > 1 else ""
+        nome_exibicao = " -> ".join(parts)
+
+        faixas_lista = []
+        for t in tracks:
+            total_tracks += 1
+            filename = t.split('/')[-1] if '/' in t else t.split('\\')[-1]
+            ext = Path(filename).suffix.upper().replace('.', '') or "MP3"
+            faixas_lista.append({
+                "nome": filename,
+                "caminho_rel": t,
+                "formato": ext
+            })
+
+        tree[crate_name] = {
+            "nome_crate": crate_name,
+            "nome_exibicao": nome_exibicao,
+            "master": master,
+            "subcrate": subcrate,
+            "total_faixas": len(faixas_lista),
+            "faixas": faixas_lista
+        }
+
+    return {
+        "sucesso": True,
+        "total_crates": len(tree),
+        "total_faixas": total_tracks,
+        "crates_arvore": tree
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Serato Crate Operations & Playlist Tools")
     parser.add_argument("--action", type=str, default="add_paths",
-                        choices=["add_paths", "sort", "prefix", "capitalize", "merge", "rewrite_order"],
+                        choices=["add_paths", "sort", "prefix", "capitalize", "merge", "rewrite_order", "list_tree"],
                         help="Ação a executar na crate")
     parser.add_argument("--serato", required=True, help="Diretório _Serato_")
-    parser.add_argument("--crate", required=True, help="Nome da crate")
+    parser.add_argument("--crate", default="", help="Nome da crate")
     parser.add_argument("--paths", nargs="*", default=[], help="Caminhos para add_paths ou rewrite_order")
     parser.add_argument("--sources", nargs="*", default=[], help="Crates de origem para merge")
     parser.add_argument("--prefix", type=str, default="", help="Prefixo a adicionar")
     parser.add_argument("--sort-mode", type=str, default="az", choices=["az", "za", "shuffle", "path"])
     parser.add_argument("--target", type=str, default="subcrate", choices=["subcrate", "master"])
+    parser.add_argument("--list-tree", action="store_true", help="Lista a árvore completa de crates e faixas")
 
     args = parser.parse_args()
 
-    if args.action == "add_paths":
+    if args.list_tree or args.action == "list_tree":
+        res = list_crates_tree(args.serato)
+    elif args.action == "add_paths":
         res = add_paths_to_crate(args.serato, args.crate, args.paths)
     elif args.action == "sort":
         res = sort_crate_tracks(args.serato, args.crate, args.sort_mode)

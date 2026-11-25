@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 pub struct AppSecurityState {
     pub is_operation_active: Arc<AtomicBool>,
+    pub is_ui_busy: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -29,6 +30,7 @@ impl AppSecurityState {
     pub fn new() -> Self {
         Self {
             is_operation_active: Arc::new(AtomicBool::new(false)),
+            is_ui_busy: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -809,6 +811,27 @@ mod commands {
             .arg(&file_path)
             .spawn()
             .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    #[tauri::command]
+    pub async fn open_in_browser(path_or_url: String) -> Result<(), String> {
+        let trimmed = path_or_url.trim();
+        let target = if trimmed.starts_with("~/") {
+            if let Some(home) = dirs_home() {
+                home.join(&trimmed[2..]).to_string_lossy().to_string()
+            } else {
+                trimmed.to_string()
+            }
+        } else {
+            trimmed.to_string()
+        };
+
+        Command::new("open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("Falha ao abrir no navegador: {}", e))?;
 
         Ok(())
     }
@@ -3293,12 +3316,12 @@ mod commands {
 
     #[tauri::command]
     pub fn set_operation_active(state: tauri::State<'_, AppSecurityState>, active: bool) {
-        state.is_operation_active.store(active, Ordering::SeqCst);
+        state.is_ui_busy.store(active, Ordering::SeqCst);
     }
 
     #[tauri::command]
     pub fn is_operation_active(state: tauri::State<'_, AppSecurityState>) -> bool {
-        state.is_operation_active.load(Ordering::SeqCst)
+        state.is_operation_active.load(Ordering::SeqCst) || state.is_ui_busy.load(Ordering::SeqCst)
     }
 
     #[tauri::command]
@@ -3331,6 +3354,44 @@ mod commands {
     pub async fn sync_fts_library(app: AppHandle, mp3_path: String) -> Result<String, String> {
         run_py_json(&app, "fts_library_cache.py", &[
             "--sync".into(), mp3_path
+        ])
+    }
+
+    #[tauri::command]
+    pub async fn load_saved_summary(logs_dir: Option<String>) -> Result<Option<String>, String> {
+        let mut candidates = Vec::new();
+        if let Some(ref l) = logs_dir {
+            let p = PathBuf::from(l);
+            candidates.push(p.join(".serato_sync_summary.json"));
+            candidates.push(p.join("logs").join(".serato_sync_summary.json"));
+        }
+        if let Some(home) = dirs_home() {
+            candidates.push(home.join("SeratoSync").join("logs").join(".serato_sync_summary.json"));
+            candidates.push(home.join(".serato_sync_summary.json"));
+        }
+        candidates.push(PathBuf::from("/Users/pastteur/SeratoSync/logs/.serato_sync_summary.json"));
+
+        for candidate in candidates {
+            if candidate.exists() && candidate.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&candidate) {
+                    if !content.trim().is_empty() {
+                        return Ok(Some(content));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    #[tauri::command]
+    pub async fn load_crates_from_disk(app: AppHandle, serato_path: String) -> Result<String, String> {
+        let clean = serato_path.trim().to_string();
+        if clean.is_empty() {
+            return Err("Caminho do Serato inválido".into());
+        }
+        run_py_json(&app, "crate_ops.py", &[
+            "--list-tree".into(),
+            "--serato".into(), clean,
         ])
     }
 
@@ -3377,6 +3438,33 @@ mod commands {
             "--serato".into(), serato_path,
             "--json".into()
         ])
+    }
+
+    #[tauri::command]
+    pub async fn quarantine_orphan_files(
+        app: AppHandle,
+        mp3_path: String,
+        serato_path: String,
+        files: Vec<String>,
+        dest: Option<String>,
+    ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "mover arquivos órfãos para quarentena")?;
+        let mut args: Vec<String> = vec![
+            "--mp3".into(), mp3_path,
+            "--serato".into(), serato_path,
+            "--quarantine".into(),
+        ];
+        if let Some(d) = dest {
+            if !d.trim().is_empty() {
+                args.push("--dest".into());
+                args.push(d);
+            }
+        }
+        if !files.is_empty() {
+            args.push("--files".into());
+            args.extend(files);
+        }
+        run_py_json(&app, "scan_unused_files.py", &args)
     }
 
     #[tauri::command]
@@ -3626,6 +3714,7 @@ mod commands {
 pub fn run() {
     let security_state = AppSecurityState::new();
     let is_op_active_clone = security_state.is_operation_active.clone();
+    let is_ui_busy_clone = security_state.is_ui_busy.clone();
 
     tauri::Builder::default()
         .manage(FsWatcherState::new())
@@ -3633,7 +3722,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(move |window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if is_op_active_clone.load(Ordering::SeqCst) {
+                if is_op_active_clone.load(Ordering::SeqCst) || is_ui_busy_clone.load(Ordering::SeqCst) {
                     api.prevent_close();
                     let _ = window.emit("operation-in-progress-warning", "⚠️ Uma atividade de sincronização ou gravação na biblioteca está em andamento. Aguarde a finalização antes de fechar o aplicativo para evitar corrupção de dados.");
                 }
@@ -3677,6 +3766,7 @@ pub fn run() {
             commands::start_sync,
             commands::open_in_finder,
             commands::open_file_in_finder,
+            commands::open_in_browser,
             commands::save_text_file,
             commands::move_to_trash,
             commands::list_crates_tag_doctor,
@@ -3745,8 +3835,11 @@ pub fn run() {
             commands::extract_apple_music_library,
             commands::search_fts_library,
             commands::sync_fts_library,
+            commands::load_saved_summary,
+            commands::load_crates_from_disk,
             commands::export_pioneer_usb,
             commands::scan_unused_files,
+            commands::quarantine_orphan_files,
             commands::scan_beatshift,
             commands::convert_key,
             commands::clean_taxonomy_file,

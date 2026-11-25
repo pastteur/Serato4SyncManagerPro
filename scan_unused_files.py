@@ -183,12 +183,19 @@ def main():
     parser.add_argument("--mp3", type=str, required=True, help="Diretório de músicas Master")
     parser.add_argument("--serato", type=str, required=True, help="Diretório _Serato_")
     parser.add_argument("--json", action="store_true", help="Saída em formato JSON")
+    parser.add_argument("--quarantine", action="store_true", help="Move arquivos para quarentena")
+    parser.add_argument("--files", nargs="*", default=[], help="Lista de caminhos de arquivos para quarentena")
+    parser.add_argument("--dest", type=str, default="_Quarentena_Orfaos", help="Nome da subpasta de quarentena")
 
     args = parser.parse_args()
     scanner = UnusedFilesScanner(args.mp3, args.serato)
-    report = scanner.scan()
 
-    if args.json:
+    if args.quarantine:
+        report = scanner.quarantine_files(args.files, dest_dir_name=args.dest)
+    else:
+        report = scanner.scan()
+
+    if args.json or args.quarantine:
         print(json.dumps(report, ensure_ascii=False))
     else:
         print(f"Total escaneado: {report.get('total_scanned')}")

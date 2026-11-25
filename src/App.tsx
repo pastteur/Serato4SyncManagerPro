@@ -221,9 +221,55 @@ export const App: React.FC = () => {
     }
   }, [mp3Path, seratoPath, addLog]);
 
+  const loadCratesLibrary = useCallback(async (targetSeratoPath?: string) => {
+    if (!isTauri) return;
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      // 1. Tenta carregar o último resumo completo persistido (.serato_sync_summary.json)
+      const savedJson = await invoke<string | null>('load_saved_summary', { logsDir: null });
+      if (savedJson) {
+        const parsed = JSON.parse(savedJson);
+        if (parsed && parsed.crates_arvore && Object.keys(parsed.crates_arvore).length > 0) {
+          setSummary(parsed);
+          addLog(`📂 ${Object.keys(parsed.crates_arvore).length} crates carregadas a partir do resumo de auditoria.`);
+          return;
+        }
+      }
+
+      // 2. Se não houver resumo salvo ou for vazio, faz a varredura direta dos arquivos .crate de Subcrates
+      const sp = targetSeratoPath || seratoPath;
+      if (sp && sp.trim()) {
+        const res = await invoke<string>('load_crates_from_disk', { seratoPath: sp.trim() });
+        const parsed = JSON.parse(res);
+        if (parsed && parsed.sucesso && parsed.crates_arvore) {
+          setSummary(prev => ({
+            sucesso: true,
+            status_analise: 'completo',
+            erros_leitura: [],
+            dry_run: true,
+            total_faixas: parsed.total_faixas || 0,
+            crates_gravadas: 0,
+            crates_inalteradas: parsed.total_crates || 0,
+            faixas_adicionadas: 0,
+            faixas_removidas: 0,
+            total_duplicados: prev?.total_duplicados || 0,
+            csv_duplicados: prev?.csv_duplicados || null,
+            duplicados: prev?.duplicados || [],
+            crates_arvore: parsed.crates_arvore,
+            movimentacoes: []
+          }));
+          addLog(`📂 ${parsed.total_crates} crates físicas carregadas diretamente do disco (${parsed.total_faixas} faixas).`);
+        }
+      }
+    } catch (e) {
+      // Silencioso se não houver crates no momento
+    }
+  }, [isTauri, seratoPath, addLog]);
+
   useEffect(() => {
     // Inicialização: preenche somente caminhos ausentes ou inválidos sem sobrescrever caminhos válidos
     handleAutoDetect(false);
+    loadCratesLibrary();
   }, []);
 
   // Setup Tauri Event Listeners
@@ -270,14 +316,8 @@ export const App: React.FC = () => {
     };
   }, [addLog]);
 
-  // Trava de segurança contra interrupção ou fechamento acidental da atividade em andamento
+  // Trava de segurança contra interrupção ou fechamento acidental da atividade em andamento no navegador
   useEffect(() => {
-    if (isTauri) {
-      import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('set_operation_active', { active: isRunning }).catch(() => {});
-      });
-    }
-
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (isRunning) {
         e.preventDefault();
@@ -753,6 +793,7 @@ export const App: React.FC = () => {
                 onOpenFileInFinder={handleOpenFileInFinder}
                 onPlayTrack={(track) => setActivePlayingTrack(track)}
                 onAddLog={addLog}
+                onRefreshCrates={() => loadCratesLibrary()}
               />
             </div>
 
@@ -826,6 +867,8 @@ export const App: React.FC = () => {
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
                 onPlayTrack={(track) => setActivePlayingTrack({ caminho: track.url, nome: track.nome, artista: track.artista })}
+                onOpenFileInFinder={handleOpenFileInFinder}
+                onMoveToTrash={handleMoveToTrash}
                 onAddLog={addLog}
                 onOpenPioneerExport={() => setIsPioneerModalOpen(true)}
               />

@@ -32,45 +32,46 @@ class SeratoV4Engine:
     """Engine de inspeção, auditoria e leitura da biblioteca SQLite do Serato DJ Pro 4."""
 
     def __init__(self, library_dir: Optional[str] = None):
-        candidates = []
         if library_dir:
             cand = Path(os.path.expanduser(library_dir)).resolve()
             # 1. Se o caminho passado tiver a subpasta Library ou for a própria pasta Library
-            candidates.extend([
+            candidates = [
                 cand / "Library",
                 cand,
                 cand.parent / "Library"
-            ])
+            ]
             # 2. Se for um caminho de volume externo (ex: /Volumes/Pastteyr/_Serato_)
             parts = cand.parts
             if len(parts) >= 3 and parts[1] == 'Volumes':
                 ext_app_sup = Path(parts[0]) / parts[1] / parts[2] / "Library" / "Application Support" / "Serato" / "Library"
                 candidates.append(ext_app_sup)
 
-        # 3. Caminho canônico onde o Serato 4 armazena o banco SQLite no sistema operacional
-        if sys.platform == "darwin":
-            candidates.extend([
-                DEFAULT_MACOS_SERATO_V4,
-                Path.home() / "Library" / "Application Support" / "Serato" / "Library",
-                Path.home() / "Library" / "Application Support" / "Serato"
-            ])
-        elif sys.platform == "win32" and DEFAULT_WIN_SERATO_V4:
-            candidates.append(DEFAULT_WIN_SERATO_V4)
+            selected_dir = None
+            for c in candidates:
+                if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite") or self._safe_exists(c / "location.sqlite"):
+                    selected_dir = c
+                    break
 
-        # Prioriza o primeiro candidato onde master.sqlite ou root.sqlite existam fisicamente
-        selected_dir = None
-        for c in candidates:
-            if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite"):
-                selected_dir = c
-                break
-
-        if selected_dir:
-            self.library_dir = selected_dir
-        elif library_dir:
-            cand = Path(os.path.expanduser(library_dir)).resolve()
-            self.library_dir = cand / "Library" if self._safe_exists(cand / "Library") else cand
+            self.library_dir = selected_dir if selected_dir else (cand / "Library" if self._safe_exists(cand / "Library") else cand)
         else:
-            self.library_dir = DEFAULT_MACOS_SERATO_V4
+            candidates = []
+            # Caminho canônico onde o Serato 4 armazena o banco SQLite no sistema operacional
+            if sys.platform == "darwin":
+                candidates.extend([
+                    DEFAULT_MACOS_SERATO_V4,
+                    Path.home() / "Library" / "Application Support" / "Serato" / "Library",
+                    Path.home() / "Library" / "Application Support" / "Serato"
+                ])
+            elif sys.platform == "win32" and DEFAULT_WIN_SERATO_V4:
+                candidates.append(DEFAULT_WIN_SERATO_V4)
+
+            selected_dir = None
+            for c in candidates:
+                if self._safe_exists(c / "master.sqlite") or self._safe_exists(c / "root.sqlite") or self._safe_exists(c / "location.sqlite"):
+                    selected_dir = c
+                    break
+
+            self.library_dir = selected_dir if selected_dir else DEFAULT_MACOS_SERATO_V4
 
         self.master_db = self.library_dir / "master.sqlite"
         self.root_db = self.library_dir / "root.sqlite"
@@ -205,6 +206,16 @@ class SeratoV4Engine:
             except sqlite3.OperationalError:
                 pass
 
+            # 7. Contagem de localizações (tabela location no SQLite ou arquivo location.sqlite)
+            try:
+                cursor.execute("SELECT COUNT(*) FROM location;")
+                loc_row = cursor.fetchone()
+                report["locations_count"] = loc_row[0] if loc_row else 0
+                report["location_exists"] = True
+            except sqlite3.OperationalError:
+                report["locations_count"] = 0
+                report["location_exists"] = location_exists
+
             conn.close()
 
             # Sanity check geral
@@ -263,16 +274,17 @@ class SeratoV4Engine:
 
     def update_track_location(self, old_path: str, new_path: str) -> Dict[str, Any]:
         """
-        Atualiza o caminho físico de um asset_id em location.sqlite (Injeção de Relocate v4).
+        Atualiza o caminho físico de um asset_id em location.sqlite ou master.sqlite (Injeção de Relocate v4).
         """
-        if not self._safe_exists(self.location_db):
-            return {"sucesso": False, "erro": "location.sqlite não encontrado"}
+        target_db = self.location_db if self._safe_exists(self.location_db) else self.master_db
+        if not self._safe_exists(target_db):
+            return {"sucesso": False, "erro": "location.sqlite ou master.sqlite não encontrado"}
 
         try:
-            conn = sqlite3.connect(str(self.location_db), timeout=5.0)
+            conn = sqlite3.connect(str(target_db), timeout=5.0)
             cursor = conn.cursor()
 
-            # Encontra a tabela que contém as colunas path e asset_id
+            # Encontra a tabela que contém as colunas path e asset_id ou id
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
             tables = [r[0] for r in cursor.fetchall()]
 
@@ -280,13 +292,13 @@ class SeratoV4Engine:
             for t in tables:
                 cursor.execute(f"PRAGMA table_info({t});")
                 cols = [r[1] for r in cursor.fetchall()]
-                if "asset_id" in cols and "path" in cols:
+                if ("asset_id" in cols or "id" in cols) and "path" in cols:
                     target_table = t
                     break
 
             if not target_table:
                 conn.close()
-                return {"sucesso": False, "erro": "Tabela de localizações não encontrada em location.sqlite"}
+                return {"sucesso": False, "erro": f"Tabela de localizações não encontrada em {target_db.name}"}
 
             cursor.execute(f"UPDATE {target_table} SET path = ? WHERE path = ?;", (new_path, old_path))
             updated_rows = cursor.rowcount
@@ -300,37 +312,38 @@ class SeratoV4Engine:
                 "new_path": new_path
             }
         except Exception as e:
-            return {"sucesso": False, "erro": f"Falha ao injetar relocate em location.sqlite: {e}"}
+            return {"sucesso": False, "erro": f"Falha ao injetar relocate em {target_db.name}: {e}"}
 
     def resolve_track_locations(self) -> Dict[int, str]:
         """
-        Lê mapeamento de asset_id para caminhos de arquivo físicos contidos em location.sqlite.
+        Lê mapeamento de asset_id para caminhos de arquivo físicos contidos em location ou location.sqlite.
         Retorna dicionário {asset_id: filepath}.
         """
         locations: Dict[int, str] = {}
-        if not self._safe_exists(self.location_db):
-            return locations
-
-        try:
-            conn = self._connect_ro(self.location_db)
-            cursor = conn.cursor()
-            
-            # Verifica tabelas do location.sqlite
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = [r["name"] for r in cursor.fetchall()]
-
-            for t in tables:
-                cursor.execute(f"PRAGMA table_info({t});")
-                cols = [r["name"] for r in cursor.fetchall()]
-                if "asset_id" in cols and "path" in cols:
-                    cursor.execute(f"SELECT asset_id, path FROM {t}")
-                    for r in cursor.fetchall():
-                        locations[r["asset_id"]] = r["path"]
-                    break
-
-            conn.close()
-        except Exception as e:
-            sys.stderr.write(f"[SeratoV4Engine] Erro ao ler location.sqlite: {e}\n")
+        target_dbs = [self.location_db, self.master_db]
+        for db in target_dbs:
+            if not self._safe_exists(db):
+                continue
+            try:
+                conn = self._connect_ro(db)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                tables = [r["name"] for r in cursor.fetchall()]
+                for t in tables:
+                    cursor.execute(f"PRAGMA table_info({t});")
+                    cols = [r["name"] for r in cursor.fetchall()]
+                    id_col = "asset_id" if "asset_id" in cols else "id" if "id" in cols else None
+                    if id_col and "path" in cols:
+                        cursor.execute(f"SELECT {id_col}, path FROM {t} WHERE path IS NOT NULL;")
+                        for r in cursor.fetchall():
+                            locations[r[id_col]] = r["path"]
+                        if locations:
+                            break
+                conn.close()
+                if locations:
+                    return locations
+            except Exception as e:
+                sys.stderr.write(f"[SeratoV4Engine] Erro ao ler localizações de {db}: {e}\n")
 
         return locations
 
