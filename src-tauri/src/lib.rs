@@ -859,8 +859,8 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn move_to_trash(path: String) -> Result<(), String> {
-        bloqueio_serato("mover arquivo para a lixeira")?;
+    pub async fn move_to_trash(app: AppHandle, path: String) -> Result<(), String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "mover arquivo para a lixeira")?;
         let mut file_path = PathBuf::from(&path);
 
         // Se o caminho for relativo ou não existir diretamente, tenta resolver contra /Volumes/* ou Home
@@ -1541,6 +1541,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn restore_serato_db(app: AppHandle, backup_path: String) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "restaurar backup do banco do Serato")?;
         let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--restore-db");
         cmd.arg(&backup_path);
@@ -1639,9 +1640,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn restore_auto_cues(app: AppHandle, filepath: String) -> Result<String, String> {
-        if is_serato_running() {
-            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de restaurar Hot Cues.".into());
-        }
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "restaurar Hot Cues nos arquivos")?;
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--restore");
         cmd.arg(&filepath);
@@ -2168,6 +2167,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn smart_crate_delete(app: AppHandle, nome: String) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "remover smart crate")?;
         run_py_json(&app, "library_tools.py", &["--smart-delete".into(), nome])
     }
 
@@ -2325,6 +2325,7 @@ mod commands {
         rel_path: String,
         source_path: String,
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "religar faixa ausente")?;
         let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--relink");
         cmd.arg("--mp3");
@@ -2405,6 +2406,7 @@ mod commands {
         target_path: Option<String>,
         target_paths: Option<String>,
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "remover faixas perdidas das crates")?;
         let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
         cmd.arg("--remove-lost");
         cmd.arg("--mp3");
@@ -2506,6 +2508,7 @@ mod commands {
         app: AppHandle,
         upgrades_json: String,
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "substituir faixas por upgrades")?;
         let mut cmd = find_python_cmd(Some(&app), "track_matcher.py")?;
         cmd.arg("--replace-upgrades");
         cmd.arg(&upgrades_json);
@@ -2521,6 +2524,7 @@ mod commands {
         tracks_json: String,
         target_folder: String,
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "integrar faixas na crate")?;
         let mut cmd = find_python_cmd(Some(&app), "track_matcher.py")?;
         cmd.arg("--integrate-tracks");
         cmd.arg(&tracks_json);
@@ -2642,6 +2646,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn resample_track_local(app: AppHandle, filepath: String) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "normalizar frequência de áudio")?;
         let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--resample-local");
         cmd.arg(&filepath);
@@ -2906,6 +2911,7 @@ mod commands {
         filepath: String,
         new_name: String,
     ) -> Result<String, String> {
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "renomear arquivo de áudio")?;
         let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--rename-track");
         cmd.arg(&filepath);
@@ -2930,9 +2936,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn apply_auto_cues(app: AppHandle, filepath: String) -> Result<String, String> {
-        if is_serato_running() {
-            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de gravar Hot Cues nos arquivos.".into());
-        }
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "gravar Hot Cues nos arquivos")?;
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--apply");
         cmd.arg(&filepath);
@@ -3188,9 +3192,7 @@ mod commands {
 
     #[tauri::command]
     pub async fn apply_batch_auto_cues(app: AppHandle, filepaths_json: String) -> Result<String, String> {
-        if is_serato_running() {
-            return Err("Bloqueio de segurança: O Serato DJ Pro está em execução. Feche o Serato antes de aplicar lote de Hot Cues nos arquivos.".into());
-        }
+        let _guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar lote de Hot Cues nos arquivos")?;
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--apply-batch");
         cmd.arg(&filepaths_json);
@@ -3918,5 +3920,60 @@ mod tests {
         assert_ne!(id1, id2);
         assert!(id1.contains("-"));
         assert!(id2.contains("-"));
+    }
+
+    #[test]
+    fn test_concurrent_threads_only_one_acquires_lock_and_releases_on_error_or_panic() {
+        let state = AppSecurityState::new();
+        let state_a = state.clone();
+        let state_b = state.clone();
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let b_a = Arc::clone(&barrier);
+        let b_b = Arc::clone(&barrier);
+
+        let h1 = std::thread::spawn(move || {
+            b_a.wait();
+            let g = state_a.acquire_lock();
+            if g.is_ok() {
+                std::thread::sleep(Duration::from_millis(40));
+                true
+            } else {
+                false
+            }
+        });
+
+        let h2 = std::thread::spawn(move || {
+            b_b.wait();
+            let g = state_b.acquire_lock();
+            if g.is_ok() {
+                std::thread::sleep(Duration::from_millis(40));
+                true
+            } else {
+                false
+            }
+        });
+
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert_ne!(r1, r2, "Apenas uma operação simultânea pode adquirir o lock");
+        assert!(!state.is_operation_active.load(Ordering::SeqCst));
+
+        // Simula falha/panic durante operação com guard ativo
+        let state_panic = state.clone();
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = state_panic.acquire_lock().expect("Lock deve estar livre");
+            assert!(state_panic.is_operation_active.load(Ordering::SeqCst));
+            panic!("Falha simulada durante operação");
+        }));
+        assert!(res.is_err());
+        assert!(
+            !state.is_operation_active.load(Ordering::SeqCst),
+            "Lock deve ser liberado automaticamente após falha/panic via Drop"
+        );
+
+        // Nova operação após falha deve ser aceita normalmente
+        let guard_after = state.acquire_lock();
+        assert!(guard_after.is_ok());
     }
 }
