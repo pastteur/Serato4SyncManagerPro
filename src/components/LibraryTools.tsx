@@ -89,8 +89,22 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
   const [smartKeys, setSmartKeys] = useState<string>('');
   const [smartCues, setSmartCues] = useState<'any' | 'yes' | 'no'>('any');
   const [smartBitrate, setSmartBitrate] = useState<string>('');
-  const [smartPreview, setSmartPreview] = useState<number | null>(null);
+  const [smartPlan, setSmartPlan] = useState<{
+    plan_id: string;
+    nome: string;
+    regras: Record<string, unknown>;
+    caminhos: string[];
+    file_hashes: Record<string, string>;
+    plan_hash: string;
+    total: number;
+    configSnapshot: string;
+  } | null>(null);
   const [smartRules, setSmartRules] = useState<any[]>([]);
+
+  // Invalida o plano imutável sempre que qualquer critério da Smart Crate for alterado
+  useEffect(() => {
+    setSmartPlan(null);
+  }, [smartName, smartBpmMin, smartBpmMax, smartKeys, smartCues, smartBitrate]);
 
   // Novidades
   const [newFiles, setNewFiles] = useState<any>(null);
@@ -250,9 +264,15 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
 
   const smartPrev = async () => {
     try {
-      const res = await call<any>('smart_crate_create', { mp3Path, seratoPath, configJson: smartConfig(), dryRun: true });
-      if (res.sucesso) setSmartPreview(res.total);
-      else onAddLog(`❌ Prévia: ${res.erro}`);
+      const snapshot = smartConfig();
+      const res = await call<any>('smart_crate_create', { mp3Path, seratoPath, configJson: snapshot, dryRun: true });
+      if (res.sucesso && res.plano) {
+        setSmartPlan({ ...res.plano, configSnapshot: snapshot });
+      } else if (res.sucesso) {
+        onAddLog('⚠️ Prévia concluída sem plano imutável retornado pelo backend.');
+      } else {
+        onAddLog(`❌ Prévia: ${res.erro}`);
+      }
     } catch (e) {
       onAddLog(`❌ Prévia: ${e}`);
     }
@@ -260,10 +280,28 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
 
   const smartCreate = async () => {
     if (!smartName.trim()) return;
+    const snapshot = smartConfig();
+    if (!smartPlan || smartPlan.configSnapshot !== snapshot) {
+      onAddLog('⚠️ Gere uma nova prévia antes de criar a Smart Crate para garantir que o plano gravado seja idêntico ao analisado.');
+      return;
+    }
     try {
-      const res = await call<any>('smart_crate_create', { mp3Path, seratoPath, configJson: smartConfig(), dryRun: false });
+      const payload = JSON.stringify({
+        nome: smartPlan.nome,
+        regras: smartPlan.regras,
+        plan: {
+          plan_id: smartPlan.plan_id,
+          nome: smartPlan.nome,
+          regras: smartPlan.regras,
+          caminhos: smartPlan.caminhos,
+          file_hashes: smartPlan.file_hashes,
+          plan_hash: smartPlan.plan_hash,
+          total: smartPlan.total,
+        },
+      });
+      const res = await call<any>('smart_crate_create', { mp3Path, seratoPath, configJson: payload, dryRun: false });
       if (res.sucesso) {
-        onAddLog(`🎯 ${res.mensagem}`);
+        onAddLog(`🎯 ${res.mensagem} (plano ${res.plan_id || smartPlan.plan_id})`);
         loadSmartRules();
       } else {
         onAddLog(`❌ Crate inteligente: ${res.erro}`);
@@ -547,10 +585,18 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
             <Btn onClick={smartPrev} disabled={!ready}>
               <Eye className="w-3.5 h-3.5" /><span>Prévia</span>
             </Btn>
-            <Btn tone="primary" onClick={smartCreate} disabled={!ready || !smartName.trim()}>
+            <Btn tone="primary" onClick={smartCreate} disabled={!ready || !smartName.trim() || !smartPlan}>
               <Play className="w-3.5 h-3.5" /><span>Criar / atualizar crate</span>
             </Btn>
-            {smartPreview !== null && <span className="text-[11px] text-serato-muted font-mono">prévia: {smartPreview} faixas</span>}
+            {smartPlan !== null ? (
+              <span className="text-[11px] text-serato-muted font-mono">
+                prévia: {smartPlan.total} faixas (plano #{smartPlan.plan_id})
+              </span>
+            ) : (
+              <span className="text-[11px] text-serato-muted">
+                Gere a prévia para travar o plano imutável antes de criar
+              </span>
+            )}
           </div>
 
           <div className="border-t border-serato-cardBorder pt-3 space-y-2">

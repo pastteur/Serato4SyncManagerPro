@@ -21,6 +21,8 @@ import sys
 
 sys.dont_write_bytecode = True
 import json
+import uuid
+import hashlib
 import argparse
 from pathlib import Path
 from datetime import datetime
@@ -582,19 +584,95 @@ def _save_smart_rules(rules):
     SMART_RULES_PATH.write_text(json.dumps(rules, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def create_smart_crate(mp3_folder, serato_dir, nome, rules, salvar_regra=True, dry_run=False):
+def _file_sha256(filepath: str) -> str:
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _compute_smart_plan_hash(nome: str, rules: dict, caminhos: list, file_hashes: dict) -> str:
+    payload = {
+        "nome": nome.strip(),
+        "regras": rules or {},
+        "caminhos": caminhos,
+        "file_hashes": file_hashes,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def create_smart_crate(mp3_folder, serato_dir, nome, rules, salvar_regra=True, dry_run=False, plan=None):
     if not nome or not nome.strip():
         return {"sucesso": False, "erro": "Informe um nome para a crate inteligente"}
-    items = build_smart_items(mp3_folder, rules, serato_dir)
+    nome_limpo = nome.strip()
+
     if dry_run:
-        return {"sucesso": True, "dry_run": True, "total": len(items),
-                "mensagem": "Prévia: %d faixas correspondem às regras." % len(items)}
+        root = library_root_for(serato_dir).resolve()
+        items = build_smart_items(mp3_folder, rules, serato_dir)
+        caminhos = [item["caminho_rel"] for item in items]
+        file_hashes = {}
+        for rel in caminhos:
+            abs_p = (root / rel).resolve()
+            try:
+                file_hashes[rel] = _file_sha256(str(abs_p))
+            except OSError as e_h:
+                return {"sucesso": False, "erro": f"Falha ao ler faixa na prévia ({rel}): {e_h}"}
+        plan_id = uuid.uuid4().hex[:12]
+        plan_hash = _compute_smart_plan_hash(nome_limpo, rules, caminhos, file_hashes)
+        return {
+            "sucesso": True,
+            "dry_run": True,
+            "total": len(items),
+            "plano": {
+                "plan_id": plan_id,
+                "nome": nome_limpo,
+                "regras": rules or {},
+                "caminhos": caminhos,
+                "file_hashes": file_hashes,
+                "plan_hash": plan_hash,
+                "total": len(items),
+            },
+            "mensagem": "Prévia: %d faixas correspondem às regras." % len(items),
+        }
+
+    if plan is not None:
+        if not isinstance(plan, dict) or not plan.get("plan_id") or not plan.get("plan_hash"):
+            return {"sucesso": False, "erro": "Plano de Smart Crate inválido. Gere uma nova prévia."}
+        caminhos_plan = plan.get("caminhos")
+        file_hashes_plan = plan.get("file_hashes") or {}
+        if not isinstance(caminhos_plan, list):
+            return {"sucesso": False, "erro": "Lista de faixas do plano inválida. Gere uma nova prévia."}
+        expected_hash = _compute_smart_plan_hash(nome_limpo, rules, caminhos_plan, file_hashes_plan)
+        if expected_hash != plan.get("plan_hash"):
+            return {"sucesso": False, "erro": "Plano divergente dos critérios atuais ou adulterado. Gere uma nova prévia."}
+        root = library_root_for(serato_dir).resolve()
+        for rel in caminhos_plan:
+            p_obj = (root / rel).resolve()
+            if not p_obj.exists():
+                return {"sucesso": False, "erro": f"Faixa da prévia não encontrada no disco: {p_obj.name}. Gere uma nova prévia."}
+            expected_fh = file_hashes_plan.get(rel)
+            if expected_fh:
+                try:
+                    if _file_sha256(str(p_obj)) != expected_fh:
+                        return {"sucesso": False, "erro": f"Faixa da prévia foi modificada no disco: {p_obj.name}. Gere uma nova prévia."}
+                except OSError as e_chk:
+                    return {"sucesso": False, "erro": f"Falha ao validar faixa {p_obj.name}: {e_chk}"}
+        items = [{"caminho_rel": rel} for rel in caminhos_plan]
+    else:
+        items = build_smart_items(mp3_folder, rules, serato_dir)
+
     if not items:
         return {"sucesso": False, "erro": "Nenhuma faixa corresponde às regras; crate não criada"}
-    res = export_matched_to_serato_crate(nome.strip(), items, str(serato_dir))
+    res = export_matched_to_serato_crate(nome_limpo, items, str(serato_dir))
+    if res.get("sucesso") and plan is not None:
+        res["plan_id"] = plan.get("plan_id")
+        res["plan_hash"] = plan.get("plan_hash")
     if res.get("sucesso") and salvar_regra:
-        existentes = [r for r in _load_smart_rules() if r.get("nome") != nome.strip()]
-        existentes.append({"nome": nome.strip(), "regras": rules})
+        existentes = [r for r in _load_smart_rules() if r.get("nome") != nome_limpo]
+        existentes.append({"nome": nome_limpo, "regras": rules})
         _save_smart_rules(existentes)
     return res
 
@@ -690,7 +768,7 @@ def main():
     elif args.smart_create:
         cfg = json.loads(args.smart_create)
         res = create_smart_crate(args.mp3, args.serato, cfg.get("nome", ""), cfg.get("regras", {}),
-                                 dry_run=args.smart_dry_run)
+                                 dry_run=args.smart_dry_run, plan=cfg.get("plan"))
     elif args.smart_refresh:
         res = refresh_smart_crates(args.mp3, args.serato)
     elif args.smart_list:
