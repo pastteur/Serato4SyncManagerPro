@@ -53,7 +53,6 @@
       "../library_tools.py": "library_tools.py",
       "../duplicates_tool.py": "duplicates_tool.py",
       "../crate_ops.py": "crate_ops.py",
-      "../run_local_agent.py": "run_local_agent.py",
       "../serato_v4_engine.py": "serato_v4_engine.py",
       "../music_library_helper.py": "music_library_helper.py",
       "../fts_library_cache.py": "fts_library_cache.py",

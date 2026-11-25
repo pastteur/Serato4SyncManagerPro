@@ -2,7 +2,7 @@
 
 > **O ecossistema definitivo para organização, sincronização e proteção de bibliotecas para DJs profissionais no Serato DJ Pro 4.**
 
-![macOS Tahoe / Apple Silicon & Intel](https://img.shields.io/badge/Platform-macOS%20(Silicon%20%26%20Intel)-00e5ff?style=for-the-badge&logo=apple)
+![macOS 11+ / Apple Silicon ARM64](https://img.shields.io/badge/Platform-macOS%2011%2B%20(Apple%20Silicon%20ARM64)-00e5ff?style=for-the-badge&logo=apple)
 ![Tauri v2](https://img.shields.io/badge/Tauri-v2.0-ffd700?style=for-the-badge&logo=tauri)
 ![React 18](https://img.shields.io/badge/React-18-61dafb?style=for-the-badge&logo=react)
 ![Rust](https://img.shields.io/badge/Rust-High%20Performance-dea584?style=for-the-badge&logo=rust)
@@ -96,7 +96,7 @@
 * **Desktop Framework:** [Tauri v2](https://v2.tauri.app/) (Rust + WebKit)
 * **Frontend:** React 18, TypeScript, Tailwind CSS, Lucide Icons, Vite, Bun
 * **Audio Engine:** Python 3, Mutagen, SQLite3 WAL
-* **Compatibilidade:** macOS Sonoma & macOS Tahoe (Apple Silicon M1/M2/M3/M4 & Intel)
+* **Compatibilidade:** macOS 11.0 (Big Sur) ou superior — arquitetura nativa Apple Silicon (ARM64: M1/M2/M3/M4)
 
 ---
 

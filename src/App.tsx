@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { interpretSyncFinishedEvent, SyncFinishedPayload } from './utils/syncEvents';
 import { Header } from './components/Header';
 import { PathSelector } from './components/PathSelector';
 import { SyncControls } from './components/SyncControls';
@@ -82,6 +83,7 @@ export const App: React.FC = () => {
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isPioneerModalOpen, setIsPioneerModalOpen] = useState<boolean>(false);
   const [seratoRunning, setSeratoRunning] = useState<boolean>(false);
+  const [syncFeedback, setSyncFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [fsNotification, setFsNotification] = useState<{ count: number; extensions: string[] } | null>(null);
   const [activePlayingTrack, setActivePlayingTrack] = useState<PlayingTrackInfo | null>(null);
 
@@ -294,13 +296,14 @@ export const App: React.FC = () => {
           }
         }).then(unlisten => { unlistenLog = unlisten; });
 
-        listen<any>('sync-finished', (event) => {
+        listen<SyncFinishedPayload>('sync-finished', (event) => {
           setIsRunning(false);
-          const data = event.payload;
-          if (data && data.summary) {
-            setSummary(data.summary);
+          const feedback = interpretSyncFinishedEvent(event?.payload);
+          if (feedback.summary) {
+            setSummary(feedback.summary as SyncSummary);
           }
-          addLog('🎯 Processo de sincronização encerrado pelo sistema.');
+          setSyncFeedback({ type: feedback.bannerType, message: feedback.bannerMessage });
+          addLog(feedback.logMessage);
         }).then(unlisten => { unlistenFinish = unlisten; });
 
         listen<string>('operation-in-progress-warning', (event) => {
@@ -418,6 +421,7 @@ export const App: React.FC = () => {
     }
 
     setIsRunning(true);
+    setSyncFeedback(null);
     setLogs([]);
     setActiveTab('logs');
     if (dryRun) {
@@ -621,6 +625,26 @@ export const App: React.FC = () => {
         onOpenGuide={() => setIsGuideOpen(true)}
         onAddLog={addLog}
       />
+
+      {syncFeedback && (
+        <div
+          role="status"
+          className={`mx-3 mt-2 px-3 py-2 rounded-lg border flex items-center justify-between text-xs font-medium shrink-0 ${
+            syncFeedback.type === 'success'
+              ? 'bg-emerald-950/70 border-emerald-500/40 text-emerald-200'
+              : 'bg-rose-950/80 border-rose-500/50 text-rose-200'
+          }`}
+        >
+          <span>{syncFeedback.type === 'success' ? '✅' : '❌'} {syncFeedback.message}</span>
+          <button
+            type="button"
+            onClick={() => setSyncFeedback(null)}
+            className="ml-4 text-xs opacity-75 hover:opacity-100 underline"
+          >
+            Fechar
+          </button>
+        </div>
+      )}
 
       {/* Main Container without Double Scrolling */}
       <main className="flex-1 min-h-0 flex flex-col p-2 md:p-3 space-y-2 overflow-hidden">
