@@ -29,6 +29,10 @@ export function interpretSyncFinishedEvent(payload: unknown): SyncFeedback {
 
   const data = payload as Record<string, unknown>;
   const hasExplicitBool = typeof data.success === 'boolean';
+  const normalizedSummary =
+    data.summary && typeof data.summary === 'object' && !Array.isArray(data.summary)
+      ? data.summary
+      : undefined;
   const rawMessage =
     typeof data.message === 'string' && data.message.trim().length > 0
       ? data.message.trim()
@@ -40,7 +44,7 @@ export function interpretSyncFinishedEvent(payload: unknown): SyncFeedback {
       logMessage: `❌ Sincronização encerrada sem status explícito${rawMessage ? `: ${rawMessage}` : '.'}`,
       bannerType: 'error',
       bannerMessage: rawMessage || 'Sincronização encerrada sem confirmação explícita de sucesso.',
-      summary: data.summary,
+      summary: normalizedSummary,
     };
   }
 
@@ -51,7 +55,7 @@ export function interpretSyncFinishedEvent(payload: unknown): SyncFeedback {
       logMessage: `✅ ${msg}`,
       bannerType: 'success',
       bannerMessage: msg,
-      summary: data.summary,
+      summary: normalizedSummary,
     };
   }
 
@@ -61,6 +65,6 @@ export function interpretSyncFinishedEvent(payload: unknown): SyncFeedback {
     logMessage: `❌ Falha na sincronização: ${errMsg}`,
     bannerType: 'error',
     bannerMessage: errMsg,
-    summary: data.summary,
+    summary: normalizedSummary,
   };
 }

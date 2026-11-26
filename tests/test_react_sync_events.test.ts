@@ -42,4 +42,31 @@ describe('interpretSyncFinishedEvent', () => {
     expect(resNull.ok).toBe(false);
     expect(resNull.bannerType).toBe('error');
   });
+
+  it('propaga summary quando enviado no payload final de sync-finished', () => {
+    const summaryObj = {
+      sucesso: true,
+      total_faixas: 120,
+      crates_gravadas: 4,
+    };
+    const res = interpretSyncFinishedEvent({
+      success: true,
+      exit_code: 0,
+      message: 'Sincronização concluída com sucesso.',
+      summary: summaryObj,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.summary).toEqual(summaryObj);
+  });
+
+  it('normaliza summary nulo ou ausente para undefined sem quebrar o fluxo via sync-log', () => {
+    const res = interpretSyncFinishedEvent({
+      success: true,
+      exit_code: 0,
+      message: 'Sincronização concluída com sucesso.',
+      summary: null,
+    });
+    expect(res.ok).toBe(true);
+    expect(res.summary).toBeUndefined();
+  });
 });

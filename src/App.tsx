@@ -201,7 +201,14 @@ export const App: React.FC = () => {
           return;
         }
 
-        const paths = await invoke<{ mp3: string; serato: string }>('get_detected_paths');
+        const paths = await invoke<{ mp3: string; serato: string; same_volume?: boolean }>('get_detected_paths');
+
+        if (paths.mp3 && paths.serato && paths.same_volume === false) {
+          addLog(
+            `⚠️ Auto-detecção encontrou pastas em unidades diferentes (MP3=${paths.mp3} | Serato=${paths.serato}). Combinação automática bloqueada por segurança; selecione os caminhos manualmente.`
+          );
+          return;
+        }
 
         // Preenche somente caminhos ausentes ou inválidos
         if (paths.mp3 && (forceOverride || !isMp3Valid)) {

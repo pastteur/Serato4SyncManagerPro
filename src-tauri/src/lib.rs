@@ -86,10 +86,11 @@ pub fn format_structured_error(
     .to_string()
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct DetectedPaths {
     pub mp3: String,
     pub serato: String,
+    pub same_volume: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -113,11 +114,20 @@ pub struct SystemTelemetry {
     pub serato_running: bool,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct SyncFinishedPayload {
     pub success: bool,
     pub exit_code: Option<i32>,
     pub message: String,
+    pub summary: Option<serde_json::Value>,
+}
+
+fn parse_sync_summary_line(line: &str) -> Option<serde_json::Value> {
+    let json_str = line.strip_prefix("__PAYLOAD_JSON_SUMMARY__")?.trim();
+    if json_str.is_empty() {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(json_str).ok()
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -145,63 +155,87 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+fn validate_python_candidate(candidate: &std::path::Path) -> Result<(), String> {
+    if !candidate.exists() || !candidate.is_file() {
+        return Err(format!("arquivo inexistente: {}", candidate.display()));
+    }
+
+    let check_script = "import sys; assert sys.version_info >= (3, 9), f'Python {sys.version_info[0]}.{sys.version_info[1]} < 3.9'; import mutagen";
+    let output = Command::new(candidate)
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .args(["-c", check_script])
+        .output()
+        .map_err(|e| format!("falha ao executar {}: {}", candidate.display(), e))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if stderr.is_empty() {
+        format!("código de saída {:?}", output.status.code())
+    } else {
+        stderr
+    };
+    Err(format!("{} inválido ({})", candidate.display(), detail))
+}
+
 fn find_python_binary() -> Result<PathBuf, String> {
-    // 1. Variável de ambiente explícita
-    if let Ok(py_env) = std::env::var("SERATO_PYTHON").or_else(|_| std::env::var("PYTHON_PATH")) {
-        let p = PathBuf::from(&py_env);
-        if p.exists() && p.is_file() {
-            return Ok(p);
-        }
-    }
+    let mut candidates: Vec<PathBuf> = Vec::new();
 
-    // 2. Ambiente virtual ativo (VIRTUAL_ENV)
-    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
-        let venv_py = PathBuf::from(venv).join("bin").join("python3");
-        if venv_py.exists() && venv_py.is_file() {
-            return Ok(venv_py);
-        }
-    }
-
-    // 3. Python empacotado no bundle .app se existir
+    // 1. Python empacotado no bundle .app (prioridade máxima em produção)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(macos_dir) = exe.parent() {
             if let Some(contents_dir) = macos_dir.parent() {
-                let bundled_py = contents_dir.join("Resources").join("python").join("bin").join("python3");
-                if bundled_py.exists() && bundled_py.is_file() {
-                    return Ok(bundled_py);
-                }
+                candidates.push(
+                    contents_dir
+                        .join("Resources")
+                        .join("python")
+                        .join("bin")
+                        .join("python3"),
+                );
             }
         }
     }
 
-    // 4. Locais padrão no macOS
-    let candidates = [
+    // 2. Variáveis de ambiente e virtualenv apenas em modo de desenvolvimento/teste
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(py_env) = std::env::var("SERATO_PYTHON").or_else(|_| std::env::var("PYTHON_PATH")) {
+            let trimmed = py_env.trim();
+            if !trimmed.is_empty() {
+                candidates.push(PathBuf::from(trimmed));
+            }
+        }
+        if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+            let trimmed = venv.trim();
+            if !trimmed.is_empty() {
+                candidates.push(PathBuf::from(trimmed).join("bin").join("python3"));
+            }
+        }
+    }
+
+    // 3. Locais canônicos padrão no macOS (sem fallback arbitrário via PATH)
+    for canonical in [
         "/opt/homebrew/bin/python3",
         "/usr/local/bin/python3",
         "/usr/bin/python3",
-    ];
+    ] {
+        candidates.push(PathBuf::from(canonical));
+    }
 
-    for candidate in &candidates {
-        let p = PathBuf::from(candidate);
-        if p.exists() && p.is_file() {
-            return Ok(p);
+    let mut diagnostics: Vec<String> = Vec::new();
+    for candidate in candidates {
+        match validate_python_candidate(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(reason) => diagnostics.push(reason),
         }
     }
 
-    // 5. Fallback via PATH
-    if let Ok(output) = Command::new("which").arg("python3").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                let p = PathBuf::from(path_str);
-                if p.exists() && p.is_file() {
-                    return Ok(p);
-                }
-            }
-        }
-    }
-
-    Err("Nenhum interpretador Python 3 funcional foi localizado no sistema (verificado Homebrew, /usr/local/bin, /usr/bin).".into())
+    Err(format!(
+        "Nenhum interpretador Python 3.9+ com o módulo 'mutagen' instalado foi localizado. Verificações: {}",
+        diagnostics.join("; ")
+    ))
 }
 
 fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> Result<PathBuf, String> {
@@ -549,10 +583,12 @@ mod commands {
         }
     }
 
-    #[tauri::command]
-    pub fn get_detected_paths() -> DetectedPaths {
+    pub fn detect_paths_in_roots(
+        volumes_dir: &std::path::Path,
+        home_dir: Option<&std::path::Path>,
+    ) -> DetectedPaths {
         // Prioridade 1: Volume externo que possua TANTO pasta de músicas quanto pasta Serato na mesma unidade
-        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+        if let Ok(entries) = std::fs::read_dir(volumes_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -583,6 +619,7 @@ mod commands {
                             return DetectedPaths {
                                 mp3: m.to_string_lossy().to_string(),
                                 serato: s.to_string_lossy().to_string(),
+                                same_volume: true,
                             };
                         }
                     }
@@ -591,7 +628,7 @@ mod commands {
         }
 
         // Prioridade 2: Armazenamento interno (Macintosh HD / Notebook) na mesma unidade
-        if let Some(home) = dirs_home() {
+        if let Some(home) = home_dir {
             let internal_mp3_sub = home.join("Music").join("MP3");
             let internal_mp3 = home.join("Music");
             let internal_serato_music = home.join("Music").join("_Serato_");
@@ -618,15 +655,17 @@ mod commands {
                 return DetectedPaths {
                     mp3: m.to_string_lossy().to_string(),
                     serato: s.to_string_lossy().to_string(),
+                    same_volume: true,
                 };
             }
         }
 
-        // Se nenhum volume tiver ambos, procura individualmente mas NUNCA inventa caminhos inexistentes
+        // Fallback: retorna caminhos encontrados individualmente com same_volume=false
+        // para que o frontend NÃO os combine automaticamente entre unidades distintas.
         let mut final_mp3 = String::new();
         let mut final_serato = String::new();
 
-        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+        if let Ok(entries) = std::fs::read_dir(volumes_dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
@@ -655,10 +694,37 @@ mod commands {
             }
         }
 
+        if let Some(home) = home_dir {
+            if final_mp3.is_empty() {
+                let internal_mp3_sub = home.join("Music").join("MP3");
+                let internal_mp3 = home.join("Music");
+                if internal_mp3_sub.exists() && internal_mp3_sub.is_dir() {
+                    final_mp3 = internal_mp3_sub.to_string_lossy().to_string();
+                } else if internal_mp3.exists() && internal_mp3.is_dir() {
+                    final_mp3 = internal_mp3.to_string_lossy().to_string();
+                }
+            }
+            if final_serato.is_empty() {
+                let internal_serato_music = home.join("Music").join("_Serato_");
+                let internal_serato_appsup = home.join("Library").join("Application Support").join("Serato");
+                if internal_serato_music.exists() && internal_serato_music.is_dir() {
+                    final_serato = internal_serato_music.to_string_lossy().to_string();
+                } else if internal_serato_appsup.exists() && internal_serato_appsup.is_dir() {
+                    final_serato = internal_serato_appsup.to_string_lossy().to_string();
+                }
+            }
+        }
+
         DetectedPaths {
             mp3: final_mp3,
             serato: final_serato,
+            same_volume: false,
         }
+    }
+
+    #[tauri::command]
+    pub fn get_detected_paths() -> DetectedPaths {
+        detect_paths_in_roots(std::path::Path::new("/Volumes"), dirs_home().as_deref())
     }
 
     #[tauri::command]
@@ -1019,6 +1085,7 @@ mod commands {
                         success: false,
                         exit_code: Some(1),
                         message: err_msg,
+                        summary: None,
                     },
                 );
                 return;
@@ -1054,6 +1121,7 @@ mod commands {
                             success: false,
                             exit_code: Some(1),
                             message: err_msg,
+                            summary: None,
                         },
                     );
                     return;
@@ -1096,7 +1164,11 @@ mod commands {
                 err_lines.join("\n")
             });
 
-            let _ = stdout_thread.join();
+            let parsed_summary = stdout_thread
+                .join()
+                .ok()
+                .flatten()
+                .and_then(|line| parse_sync_summary_line(&line));
             let stderr_output = stderr_thread.join().unwrap_or_default();
 
             let exit_status = child.wait();
@@ -1123,6 +1195,7 @@ mod commands {
                     success,
                     exit_code: Some(code),
                     message,
+                    summary: parsed_summary,
                 },
             );
         });
@@ -3975,5 +4048,97 @@ mod tests {
         // Nova operação após falha deve ser aceita normalmente
         let guard_after = state.acquire_lock();
         assert!(guard_after.is_ok());
+    }
+
+    #[test]
+    fn test_detect_paths_blocks_cross_volume_auto_pairing() {
+        let base = std::env::temp_dir().join(format!("serato_detect_cross_{}", generate_operacao_id()));
+        let volumes = base.join("Volumes");
+        let vol_a = volumes.join("DriveA");
+        let vol_b = volumes.join("DriveB");
+        std::fs::create_dir_all(vol_a.join("Music").join("MP3")).unwrap();
+        std::fs::create_dir_all(vol_b.join("_Serato_")).unwrap();
+
+        let detected = commands::detect_paths_in_roots(&volumes, None);
+        assert!(!detected.same_volume);
+        assert!(detected.mp3.ends_with("DriveA/Music/MP3"));
+        assert!(detected.serato.ends_with("DriveB/_Serato_"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_detect_paths_prefers_same_volume_over_split_volumes() {
+        let base = std::env::temp_dir().join(format!("serato_detect_same_{}", generate_operacao_id()));
+        let volumes = base.join("Volumes");
+        let vol_a = volumes.join("DriveA");
+        let vol_b = volumes.join("DriveB");
+        std::fs::create_dir_all(vol_a.join("Music").join("MP3")).unwrap();
+        std::fs::create_dir_all(vol_b.join("Music").join("MP3")).unwrap();
+        std::fs::create_dir_all(vol_b.join("_Serato_")).unwrap();
+
+        let detected = commands::detect_paths_in_roots(&volumes, None);
+        assert!(detected.same_volume);
+        assert!(detected.mp3.ends_with("DriveB/Music/MP3"));
+        assert!(detected.serato.ends_with("DriveB/_Serato_"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_validate_python_candidate_checks_version_and_mutagen() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("serato_py_check_{}", generate_operacao_id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        let missing = base.join("missing_python");
+        assert!(validate_python_candidate(&missing).is_err());
+
+        let fake_fail = base.join("fake_fail.sh");
+        std::fs::write(&fake_fail, "#!/bin/sh\necho \"No module named 'mutagen'\" >&2\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&fake_fail).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_fail, perms).unwrap();
+        let err = validate_python_candidate(&fake_fail).unwrap_err();
+        assert!(err.contains("mutagen"));
+
+        let fake_ok = base.join("fake_ok.sh");
+        std::fs::write(&fake_ok, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms_ok = std::fs::metadata(&fake_ok).unwrap().permissions();
+        perms_ok.set_mode(0o755);
+        std::fs::set_permissions(&fake_ok, perms_ok).unwrap();
+        assert!(validate_python_candidate(&fake_ok).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_find_python_binary_resolves_valid_runtime() {
+        let bin = find_python_binary();
+        assert!(bin.is_ok(), "Esperava encontrar Python 3.9+ com mutagen: {:?}", bin);
+    }
+
+    #[test]
+    fn test_parse_sync_summary_line_and_payload_contract() {
+        let line = "__PAYLOAD_JSON_SUMMARY__{\"sucesso\":true,\"total_faixas\":42,\"crates_gravadas\":3}";
+        let parsed = parse_sync_summary_line(line).expect("Resumo JSON deveria ser parseado");
+        assert_eq!(parsed["sucesso"], true);
+        assert_eq!(parsed["total_faixas"], 42);
+        assert_eq!(parsed["crates_gravadas"], 3);
+
+        assert!(parse_sync_summary_line("linha comum de log").is_none());
+        assert!(parse_sync_summary_line("__PAYLOAD_JSON_SUMMARY__").is_none());
+        assert!(parse_sync_summary_line("__PAYLOAD_JSON_SUMMARY__{invalido").is_none());
+
+        let payload = SyncFinishedPayload {
+            success: true,
+            exit_code: Some(0),
+            message: "Sincronização concluída com sucesso.".into(),
+            summary: Some(parsed),
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["summary"]["total_faixas"], 42);
     }
 }
