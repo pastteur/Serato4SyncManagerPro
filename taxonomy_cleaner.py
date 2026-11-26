@@ -75,12 +75,17 @@ class TaxonomyCleaner:
             return ""
         artist = raw_artist.strip()
 
-        # Padroniza feat., ft., featuring -> feat.
-        artist = re.sub(r'\b(ft\.?|feat\.?|featuring)\b', 'feat.', artist, flags=re.IGNORECASE)
+        # BUG FIX #2: padrões anteriores como r'\b(feat\.?)\b' casavam apenas 'feat'
+        # (com \.? consumindo zero caracteres), deixando o ponto original no lugar e
+        # produzindo duplicação "feat.. " quando o input já era "feat.".
+        # O \b final falha após '.' (não é word-char), então o engine retrocede e casa
+        # só 'feat', deixando o '.' solto. Solução: lookahead (?=\s|\Z) em vez de \b
+        # no final, garantindo que o \.? opcional sempre consuma o ponto trailing.
+        artist = re.sub(r'\b(?:ft|feat|featuring)\.?(?=\s|\Z)', 'feat.', artist, flags=re.IGNORECASE)
         # Padroniza vs., versus -> vs.
-        artist = re.sub(r'\b(versus|vs\.?)\b', 'vs.', artist, flags=re.IGNORECASE)
+        artist = re.sub(r'\b(?:versus|vs)\.?(?=\s|\Z)', 'vs.', artist, flags=re.IGNORECASE)
         # Padroniza presents -> pres.
-        artist = re.sub(r'\b(presents|pres\.?)\b', 'pres.', artist, flags=re.IGNORECASE)
+        artist = re.sub(r'\b(?:presents|pres)\.?(?=\s|\Z)', 'pres.', artist, flags=re.IGNORECASE)
 
         # Espaçamento limpo
         artist = re.sub(r'\s+', ' ', artist)

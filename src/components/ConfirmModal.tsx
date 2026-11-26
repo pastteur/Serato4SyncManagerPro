@@ -75,6 +75,9 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
       <div
         className="bg-serato-dark border border-slate-700/80 rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4 relative"
         onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="confirm-modal-title"
       >
         {/* Botão de Fechar no Topo */}
         <button
@@ -92,7 +95,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
             {getIcon()}
           </div>
           <div>
-            <h3 className="text-base font-bold text-white leading-tight">{title}</h3>
+            <h3 className="text-base font-bold text-white leading-tight" id="confirm-modal-title">{title}</h3>
             <p className="text-xs text-slate-400 mt-0.5">Aguardando sua confirmação para prosseguir.</p>
           </div>
         </div>

@@ -406,13 +406,23 @@ export const OrphanFilesModal: React.FC<OrphanFilesModalProps> = ({
                       {onMoveToTrash && (
                         <button
                           type="button"
-                          onClick={async () => {
-                            if (confirm(`Mover "${file.filename}" para a Lixeira do macOS?`)) {
-                              const ok = await onMoveToTrash(file.filepath, file.filepath);
-                              if (ok) {
-                                removeFilesFromState(new Set([file.filepath]));
-                              }
-                            }
+                          onClick={() => {
+                            // BUG FIX #5: substitui confirm() nativo do browser pelo
+                            // ConfirmModal padronizado do design system, garantindo UX
+                            // consistente e supressão correta de playerShortcuts.
+                            setConfirmConfig({
+                              isOpen: true,
+                              title: 'Mover para Lixeira',
+                              message: `Mover "${file.filename}" para a Lixeira do macOS?`,
+                              count: 1,
+                              variant: 'danger',
+                              action: async () => {
+                                const ok = await onMoveToTrash(file.filepath, file.filepath);
+                                if (ok) {
+                                  removeFilesFromState(new Set([file.filepath]));
+                                }
+                              },
+                            });
                           }}
                           className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 transition cursor-pointer"
                           title="Mover para Lixeira"

@@ -348,11 +348,16 @@ def extract_cues_from_raw_tag(raw_data: bytes) -> list:
             if name == 'CUE' and len(entry_data) >= 12:
                 _, idx, ms, _, col, _ = struct.unpack('>cBIc3s2s', entry_data[:12])
                 lbl = entry_data[12:].rstrip(b'\x00').decode('utf-8', errors='ignore')
+                # BUG FIX #1: col é bytes brutos (3 bytes RGB do Serato) —
+                # converte para string hex para garantir serialização JSON e
+                # interoperabilidade com build_serato_markers2_tag (aceita str via CUE_COLORS
+                # mas também bytes diretos; o formato "#rrggbb" é passado pelo frontend).
+                col_hex = "#" + col.hex() if isinstance(col, (bytes, bytearray)) else str(col)
                 cues.append({
                     "index": idx,
                     "pos_ms": ms,
                     "label": lbl,
-                    "color": col
+                    "color": col_hex
                 })
     except Exception:
         pass

@@ -56,7 +56,11 @@ class SmartTagManager:
             raw_comment = ""
             for frame in audio.values():
                 if frame.FrameID == "COMM":
-                    raw_comment = str(frame)
+                    # BUG FIX #3: str(frame) em frames COMM do mutagen produz uma
+                    # representação com null bytes (\x00) no estilo "<lang>\x00<desc>\x00<text>",
+                    # o que corrompe o campo free_text ao concatenar conteúdo duplicado.
+                    # Correção: acessa frame.text[0] diretamente (string limpa da tag).
+                    raw_comment = frame.text[0] if frame.text else ""
                     break
 
             # Extrai hashtags
