@@ -97,6 +97,7 @@ def get_quarantine_dir(serato_dir_str: str = "", file_path: Path = None) -> Path
         pass
     return QUARANTINE_DIR
 FFMPEG_CANDIDATES = [
+    str(Path(__file__).resolve().parent / "bin" / "ffmpeg"),
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
     shutil.which("ffmpeg") or ""
@@ -1210,9 +1211,9 @@ def resample_track_local(filepath_str: str) -> dict:
     if not file_p.exists():
         return {"sucesso": False, "erro": "Arquivo não encontrado."}
 
-    ffmpeg_bin = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
-    if not os.path.exists(ffmpeg_bin):
-        return {"sucesso": False, "erro": "FFmpeg não instalado no sistema."}
+    ffmpeg_bin = get_ffmpeg_bin()
+    if not ffmpeg_bin:
+        return {"sucesso": False, "erro": "FFmpeg não instalado no sistema. Instale com 'brew install ffmpeg'."}
 
     temp_id = f"resample_{int(datetime.now().timestamp() * 1000)}"
     temp_dir = Path("/tmp") / temp_id

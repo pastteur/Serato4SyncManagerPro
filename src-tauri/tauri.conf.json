@@ -24,11 +24,14 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost https://asset.localhost; media-src 'self' asset: http://asset.localhost https://asset.localhost blob:; connect-src 'self' ipc: http://ipc.localhost https://ipc.localhost; font-src 'self' data:",
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "**"
+          "$AUDIO/**",
+          "$HOME/Music/**",
+          "$HOME/Downloads/**",
+          "/Volumes/**"
         ]
       }
     }

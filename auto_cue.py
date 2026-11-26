@@ -361,7 +361,9 @@ def extract_cues_from_raw_tag(raw_data: bytes) -> list:
 
 
 def get_ffmpeg_bin():
+    bundled = str(Path(__file__).resolve().parent / "bin" / "ffmpeg")
     candidates = [
+        bundled,
         "/opt/homebrew/bin/ffmpeg",
         "/usr/local/bin/ffmpeg",
         shutil.which("ffmpeg") or ""

@@ -61,6 +61,7 @@ KEY_FRAMES = 40
 KEY_MIDI_RANGE = range(48, 72)  # C3 .. B4
 
 FFMPEG_CANDIDATES = [
+    str(Path(__file__).resolve().parent / "bin" / "ffmpeg"),
     "/opt/homebrew/bin/ffmpeg",
     "/usr/local/bin/ffmpeg",
     shutil.which("ffmpeg") or ""

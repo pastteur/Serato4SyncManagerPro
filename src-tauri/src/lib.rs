@@ -155,14 +155,157 @@ fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-fn validate_python_candidate(candidate: &std::path::Path) -> Result<(), String> {
+pub struct ApprovedSyncPlanState {
+    pub current: Arc<Mutex<Option<(String, serde_json::Value)>>>,
+}
+
+impl ApprovedSyncPlanState {
+    pub fn new() -> Self {
+        Self {
+            current: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct DependencyStatus {
+    pub python_ok: bool,
+    pub python_detail: String,
+    pub ffmpeg_ok: bool,
+    pub ffmpeg_path: Option<String>,
+    pub ffprobe_ok: bool,
+    pub ffprobe_path: Option<String>,
+    pub yt_dlp_ok: bool,
+    pub yt_dlp_path: Option<String>,
+    pub warnings: Vec<String>,
+}
+
+fn collect_vendor_paths(app: Option<&AppHandle>, script: Option<&Path>) -> Vec<PathBuf> {
+    let mut vendor_paths: Vec<PathBuf> = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents_dir) = macos_dir.parent() {
+                let res_vendor = contents_dir.join("Resources").join("vendor");
+                if res_vendor.is_dir() && !vendor_paths.contains(&res_vendor) {
+                    vendor_paths.push(res_vendor);
+                }
+            }
+        }
+    }
+
+    if let Some(handle) = app {
+        if let Ok(res_dir) = handle.path().resource_dir() {
+            let res_vendor = res_dir.join("vendor");
+            if res_vendor.is_dir() && !vendor_paths.contains(&res_vendor) {
+                vendor_paths.push(res_vendor);
+            }
+        }
+    }
+
+    if let Some(s) = script {
+        if let Some(parent) = s.parent() {
+            let script_vendor = parent.join("vendor");
+            if script_vendor.is_dir() && !vendor_paths.contains(&script_vendor) {
+                vendor_paths.push(script_vendor);
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if let Some(parent) = manifest_dir.parent() {
+            let dev_vendor = parent.join("vendor");
+            if dev_vendor.is_dir() && !vendor_paths.contains(&dev_vendor) {
+                vendor_paths.push(dev_vendor);
+            }
+        }
+    }
+
+    vendor_paths
+}
+
+fn build_pythonpath_env(vendor_paths: &[PathBuf]) -> Option<String> {
+    if vendor_paths.is_empty() {
+        return None;
+    }
+    let mut py_path_parts: Vec<String> = vendor_paths
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    if let Ok(existing) = std::env::var("PYTHONPATH") {
+        if !existing.is_empty() {
+            py_path_parts.push(existing);
+        }
+    }
+    Some(py_path_parts.join(":"))
+}
+
+fn authorize_asset_directory(app: &AppHandle, dir_path: &str) {
+    let clean = dir_path.trim();
+    if clean.is_empty() {
+        return;
+    }
+    let path = PathBuf::from(clean);
+    if path.is_dir() {
+        let _ = app.asset_protocol_scope().allow_directory(&path, true);
+    }
+}
+
+fn find_external_binary(app: Option<&AppHandle>, name: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(macos_dir) = exe.parent() {
+            if let Some(contents_dir) = macos_dir.parent() {
+                candidates.push(contents_dir.join("Resources").join("bin").join(name));
+            }
+        }
+    }
+    if let Some(handle) = app {
+        if let Ok(res_dir) = handle.path().resource_dir() {
+            candidates.push(res_dir.join("bin").join(name));
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        if let Some(parent) = manifest_dir.parent() {
+            candidates.push(parent.join("bin").join(name));
+        }
+    }
+
+    candidates.push(PathBuf::from("/opt/homebrew/bin").join(name));
+    candidates.push(PathBuf::from("/usr/local/bin").join(name));
+
+    if let Ok(path_env) = std::env::var("PATH") {
+        for dir in path_env.split(':') {
+            if !dir.trim().is_empty() {
+                candidates.push(PathBuf::from(dir.trim()).join(name));
+            }
+        }
+    }
+
+    candidates.into_iter().find(|p| p.exists() && p.is_file())
+}
+
+fn validate_python_candidate_with_vendor(
+    candidate: &std::path::Path,
+    vendor_paths: &[PathBuf],
+) -> Result<(), String> {
     if !candidate.exists() || !candidate.is_file() {
         return Err(format!("arquivo inexistente: {}", candidate.display()));
     }
 
     let check_script = "import sys; assert sys.version_info >= (3, 9), f'Python {sys.version_info[0]}.{sys.version_info[1]} < 3.9'; import mutagen";
-    let output = Command::new(candidate)
-        .env("PYTHONDONTWRITEBYTECODE", "1")
+    let mut cmd = Command::new(candidate);
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+    if let Some(py_path) = build_pythonpath_env(vendor_paths) {
+        cmd.env("PYTHONPATH", py_path);
+    }
+    let output = cmd
         .args(["-c", check_script])
         .output()
         .map_err(|e| format!("falha ao executar {}: {}", candidate.display(), e))?;
@@ -180,8 +323,15 @@ fn validate_python_candidate(candidate: &std::path::Path) -> Result<(), String> 
     Err(format!("{} inválido ({})", candidate.display(), detail))
 }
 
-fn find_python_binary() -> Result<PathBuf, String> {
+#[allow(dead_code)]
+fn validate_python_candidate(candidate: &std::path::Path) -> Result<(), String> {
+    let vendor_paths = collect_vendor_paths(None, None);
+    validate_python_candidate_with_vendor(candidate, &vendor_paths)
+}
+
+fn find_python_binary_with_app(app: Option<&AppHandle>) -> Result<PathBuf, String> {
     let mut candidates: Vec<PathBuf> = Vec::new();
+    let vendor_paths = collect_vendor_paths(app, None);
 
     // 1. Python empacotado no bundle .app (prioridade máxima em produção)
     if let Ok(exe) = std::env::current_exe() {
@@ -226,16 +376,20 @@ fn find_python_binary() -> Result<PathBuf, String> {
 
     let mut diagnostics: Vec<String> = Vec::new();
     for candidate in candidates {
-        match validate_python_candidate(&candidate) {
+        match validate_python_candidate_with_vendor(&candidate, &vendor_paths) {
             Ok(()) => return Ok(candidate),
             Err(reason) => diagnostics.push(reason),
         }
     }
 
     Err(format!(
-        "Nenhum interpretador Python 3.9+ com o módulo 'mutagen' instalado foi localizado. Verificações: {}",
+        "Nenhum interpretador Python 3.9+ com o módulo 'mutagen' (global ou vendor) foi localizado. Verificações: {}",
         diagnostics.join("; ")
     ))
+}
+
+fn find_python_binary() -> Result<PathBuf, String> {
+    find_python_binary_with_app(None)
 }
 
 fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> Result<PathBuf, String> {
@@ -1043,10 +1197,12 @@ mod commands {
         app: AppHandle,
         window: Window,
         _security_state: tauri::State<'_, AppSecurityState>,
+        approved_plan_state: tauri::State<'_, ApprovedSyncPlanState>,
         mp3_path: String,
         serato_path: String,
         export_csv: bool,
         dry_run: bool,
+        plan_id: Option<String>,
     ) -> Result<(), String> {
         let mp3_clean = mp3_path.trim().to_string();
         let serato_clean = serato_path.trim().to_string();
@@ -1058,10 +1214,57 @@ mod commands {
             return Err("Diretório da biblioteca Serato inválido ou não encontrado no disco.".into());
         }
 
+        authorize_asset_directory(&app, &mp3_clean);
+        authorize_asset_directory(&app, &serato_clean);
+
         if !dry_run && is_serato_running() {
             let err_msg = "❌ BLOQUEIO DE SEGURANÇA: O Serato DJ Pro está em execução ativa. Feche o aplicativo Serato DJ Pro antes de gravar ou ajustar a biblioteca. Enquanto o Serato estiver aberto, seu cache na memória RAM reverterá e sobrescreverá qualquer alteração física ao ser encerrado. O Modo Análise (Sem Alterar) permanece disponível.".to_string();
             let _ = window.emit("sync-log", &err_msg);
             return Err(err_msg);
+        }
+
+        let mut temp_plan_file: Option<PathBuf> = None;
+        if !dry_run {
+            let requested_pid = plan_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| {
+                    "Plano imutável ausente. Execute o Modo Análise (Sem Alterar) antes de Ajustar.".to_string()
+                })?;
+
+            let mut lock = approved_plan_state
+                .current
+                .lock()
+                .map_err(|_| "Falha ao acessar estado do plano aprovado.".to_string())?;
+            let (stored_pid, stored_plan) = lock.take().ok_or_else(|| {
+                "Nenhum plano aprovado disponível. Execute o Modo Análise (Sem Alterar) antes de Ajustar.".to_string()
+            })?;
+
+            if stored_pid != requested_pid {
+                return Err("Identificador do plano não corresponde à última análise aprovada. Execute uma nova Análise.".into());
+            }
+
+            let canon_mp3 = std::fs::canonicalize(&mp3_clean)
+                .unwrap_or_else(|_| PathBuf::from(&mp3_clean))
+                .to_string_lossy()
+                .to_string();
+            let canon_serato = std::fs::canonicalize(&serato_clean)
+                .unwrap_or_else(|_| PathBuf::from(&serato_clean))
+                .to_string_lossy()
+                .to_string();
+            let plan_mp3 = stored_plan.get("mp3_dir").and_then(|v| v.as_str()).unwrap_or("");
+            let plan_serato = stored_plan.get("serato_dir").and_then(|v| v.as_str()).unwrap_or("");
+            if plan_mp3 != canon_mp3 || plan_serato != canon_serato {
+                return Err("Biblioteca alterada após a análise. Execute uma nova Análise para os caminhos atuais.".into());
+            }
+
+            let plan_path = std::env::temp_dir().join(format!("serato_approved_plan_{}.json", stored_pid));
+            let plan_json = serde_json::to_string(&stored_plan)
+                .map_err(|e| format!("Falha ao serializar plano aprovado: {}", e))?;
+            std::fs::write(&plan_path, plan_json)
+                .map_err(|e| format!("Falha ao gravar arquivo temporário do plano: {}", e))?;
+            temp_plan_file = Some(plan_path);
         }
 
         let guard = if !dry_run {
@@ -1071,12 +1274,18 @@ mod commands {
         };
 
         let script_path = find_canonical_python_script(Some(&app), "serato_macos_app.py")?;
-        let python_bin = find_python_binary()?;
+        let python_bin = find_python_binary_with_app(Some(&app))?;
+        let vendor_paths = collect_vendor_paths(Some(&app), Some(&script_path));
+        let py_path_env = build_pythonpath_env(&vendor_paths);
+        let plan_state_arc = approved_plan_state.current.clone();
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
             let _guard = guard;
             if !dry_run && is_serato_running() {
+                if let Some(ref pf) = temp_plan_file {
+                    let _ = std::fs::remove_file(pf);
+                }
                 let err_msg = "❌ BLOQUEIO DE SEGURANÇA: O Serato DJ Pro foi aberto durante a inicialização da sincronização. Operação cancelada.".to_string();
                 let _ = window_clone.emit("sync-log", &err_msg);
                 let _ = window_clone.emit(
@@ -1094,6 +1303,9 @@ mod commands {
 
             let mut cmd = Command::new(&python_bin);
             cmd.env("PYTHONDONTWRITEBYTECODE", "1");
+            if let Some(ref py_path) = py_path_env {
+                cmd.env("PYTHONPATH", py_path);
+            }
             cmd.arg(&script_path);
             cmd.arg(&mp3_clean);
             cmd.arg(&serato_clean);
@@ -1101,6 +1313,11 @@ mod commands {
 
             if !export_csv {
                 cmd.arg("--no-csv");
+            }
+
+            if let Some(ref pf) = temp_plan_file {
+                cmd.arg("--execute-plan");
+                cmd.arg(pf);
             }
 
             cmd.stdout(Stdio::piped());
@@ -1113,7 +1330,10 @@ mod commands {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                            let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
+                    if let Some(ref pf) = temp_plan_file {
+                        let _ = std::fs::remove_file(pf);
+                    }
+                    let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
                     let _ = window_clone.emit("sync-log", &err_msg);
                     let _ = window_clone.emit(
                         "sync-finished",
@@ -1141,6 +1361,16 @@ mod commands {
                         if let Ok(line) = line_res {
                             if line.starts_with("__PAYLOAD_JSON_SUMMARY__") {
                                 captured_summary = Some(line.clone());
+                                if let Some(mut parsed) = parse_sync_summary_line(&line) {
+                                    if let Some(obj) = parsed.as_object_mut() {
+                                        obj.remove("plan");
+                                    }
+                                    let _ = win_stdout.emit(
+                                        "sync-log",
+                                        format!("__PAYLOAD_JSON_SUMMARY__{}", parsed),
+                                    );
+                                    continue;
+                                }
                             }
                             let _ = win_stdout.emit("sync-log", line);
                         }
@@ -1164,7 +1394,7 @@ mod commands {
                 err_lines.join("\n")
             });
 
-            let parsed_summary = stdout_thread
+            let mut parsed_summary = stdout_thread
                 .join()
                 .ok()
                 .flatten()
@@ -1172,6 +1402,24 @@ mod commands {
             let stderr_output = stderr_thread.join().unwrap_or_default();
 
             let exit_status = child.wait();
+            if let Some(ref pf) = temp_plan_file {
+                let _ = std::fs::remove_file(pf);
+            }
+
+            if dry_run {
+                if let Some(ref mut summary_val) = parsed_summary {
+                    if summary_val.get("sucesso").and_then(|v| v.as_bool()) == Some(true) {
+                        if let (Some(pid), Some(plan_val)) = (
+                            summary_val.get("plan_id").and_then(|v| v.as_str()).map(String::from),
+                            summary_val.as_object_mut().and_then(|obj| obj.remove("plan")),
+                        ) {
+                            if let Ok(mut lock) = plan_state_arc.lock() {
+                                *lock = Some((pid, plan_val));
+                            }
+                        }
+                    }
+                }
+            }
             let (success, code, message) = match exit_status {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
@@ -3433,27 +3681,85 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn load_saved_summary(logs_dir: Option<String>) -> Result<Option<String>, String> {
-        let mut candidates = Vec::new();
+    pub async fn load_saved_summary(
+        logs_dir: Option<String>,
+        serato_path: Option<String>,
+        mp3_path: Option<String>,
+    ) -> Result<Option<String>, String> {
+        let Some(ref sp_raw) = serato_path else {
+            return Ok(None);
+        };
+        let sp_clean = sp_raw.trim();
+        if sp_clean.is_empty() {
+            return Ok(None);
+        }
+
+        let target_serato = std::fs::canonicalize(sp_clean)
+            .unwrap_or_else(|_| PathBuf::from(sp_clean));
+        let target_mp3 = mp3_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p)));
+
+        let mut base_dirs: Vec<PathBuf> = Vec::new();
         if let Some(ref l) = logs_dir {
             let p = PathBuf::from(l);
-            candidates.push(p.join(".serato_sync_summary.json"));
-            candidates.push(p.join("logs").join(".serato_sync_summary.json"));
+            base_dirs.push(p.clone());
+            base_dirs.push(p.join("logs"));
         }
         if let Some(home) = dirs_home() {
-            candidates.push(home.join("SeratoSync").join("logs").join(".serato_sync_summary.json"));
-            candidates.push(home.join(".serato_sync_summary.json"));
+            base_dirs.push(home.join("SeratoSync").join("logs"));
+            base_dirs.push(home);
         }
-        candidates.push(PathBuf::from("/Users/pastteur/SeratoSync/logs/.serato_sync_summary.json"));
 
-        for candidate in candidates {
-            if candidate.exists() && candidate.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&candidate) {
-                    if !content.trim().is_empty() {
-                        return Ok(Some(content));
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        for dir in &base_dirs {
+            let summaries_dir = dir.join("summaries");
+            if summaries_dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&summaries_dir) {
+                    for entry in entries.flatten() {
+                        let p = entry.path();
+                        if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                            candidates.push(p);
+                        }
                     }
                 }
             }
+            candidates.push(dir.join(".serato_sync_summary.json"));
+        }
+
+        for candidate in candidates {
+            if !candidate.exists() || !candidate.is_file() {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            if content.trim().is_empty() {
+                continue;
+            }
+            let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) else {
+                continue;
+            };
+            let Some(saved_serato_raw) = parsed.get("serato_path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let saved_serato = std::fs::canonicalize(saved_serato_raw)
+                .unwrap_or_else(|_| PathBuf::from(saved_serato_raw));
+            if saved_serato != target_serato {
+                continue;
+            }
+            if let Some(ref t_mp3) = target_mp3 {
+                if let Some(saved_mp3_raw) = parsed.get("mp3_path").and_then(|v| v.as_str()) {
+                    let saved_mp3 = std::fs::canonicalize(saved_mp3_raw)
+                        .unwrap_or_else(|_| PathBuf::from(saved_mp3_raw));
+                    if &saved_mp3 != t_mp3 {
+                        continue;
+                    }
+                }
+            }
+            return Ok(Some(content));
         }
         Ok(None)
     }
@@ -3464,10 +3770,49 @@ mod commands {
         if clean.is_empty() {
             return Err("Caminho do Serato inválido".into());
         }
+        authorize_asset_directory(&app, &clean);
         run_py_json(&app, "crate_ops.py", &[
             "--list-tree".into(),
             "--serato".into(), clean,
         ])
+    }
+
+    #[tauri::command]
+    pub async fn check_external_dependencies(app: AppHandle) -> DependencyStatus {
+        let (python_ok, python_detail) = match find_python_binary_with_app(Some(&app)) {
+            Ok(p) => (true, p.to_string_lossy().to_string()),
+            Err(e) => (false, e),
+        };
+        let ffmpeg = find_external_binary(Some(&app), "ffmpeg");
+        let ffprobe = find_external_binary(Some(&app), "ffprobe");
+        let yt_dlp = find_external_binary(Some(&app), "yt-dlp");
+
+        let mut warnings = Vec::new();
+        if !python_ok {
+            warnings.push(format!("Python 3.9+ com mutagen indisponível: {}", python_detail));
+        }
+        if ffmpeg.is_none() || ffprobe.is_none() {
+            warnings.push(
+                "FFmpeg/FFprobe não encontrados. Auto-Cue por transientes, análise espectral (Fake 320 kbps) e beatshift ficarão limitados. Instale via: brew install ffmpeg".into(),
+            );
+        }
+        if yt_dlp.is_none() {
+            warnings.push(
+                "yt-dlp não encontrado. Reparação online de faixas no Audio Health / Track Matcher ficará indisponível. Instale via: brew install yt-dlp".into(),
+            );
+        }
+
+        DependencyStatus {
+            python_ok,
+            python_detail,
+            ffmpeg_ok: ffmpeg.is_some(),
+            ffmpeg_path: ffmpeg.map(|p| p.to_string_lossy().to_string()),
+            ffprobe_ok: ffprobe.is_some(),
+            ffprobe_path: ffprobe.map(|p| p.to_string_lossy().to_string()),
+            yt_dlp_ok: yt_dlp.is_some(),
+            yt_dlp_path: yt_dlp.map(|p| p.to_string_lossy().to_string()),
+            warnings,
+        }
     }
 
     #[tauri::command]
@@ -3801,6 +4146,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(FsWatcherState::new())
+        .manage(ApprovedSyncPlanState::new())
         .manage(security_state)
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(move |window, event| {
@@ -3920,6 +4266,7 @@ pub fn run() {
             commands::sync_fts_library,
             commands::load_saved_summary,
             commands::load_crates_from_disk,
+            commands::check_external_dependencies,
             commands::export_pioneer_usb,
             commands::scan_unused_files,
             commands::quarantine_orphan_files,
@@ -4140,5 +4487,68 @@ mod tests {
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["summary"]["total_faixas"], 42);
+    }
+
+    #[test]
+    fn test_validate_python_candidate_with_vendor_mutagen() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("serato_py_vendor_{}", generate_operacao_id()));
+        let vendor = base.join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+
+        let fake_py = base.join("fake_py.sh");
+        // Simulates a Python binary that fails unless PYTHONPATH includes vendor
+        std::fs::write(
+            &fake_py,
+            format!(
+                "#!/bin/sh\ncase \"$PYTHONPATH\" in\n  *{}*) exit 0 ;;\n  *) echo \"No module named 'mutagen'\" >&2; exit 1 ;;\nesac\n",
+                vendor.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_py).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_py, perms).unwrap();
+
+        assert!(validate_python_candidate_with_vendor(&fake_py, &[]).is_err());
+        assert!(validate_python_candidate_with_vendor(&fake_py, &[vendor.clone()]).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_load_saved_summary_validates_library_identity() {
+        let base = std::env::temp_dir().join(format!("serato_summary_id_{}", generate_operacao_id()));
+        let logs = base.join("logs");
+        let serato_a = base.join("LibA").join("_Serato_");
+        let serato_b = base.join("LibB").join("_Serato_");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::create_dir_all(&serato_a).unwrap();
+        std::fs::create_dir_all(&serato_b).unwrap();
+
+        let summary_a = serde_json::json!({
+            "sucesso": true,
+            "serato_path": std::fs::canonicalize(&serato_a).unwrap().to_string_lossy().to_string(),
+            "crates_arvore": {"House": {"total_faixas": 1}}
+        });
+        std::fs::write(logs.join(".serato_sync_summary.json"), summary_a.to_string()).unwrap();
+
+        let loaded_a = tauri::async_runtime::block_on(commands::load_saved_summary(
+            Some(logs.to_string_lossy().to_string()),
+            Some(serato_a.to_string_lossy().to_string()),
+            None,
+        )).unwrap();
+        assert!(loaded_a.is_some());
+
+        // Switching to Library B must NOT load Library A's summary!
+        let loaded_b = tauri::async_runtime::block_on(commands::load_saved_summary(
+            Some(logs.to_string_lossy().to_string()),
+            Some(serato_b.to_string_lossy().to_string()),
+            None,
+        )).unwrap();
+        assert!(loaded_b.is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

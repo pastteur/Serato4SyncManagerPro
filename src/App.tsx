@@ -79,6 +79,8 @@ export const App: React.FC = () => {
   const [exportCsv, setExportCsv] = useState<boolean>(true);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [summary, setSummary] = useState<SyncSummary | null>(null);
+  const [approvedPlanId, setApprovedPlanId] = useState<string | null>(null);
+  const [depWarnings, setDepWarnings] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<TabId>('logs');
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isPioneerModalOpen, setIsPioneerModalOpen] = useState<boolean>(false);
@@ -105,6 +107,7 @@ export const App: React.FC = () => {
           'fs-changes-detected',
           (event) => {
             if (event.payload && event.payload.count > 0) {
+              setApprovedPlanId(null);
               setFsNotification({
                 count: event.payload.count,
                 extensions: event.payload.extensions,
@@ -230,56 +233,90 @@ export const App: React.FC = () => {
     }
   }, [mp3Path, seratoPath, addLog]);
 
-  const loadCratesLibrary = useCallback(async (targetSeratoPath?: string) => {
+  const loadCratesLibrary = useCallback(async (targetSeratoPath?: string, targetMp3Path?: string) => {
     if (!isTauri) return;
+    const sp = (targetSeratoPath ?? seratoPath ?? '').trim();
+    const mp = (targetMp3Path ?? mp3Path ?? '').trim();
+    if (!sp) {
+      setSummary(null);
+      return;
+    }
+
     try {
       const { invoke } = await import('@tauri-apps/api/core');
-      // 1. Tenta carregar o último resumo completo persistido (.serato_sync_summary.json)
-      const savedJson = await invoke<string | null>('load_saved_summary', { logsDir: null });
+      // 1. Tenta carregar o último resumo completo persistido validado para esta biblioteca
+      const savedJson = await invoke<string | null>('load_saved_summary', {
+        logsDir: null,
+        seratoPath: sp,
+        mp3Path: mp || null
+      });
       if (savedJson) {
         const parsed = JSON.parse(savedJson);
         if (parsed && parsed.crates_arvore && Object.keys(parsed.crates_arvore).length > 0) {
           setSummary(parsed);
-          addLog(`📂 ${Object.keys(parsed.crates_arvore).length} crates carregadas a partir do resumo de auditoria.`);
+          addLog(`📂 ${Object.keys(parsed.crates_arvore).length} crates carregadas a partir do resumo validado desta biblioteca.`);
           return;
         }
       }
 
-      // 2. Se não houver resumo salvo ou for vazio, faz a varredura direta dos arquivos .crate de Subcrates
-      const sp = targetSeratoPath || seratoPath;
-      if (sp && sp.trim()) {
-        const res = await invoke<string>('load_crates_from_disk', { seratoPath: sp.trim() });
-        const parsed = JSON.parse(res);
-        if (parsed && parsed.sucesso && parsed.crates_arvore) {
-          setSummary(prev => ({
-            sucesso: true,
-            status_analise: 'completo',
-            erros_leitura: [],
-            dry_run: true,
-            total_faixas: parsed.total_faixas || 0,
-            crates_gravadas: 0,
-            crates_inalteradas: parsed.total_crates || 0,
-            faixas_adicionadas: 0,
-            faixas_removidas: 0,
-            total_duplicados: prev?.total_duplicados || 0,
-            csv_duplicados: prev?.csv_duplicados || null,
-            duplicados: prev?.duplicados || [],
-            crates_arvore: parsed.crates_arvore,
-            movimentacoes: []
-          }));
-          addLog(`📂 ${parsed.total_crates} crates físicas carregadas diretamente do disco (${parsed.total_faixas} faixas).`);
-        }
+      // 2. Se não houver resumo salvo para esta biblioteca, faz a varredura direta dos arquivos .crate de Subcrates
+      const res = await invoke<string>('load_crates_from_disk', { seratoPath: sp });
+      const parsed = JSON.parse(res);
+      if (parsed && parsed.sucesso && parsed.crates_arvore) {
+        setSummary({
+          sucesso: true,
+          status_analise: 'completo',
+          erros_leitura: [],
+          dry_run: true,
+          serato_path: sp,
+          mp3_path: mp || undefined,
+          total_faixas: parsed.total_faixas || 0,
+          crates_gravadas: 0,
+          crates_inalteradas: parsed.total_crates || 0,
+          faixas_adicionadas: 0,
+          faixas_removidas: 0,
+          total_duplicados: 0,
+          csv_duplicados: null,
+          duplicados: [],
+          crates_arvore: parsed.crates_arvore,
+          movimentacoes: []
+        });
+        addLog(`📂 ${parsed.total_crates} crates físicas carregadas diretamente do disco (${parsed.total_faixas} faixas).`);
+      } else {
+        setSummary(null);
       }
     } catch (e) {
-      // Silencioso se não houver crates no momento
+      setSummary(null);
     }
-  }, [isTauri, seratoPath, addLog]);
+  }, [isTauri, seratoPath, mp3Path, addLog]);
 
   useEffect(() => {
     // Inicialização: preenche somente caminhos ausentes ou inválidos sem sobrescrever caminhos válidos
     handleAutoDetect(false);
-    loadCratesLibrary();
+
+    if (isTauri) {
+      import('@tauri-apps/api/core').then(({ invoke }) => {
+        invoke<{ warnings?: string[] }>('check_external_dependencies')
+          .then((deps) => {
+            if (deps && Array.isArray(deps.warnings) && deps.warnings.length > 0) {
+              setDepWarnings(deps.warnings);
+              deps.warnings.forEach((w) => addLog(`⚠️ [Dependência] ${w}`));
+            }
+          })
+          .catch(() => {});
+      });
+    }
   }, []);
+
+  // Ao trocar de biblioteca (MP3 ou Serato), invalida plano anterior e carrega crates da biblioteca atual
+  useEffect(() => {
+    setApprovedPlanId(null);
+    if (isTauri && seratoPath.trim()) {
+      loadCratesLibrary(seratoPath, mp3Path);
+    } else if (!seratoPath.trim()) {
+      setSummary(null);
+    }
+  }, [seratoPath, mp3Path]);
 
   // Setup Tauri Event Listeners
   useEffect(() => {
@@ -307,7 +344,15 @@ export const App: React.FC = () => {
           setIsRunning(false);
           const feedback = interpretSyncFinishedEvent(event?.payload);
           if (feedback.summary) {
-            setSummary(feedback.summary as SyncSummary);
+            const sum = feedback.summary as SyncSummary;
+            setSummary(sum);
+            if (sum.dry_run && sum.sucesso && sum.plan_id) {
+              setApprovedPlanId(sum.plan_id);
+            } else {
+              setApprovedPlanId(null);
+            }
+          } else {
+            setApprovedPlanId(null);
           }
           setSyncFeedback({ type: feedback.bannerType, message: feedback.bannerMessage });
           addLog(feedback.logMessage);
@@ -427,14 +472,21 @@ export const App: React.FC = () => {
       }
     }
 
+    if (!dryRun && isTauri && !approvedPlanId) {
+      addLog('⚠️ Plano imutável ausente. Execute o Modo Análise (Sem Alterar) primeiro antes de Ajustar.');
+      setActiveTab('logs');
+      return;
+    }
+
     setIsRunning(true);
     setSyncFeedback(null);
     setLogs([]);
     setActiveTab('logs');
     if (dryRun) {
+      setApprovedPlanId(null);
       addLog(`🔍 Iniciando Modo Análise (Dry Run - Sem modificações físicas no HD)...`);
     } else {
-      addLog(`⚡ Disparando motor de sincronização real Serato 4...`);
+      addLog(`⚡ Executando plano imutável aprovado (${approvedPlanId || 'simulação'})...`);
     }
 
     if (isTauri) {
@@ -444,7 +496,8 @@ export const App: React.FC = () => {
           mp3Path,
           seratoPath,
           exportCsv,
-          dryRun
+          dryRun,
+          planId: dryRun ? null : approvedPlanId
         });
       } catch (err) {
         setIsRunning(false);
@@ -679,12 +732,32 @@ export const App: React.FC = () => {
               isRunning={isRunning}
               onStartSync={handleStartSync}
               canStart={Boolean(mp3Path && seratoPath)}
+              hasApprovedPlan={Boolean(approvedPlanId)}
               exportCsv={exportCsv}
               setExportCsv={setExportCsv}
               summary={summary}
               seratoRunning={seratoRunning}
               onExportReport={handleExportReport}
             />
+          </div>
+        )}
+
+        {/* Aviso de Dependências Externas Ausentes (FFmpeg / FFprobe / yt-dlp) */}
+        {depWarnings.length > 0 && (
+          <div className="bg-amber-950/30 border border-amber-500/40 px-3 py-2 rounded-lg flex items-start justify-between text-xs shrink-0 gap-2">
+            <div className="space-y-0.5 text-amber-200">
+              {depWarnings.map((w, idx) => (
+                <div key={idx}>⚠️ {w}</div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => setDepWarnings([])}
+              className="text-slate-400 hover:text-white p-1 rounded transition cursor-pointer shrink-0"
+              title="Fechar aviso de dependências"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
           </div>
         )}
 

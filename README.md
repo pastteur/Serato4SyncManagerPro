@@ -105,7 +105,10 @@
 ### Pré-requisitos
 * [Bun](https://bun.sh/) instalado
 * [Rust](https://rustup.rs/) e Cargo instalados
-* Python 3 instalado no macOS (a biblioteca `mutagen` já é distribuída e embutida no projeto em `vendor/mutagen`)
+* Python 3.9+ instalado no macOS (a biblioteca `mutagen` já é distribuída e embutida no projeto em `vendor/mutagen`)
+* Dependências de áudio opcionais (recomendadas para recursos avançados, verificadas na inicialização):
+  * `ffmpeg` e `ffprobe` (`brew install ffmpeg`) — necessários para Auto-Cue com detecção de transientes, análise espectral (detecção de Fake 320 kbps), verificação de beatshift e reamostragem local.
+  * `yt-dlp` (`brew install yt-dlp`) — necessário para reparação online de faixas no Audio Health Doctor e downloads no Track Matcher.
 
 ### Instalação e Execução
 ```bash

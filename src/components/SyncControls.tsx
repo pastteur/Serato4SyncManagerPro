@@ -6,6 +6,7 @@ interface SyncControlsProps {
   isRunning: boolean;
   onStartSync: (dryRun: boolean) => void;
   canStart: boolean;
+  hasApprovedPlan?: boolean;
   exportCsv: boolean;
   setExportCsv: (val: boolean) => void;
   summary: SyncSummary | null;
@@ -17,6 +18,7 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
   isRunning,
   onStartSync,
   canStart,
+  hasApprovedPlan = false,
   exportCsv,
   setExportCsv,
   summary,
@@ -123,15 +125,15 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
           <span>Modo Análise (Sem Alterar)</span>
         </button>
 
-        {/* Button 2: Sincronização Real */}
+        {/* Button 2: Sincronização Real (exige plano imutável aprovado) */}
         <button
           type="button"
           onClick={() => onStartSync(false)}
-          disabled={!canStart || isRunning}
+          disabled={!canStart || isRunning || !hasApprovedPlan}
           className={`px-5 py-2 rounded-lg font-bold text-xs tracking-wide transition-all shadow flex items-center justify-center gap-1.5 cursor-pointer ${
             isRunning
               ? 'bg-slate-700 text-slate-400 cursor-not-allowed border border-slate-600'
-              : !canStart
+              : !canStart || !hasApprovedPlan
               ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
               : seratoRunning
               ? 'bg-amber-950/40 text-amber-300 border border-amber-600/50 hover:bg-amber-900/40'
@@ -140,7 +142,9 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
           title={
             seratoRunning
               ? 'Trava de segurança ativa: Feche o Serato DJ Pro para aplicar alterações'
-              : 'Gravar crates (.crate), atualizar neworder.pref e cache no HD'
+              : !hasApprovedPlan
+              ? 'Execute o Modo Análise (Sem Alterar) primeiro para gerar um plano imutável'
+              : 'Gravar exatamente o plano aprovado (.crate), neworder.pref e cache no HD'
           }
         >
           {isRunning ? (
@@ -153,10 +157,15 @@ export const SyncControls: React.FC<SyncControlsProps> = ({
               <Zap className="w-3.5 h-3.5 fill-current text-amber-400" />
               <span>AJUSTAR (SERATO ABERTO - TRAVA ATIVA)</span>
             </>
+          ) : !hasApprovedPlan ? (
+            <>
+              <Zap className="w-3.5 h-3.5 text-slate-500" />
+              <span>AJUSTAR (ANALISAR PRIMEIRO)</span>
+            </>
           ) : (
             <>
               <Zap className="w-3.5 h-3.5 fill-current text-black" />
-              <span>AJUSTAR (APLICAR ALTERAÇÕES)</span>
+              <span>AJUSTAR (APLICAR PLANO)</span>
             </>
           )}
         </button>

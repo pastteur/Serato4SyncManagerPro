@@ -40,6 +40,12 @@ export interface SyncSummary {
   status_analise?: 'completo' | 'parcial_com_erros';
   erros_leitura?: string[];
   dry_run?: boolean;
+  plan_id?: string;
+  plan_hash?: string;
+  plan_invalidated?: boolean;
+  mp3_path?: string;
+  serato_path?: string;
+  library_id?: string;
   total_faixas: number;
   crates_gravadas: number;
   crates_inalteradas: number;

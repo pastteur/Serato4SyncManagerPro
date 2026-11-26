@@ -12,6 +12,7 @@ por meio tempo, 1/4 de tempo ou por milissegundos de silêncio inicial.
 import sys
 import os
 import json
+import shutil
 import subprocess
 import argparse
 from pathlib import Path
@@ -61,32 +62,44 @@ class BeatshiftScanner:
             except Exception:
                 pass
 
-        # 2. Usa ffprobe/ffmpeg para analisar silêncio inicial se disponível
+        # 2. Usa ffmpeg para analisar silêncio inicial se disponível
         first_sound_ms = 0.0
-        try:
-            # Comando ffprobe para detectar primeiro som audível acima de -45dB
-            cmd = [
-                "ffmpeg",
-                "-i", str(path),
-                "-t", "10",  # primeiros 10 segundos
-                "-af", "silencedetect=noise=-45dB:d=0.01",
-                "-f", "null",
-                "-"
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            # Analisa saída stderr para silence_end
-            for line in res.stderr.splitlines():
-                if "silence_end:" in line:
-                    parts = line.split("silence_end:")
-                    if len(parts) > 1:
-                        sec_str = parts[1].split()[0]
-                        try:
-                            first_sound_ms = float(sec_str) * 1000.0
-                            break
-                        except ValueError:
-                            pass
-        except Exception:
-            first_sound_ms = 0.0
+        ffmpeg_bin = next(
+            (
+                p for p in [
+                    str(Path(__file__).resolve().parent / "bin" / "ffmpeg"),
+                    "/opt/homebrew/bin/ffmpeg",
+                    "/usr/local/bin/ffmpeg",
+                    shutil.which("ffmpeg") or "",
+                ]
+                if p and os.path.exists(p) and os.access(p, os.X_OK)
+            ),
+            None,
+        )
+        if ffmpeg_bin:
+            try:
+                cmd = [
+                    ffmpeg_bin,
+                    "-i", str(path),
+                    "-t", "10",  # primeiros 10 segundos
+                    "-af", "silencedetect=noise=-45dB:d=0.01",
+                    "-f", "null",
+                    "-"
+                ]
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                # Analisa saída stderr para silence_end
+                for line in res.stderr.splitlines():
+                    if "silence_end:" in line:
+                        parts = line.split("silence_end:")
+                        if len(parts) > 1:
+                            sec_str = parts[1].split()[0]
+                            try:
+                                first_sound_ms = float(sec_str) * 1000.0
+                                break
+                            except ValueError:
+                                pass
+            except Exception:
+                first_sound_ms = 0.0
 
         # Duração de 1 beat em milissegundos
         beat_duration_ms = (60.0 / bpm) * 1000.0 if bpm > 0 else 500.0
