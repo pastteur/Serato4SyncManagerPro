@@ -2159,18 +2159,31 @@ mod commands {
 
         let stdout = out_thread.join().unwrap_or_default();
         let stderr = err_thread.join().unwrap_or_default();
-        let status = exit_status;
+        evaluate_python_json_output(script, exit_status.code(), exit_status.success(), &stdout, &stderr)
+    }
 
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            if let Some(json_val) = try_parse_json(&stdout) {
-                if json_val.is_object() {
-                    return Ok(json_val.to_string());
-                }
-            }
+    pub(crate) fn evaluate_python_json_output(
+        script: &str,
+        exit_code: Option<i32>,
+        success: bool,
+        stdout: &str,
+        stderr: &str,
+    ) -> Result<String, String> {
+        if !success {
+            let code = exit_code.unwrap_or(-1);
+            let diagnostic = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                "Processo Python terminou com erro sem diagnóstico.".to_string()
+            };
             return Err(format_structured_error(
                 "PYTHON_EXECUTION_FAILED",
-                &format!("O módulo Python '{}' encerrou com falha (código {})", script, code),
+                &format!(
+                    "O módulo Python '{}' encerrou com falha (código {}): {}",
+                    script, code, diagnostic
+                ),
                 serde_json::json!({
                     "script": script,
                     "exit_code": code,
@@ -2180,7 +2193,19 @@ mod commands {
             ));
         }
 
-        if let Some(json_val) = try_parse_json(&stdout) {
+        if stdout.trim().is_empty() {
+            return Err(format_structured_error(
+                "PYTHON_EMPTY_RESPONSE",
+                &format!("O módulo Python '{}' concluiu sem retornar dados (resposta vazia)", script),
+                serde_json::json!({
+                    "script": script,
+                    "stdout": "",
+                    "stderr": stderr.trim()
+                }),
+            ));
+        }
+
+        if let Some(json_val) = try_parse_json(stdout) {
             return Ok(json_val.to_string());
         }
 
@@ -4550,5 +4575,32 @@ mod tests {
         assert!(loaded_b.is_none());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_evaluate_python_json_output_rejects_nonzero_even_with_json() {
+        // QA-02: Non-zero exit code MUST fail even if stdout contains a valid JSON object
+        let err = commands::evaluate_python_json_output(
+            "dummy.py",
+            Some(1),
+            false,
+            r#"{"sucesso":true,"nota":"parcial"}"#,
+            "fatal error on stderr",
+        )
+        .unwrap_err();
+        assert!(err.contains("PYTHON_EXECUTION_FAILED"));
+        assert!(err.contains("fatal error on stderr"));
+
+        // Empty stdout with exit code 0 MUST fail
+        let empty_err = commands::evaluate_python_json_output("dummy.py", Some(0), true, "   ", "").unwrap_err();
+        assert!(empty_err.contains("PYTHON_EMPTY_RESPONSE"));
+
+        // Invalid JSON with exit code 0 MUST fail
+        let bad_json = commands::evaluate_python_json_output("dummy.py", Some(0), true, "not json", "").unwrap_err();
+        assert!(bad_json.contains("INVALID_JSON_RESPONSE"));
+
+        // Zero exit code with valid JSON MUST succeed
+        let ok = commands::evaluate_python_json_output("dummy.py", Some(0), true, r#"{"ok":true}"#, "").unwrap();
+        assert_eq!(ok, r#"{"ok":true}"#);
     }
 }

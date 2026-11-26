@@ -49,6 +49,20 @@ export function interpretSyncFinishedEvent(payload: unknown): SyncFeedback {
   }
 
   if (data.success === true) {
+    const sumObj = normalizedSummary as Record<string, unknown> | undefined;
+    const isPartial =
+      sumObj?.estado_parcial === true || sumObj?.status_analise === 'parcial_com_erros';
+    if (isPartial) {
+      const msg =
+        rawMessage || 'Operação concluída parcialmente com alertas. Verifique os logs.';
+      return {
+        ok: true,
+        logMessage: `⚠️ ${msg}`,
+        bannerType: 'error',
+        bannerMessage: msg,
+        summary: normalizedSummary,
+      };
+    }
     const msg = rawMessage || 'Sincronização concluída com sucesso.';
     return {
       ok: true,
@@ -59,10 +73,18 @@ export function interpretSyncFinishedEvent(payload: unknown): SyncFeedback {
     };
   }
 
-  const errMsg = rawMessage || 'Falha na sincronização. Verifique os logs para detalhes.';
+  const sumObj = normalizedSummary as Record<string, unknown> | undefined;
+  const isPlanInvalidated = sumObj?.plan_invalidated === true;
+  const isCancelled =
+    typeof rawMessage === 'string' && rawMessage.toLowerCase().includes('cancelad');
+  const errMsg = isPlanInvalidated
+    ? 'Plano invalidado: a biblioteca ou crates foram alteradas após a análise. Execute o Modo Análise novamente.'
+    : isCancelled
+    ? rawMessage || 'Operação cancelada.'
+    : rawMessage || 'Falha na sincronização. Verifique os logs para detalhes.';
   return {
     ok: false,
-    logMessage: `❌ Falha na sincronização: ${errMsg}`,
+    logMessage: `❌ ${isPlanInvalidated ? 'Plano invalidado' : isCancelled ? 'Operação cancelada' : 'Falha na sincronização'}: ${errMsg}`,
     bannerType: 'error',
     bannerMessage: errMsg,
     summary: normalizedSummary,

@@ -25,6 +25,7 @@ import argparse
 import hashlib
 import uuid
 import base64
+import threading
 from pathlib import Path
 
 # Garante flushing imediato de logs em stdout/stderr para captura em tempo real
@@ -41,6 +42,55 @@ if _VENDOR_DIR.is_dir() and str(_VENDOR_DIR) not in sys.path:
 DEFAULT_LOGS_DIR = Path(os.path.expanduser("~/SeratoSync/logs"))
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 IGNORED_SUBFOLDERS = {'contents', 'unknownalbum', 'unknownartist'}
+
+_PLAN_EXEC_LOCK = threading.Lock()
+_CONSUMED_PLANS = set()
+
+
+def _is_plan_consumed(plan_id: str, path_logs: Path) -> bool:
+    """Verifica se o plan_id já foi consumido (em memória ou em disco, sem criar diretórios)."""
+    if not plan_id:
+        return True
+    if plan_id in _CONSUMED_PLANS:
+        return True
+    consumed_file = path_logs / ".serato_consumed_plans.json"
+    if consumed_file.exists() and consumed_file.is_file():
+        try:
+            data = json.loads(consumed_file.read_text(encoding="utf-8"))
+            if isinstance(data, list) and plan_id in data:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _mark_plan_consumed(plan_id: str, path_logs: Path) -> None:
+    """Registra plan_id como consumido de forma atômica após validação completa."""
+    _CONSUMED_PLANS.add(plan_id)
+    consumed_file = path_logs / ".serato_consumed_plans.json"
+    existing = []
+    if consumed_file.exists() and consumed_file.is_file():
+        try:
+            loaded = json.loads(consumed_file.read_text(encoding="utf-8"))
+            if isinstance(loaded, list):
+                existing = loaded
+        except Exception:
+            existing = []
+    if plan_id not in existing:
+        existing.append(plan_id)
+    # Mantém histórico recente limitado a 200 planos
+    existing = existing[-200:]
+    tmp = consumed_file.with_name(f".tmp_consumed_{os.getpid()}.json")
+    try:
+        path_logs.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, consumed_file)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
 
 # ==============================================================================
 # UTILITÁRIOS BINÁRIOS E UNICODE DO SERATO DJ PRO 4
@@ -464,23 +514,8 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
         return False, "Pasta MP3 não encontrada."
 
     crates_dir = path_serato / "Subcrates"
-
-    # No Dry-Run: NÃO cria diretórios fisicamente em disco!
-    if not dry_run:
-        crates_dir.mkdir(parents=True, exist_ok=True)
-        path_logs.mkdir(parents=True, exist_ok=True)
-
-    # Identifica crates físicas antigas presentes no disco
-    crates_fisicas_antigas = set()
-    if crates_dir.exists():
-        crates_fisicas_antigas = set([
-            normalizar_nfc(f.name) 
-            for f in crates_dir.glob("*.crate") 
-            if not f.name.startswith('.') and not f.name.endswith('.bak') and not f.name.endswith('.tmp')
-        ])
-
     cache_file = path_logs / ".serato_sync_cache.json"
-    cache_anterior = carregar_cache(cache_file, expected_lib=str(path_mp3)) if not dry_run else {}
+    cache_anterior = {}
     novo_cache = {}
 
     crates_masters = set()
@@ -513,13 +548,6 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     lista_pref_final_from_plan = None
     executando_plano_imutavel = (not dry_run) and (plan is not None or plan_file is not None)
 
-    if not dry_run:
-        try:
-            import journal
-            sync_journal_id = journal.record_sync_start(str(path_mp3), str(path_serato), dry_run=False)
-        except Exception as e_j:
-            erros_gravacao.append(f"Falha ao iniciar registro no Journal: {e_j}")
-
     def _log_fase(fase: str, status: str, detalhes: str = None):
         fases_executadas.append({"fase": fase, "status": status, "detalhes": detalhes})
         if not dry_run and sync_journal_id:
@@ -530,7 +558,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                 erros_gravacao.append(f"Falha ao registrar fase '{fase}' no Journal: {e_js}")
 
     # ==========================================================================
-    # FASE 1 & 2: EXECUÇÃO DE PLANO IMUTÁVEL OU VARREDURA + PLANEJAMENTO
+    # FASE 1 & 2: VALIDAÇÃO ESTRITA DO PLANO IMUTÁVEL ANTES DE QUALQUER ESCRITA
     # ==========================================================================
     raiz_relativa = _resolve_raiz_relativa(path_mp3, path_serato)
 
@@ -543,22 +571,29 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     plan_obj = json.load(pf)
             except Exception as e_pf:
                 plan_invalidated = True
-                err_p = f"Falha ao carregar arquivo de plano '{plan_file}': {e_pf}"
-                erros_gravacao.append(err_p)
-                print(f"❌ PLANO INVALIDADO: {err_p}", file=sys.stderr, flush=True)
+                erros_gravacao.append(f"PLANO INVALIDADO: falha ao carregar arquivo de plano '{plan_file}': {e_pf}")
                 plan_obj = None
 
-        if plan_obj is not None:
+        if plan_obj is None or not isinstance(plan_obj, dict):
+            plan_invalidated = True
+            if not erros_gravacao:
+                erros_gravacao.append("PLANO INVALIDADO: plano de sincronização inexistente ou inválido.")
+        else:
+            pid = plan_obj.get("plan_id")
             expected_hash = plan_obj.get("plan_hash", "")
             computed_hash = _build_plan_hash(plan_obj)
-            if not expected_hash or expected_hash != computed_hash:
+
+            if not isinstance(pid, str) or not pid.startswith("plan-") or len(pid) < 8:
                 plan_invalidated = True
-                erros_gravacao.append("PLANO INVALIDADO: assinatura hash do plano não confere (plano adulterado ou corrompido).")
+                erros_gravacao.append("PLANO INVALIDADO: identificador do plano inválido.")
+            elif not expected_hash or expected_hash != computed_hash:
+                plan_invalidated = True
+                erros_gravacao.append("PLANO INVALIDADO: assinatura hash SHA-256 do plano não confere (plano adulterado ou corrompido).")
             elif str(Path(plan_obj.get("mp3_dir", "")).resolve()) != str(path_mp3) or str(Path(plan_obj.get("serato_dir", "")).resolve()) != str(path_serato):
                 plan_invalidated = True
                 erros_gravacao.append("PLANO INVALIDADO: caminhos da biblioteca divergem do plano aprovado.")
             else:
-                # Verifica integridade de todos os arquivos e hashes em relação à prévia
+                # Valida arquivos de áudio e hashes
                 current_files, scan_errs = _scan_audio_files_snapshot(path_mp3)
                 if scan_errs:
                     plan_invalidated = True
@@ -589,7 +624,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                                 )
                                 break
 
-                # Verifica integridade das crates-alvo e neworder.pref
+                # Valida integridade das crates-alvo
                 if not plan_invalidated:
                     for cw in plan_obj.get("crates_to_write", []):
                         c_path = Path(cw["caminho_crate"])
@@ -614,6 +649,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                             )
                             break
 
+                # Valida neworder.pref
                 if not plan_invalidated:
                     pref_path = path_serato / "neworder.pref"
                     expected_pref_hash = plan_obj.get("neworder_pref_before_sha256")
@@ -622,44 +658,108 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                         plan_invalidated = True
                         erros_gravacao.append("PLANO INVALIDADO: neworder.pref foi modificado externamente após a análise.")
 
+                # Verifica atomicamente se o plano já foi consumido (evita reuso ou execução simultânea)
+                if not plan_invalidated:
+                    with _PLAN_EXEC_LOCK:
+                        if _is_plan_consumed(pid, path_logs):
+                            plan_invalidated = True
+                            erros_gravacao.append(f"PLANO INVALIDADO: plano '{pid}' já foi consumido anteriormente.")
+                        else:
+                            # Prepara diretórios operacionais e marca plano como consumido SOMENTE após todas as validações
+                            crates_dir.mkdir(parents=True, exist_ok=True)
+                            path_logs.mkdir(parents=True, exist_ok=True)
+                            _mark_plan_consumed(pid, path_logs)
+
         if plan_invalidated or erros_gravacao:
             _log_fase("validacao_plano", "falha", "; ".join(erros_gravacao))
             for err_msg in erros_gravacao:
                 print(f"   ❌ {err_msg}", file=sys.stderr, flush=True)
-        else:
-            _log_fase("validacao_plano", "concluida", f"Plano {plan_obj.get('plan_id')} validado")
-            print(f"🔒 Plano imutável validado: {plan_obj.get('plan_id')}", flush=True)
-            for cw in plan_obj.get("crates_to_write", []):
-                hdr_b64 = cw.get("header_antigo_b64")
-                hdr_bytes = base64.b64decode(hdr_b64) if hdr_b64 else None
-                outros_b = [base64.b64decode(b) for b in cw.get("outros_blocos_b64", [])]
-                planos_gravacao.append({
-                    "caminho_crate": Path(cw["caminho_crate"]),
-                    "nome_crate": cw["nome_crate"],
-                    "nome_exibicao": cw["nome_exibicao"],
-                    "faixas_finais_ordenadas": list(cw["faixas_finais_ordenadas"]),
-                    "header_antigo": hdr_bytes,
-                    "outros_blocos": outros_b,
-                    "chave_cache": cw["chave_cache"],
-                    "qtd_arquivos": cw["qtd_arquivos"],
-                    "tamanho_total_pasta": cw["tamanho_total_pasta"],
-                    "sig_pasta": cw["sig_pasta"],
-                    "faixas_adicionadas": set(cw.get("faixas_adicionadas", [])),
-                    "faixas_removidas": set(cw.get("faixas_removidas", [])),
-                })
-            crates_para_deletar = [cd["nome_arquivo"] for cd in plan_obj.get("crates_to_delete", [])]
-            crates_novas = list(plan_obj.get("crates_novas", []))
-            crates_masters = set(plan_obj.get("crates_masters", []))
-            mapa_subcrates = {k: set(v) for k, v in plan_obj.get("mapa_subcrates", {}).items()}
-            total_faixas = int(plan_obj.get("total_faixas", 0))
-            crates_inalteradas = int(plan_obj.get("crates_inalteradas", 0))
-            mapa_crates_arvore = plan_obj.get("mapa_crates_arvore", {})
-            relatorio_duplicados = plan_obj.get("relatorio_duplicados", [])
-            lista_pref_final_from_plan = plan_obj.get("neworder_pref_list")
-            if isinstance(plan_obj.get("novo_cache"), dict):
-                novo_cache.update(plan_obj["novo_cache"])
+            resumo_invalido = {
+                "sucesso": False,
+                "status_analise": "plano_invalidado",
+                "estado_parcial": False,
+                "rollback_executado": False,
+                "fases": fases_executadas,
+                "erros_leitura": erros_leitura,
+                "erros_gravacao": erros_gravacao,
+                "dry_run": False,
+                "plan_invalidated": True,
+                "mp3_path": str(path_mp3),
+                "serato_path": str(path_serato),
+                "library_id": _compute_library_id(path_mp3, path_serato),
+                "total_faixas": 0,
+                "crates_gravadas": 0,
+                "crates_inalteradas": 0,
+                "faixas_adicionadas": 0,
+                "faixas_removidas": 0,
+                "total_duplicados": 0,
+                "csv_duplicados": None,
+                "duplicados": [],
+                "crates_arvore": {},
+                "movimentacoes": [],
+            }
+            if emit_json_summary:
+                print(f"__PAYLOAD_JSON_SUMMARY__{json.dumps(resumo_invalido)}", flush=True)
+            return False, resumo_invalido
+
+        # Todas as validações passaram: inicializa Journal e carrega cache/crates
+        try:
+            import journal
+            sync_journal_id = journal.record_sync_start(str(path_mp3), str(path_serato), dry_run=False)
+        except Exception as e_j:
+            erros_gravacao.append(f"Falha ao iniciar registro no Journal: {e_j}")
+
+        cache_anterior = carregar_cache(cache_file, expected_lib=str(path_mp3))
+        _log_fase("validacao_plano", "concluida", f"Plano {plan_obj.get('plan_id')} validado")
+        print(f"🔒 Plano imutável validado: {plan_obj.get('plan_id')}", flush=True)
+        for cw in plan_obj.get("crates_to_write", []):
+            hdr_b64 = cw.get("header_antigo_b64")
+            hdr_bytes = base64.b64decode(hdr_b64) if hdr_b64 else None
+            outros_b = [base64.b64decode(b) for b in cw.get("outros_blocos_b64", [])]
+            planos_gravacao.append({
+                "caminho_crate": Path(cw["caminho_crate"]),
+                "nome_crate": cw["nome_crate"],
+                "nome_exibicao": cw["nome_exibicao"],
+                "faixas_finais_ordenadas": list(cw["faixas_finais_ordenadas"]),
+                "header_antigo": hdr_bytes,
+                "outros_blocos": outros_b,
+                "chave_cache": cw["chave_cache"],
+                "qtd_arquivos": cw["qtd_arquivos"],
+                "tamanho_total_pasta": cw["tamanho_total_pasta"],
+                "sig_pasta": cw["sig_pasta"],
+                "faixas_adicionadas": set(cw.get("faixas_adicionadas", [])),
+                "faixas_removidas": set(cw.get("faixas_removidas", [])),
+            })
+        crates_para_deletar = [cd["nome_arquivo"] for cd in plan_obj.get("crates_to_delete", [])]
+        crates_novas = list(plan_obj.get("crates_novas", []))
+        crates_masters = set(plan_obj.get("crates_masters", []))
+        mapa_subcrates = {k: set(v) for k, v in plan_obj.get("mapa_subcrates", {}).items()}
+        total_faixas = int(plan_obj.get("total_faixas", 0))
+        crates_inalteradas = int(plan_obj.get("crates_inalteradas", 0))
+        mapa_crates_arvore = plan_obj.get("mapa_crates_arvore", {})
+        relatorio_duplicados = plan_obj.get("relatorio_duplicados", [])
+        lista_pref_final_from_plan = plan_obj.get("neworder_pref_list")
+        if isinstance(plan_obj.get("novo_cache"), dict):
+            novo_cache.update(plan_obj["novo_cache"])
 
     if not executando_plano_imutavel:
+        if not dry_run:
+            crates_dir.mkdir(parents=True, exist_ok=True)
+            path_logs.mkdir(parents=True, exist_ok=True)
+            try:
+                import journal
+                sync_journal_id = journal.record_sync_start(str(path_mp3), str(path_serato), dry_run=False)
+            except Exception as e_j:
+                erros_gravacao.append(f"Falha ao iniciar registro no Journal: {e_j}")
+            cache_anterior = carregar_cache(cache_file, expected_lib=str(path_mp3))
+
+        crates_fisicas_antigas = set()
+        if crates_dir.exists():
+            crates_fisicas_antigas = set([
+                normalizar_nfc(f.name)
+                for f in crates_dir.glob("*.crate")
+                if not f.name.startswith('.') and not f.name.endswith('.bak') and not f.name.endswith('.tmp')
+            ])
         _log_fase("varredura", "iniciada")
 
         print(f"🔗 Raiz de Cálculo Relativo: {raiz_relativa}", flush=True)

@@ -501,7 +501,9 @@ export const App: React.FC = () => {
         });
       } catch (err) {
         setIsRunning(false);
-        addLog(`❌ Erro ao invocar motor Python: ${err}`);
+        const errText = `Falha de comunicação com o backend: ${err}`;
+        setSyncFeedback({ type: 'error', message: errText });
+        addLog(`❌ ${errText}`);
       }
     } else {
       // Simulation mode in Web Dev Server
