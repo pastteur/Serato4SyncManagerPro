@@ -953,7 +953,8 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
               mp3Path,
               seratoPath,
               targetPath: null,
-              targetPaths: null
+              targetPaths: null,
+              allowGlobalCleanup: true
             });
             const data = JSON.parse(resJson);
             setRemoveLostResult(data);

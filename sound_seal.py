@@ -22,6 +22,7 @@ import hashlib
 import datetime
 import argparse
 from pathlib import Path
+from typing import Optional
 
 # Garante flushing imediato
 if hasattr(sys.stdout, 'reconfigure'):
@@ -930,7 +931,13 @@ def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
     }, ensure_ascii=False), flush=True)
 
 
-def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: Path = None, max_pct: float = 0.20) -> int:
+def remove_from_database_v2(
+    db_file: Path,
+    target_paths: Optional[set] = None,
+    mp3_base: Optional[Path] = None,
+    max_pct: float = 0.20,
+    allow_global_cleanup: bool = False,
+) -> int:
     """
     Remove entradas de faixas de database V2 preservando vrsn e blocos válidos.
     Executa verificação obrigatória de volume montado, limite percentual de segurança,
@@ -978,10 +985,9 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
             if rel_p:
                 if target_paths is not None:
                     norm_p = norm_key(rel_p)
-                    norm_fname = norm_key(Path(rel_p).name)
-                    if norm_p in target_paths or norm_fname in target_paths:
+                    if norm_p in target_paths:
                         should_remove = True
-                elif mp3_base is not None:
+                elif allow_global_cleanup and mp3_base is not None:
                     if not resolve_serato_path(rel_p, mp3_base):
                         should_remove = True
 
@@ -991,7 +997,7 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
                 kept_blocks.append(block)
 
         # Limite percentual de segurança para database V2 (evita corrupção catastrófica por biblioteca movida)
-        if target_paths is None and total_entries > 0 and (removed / total_entries) > max_pct:
+        if target_paths is None and allow_global_cleanup and total_entries > 0 and (removed / total_entries) > max_pct:
             print(f"[PROTEÇÃO] Remoção em database V2 abortada: percentual de faixas ausentes ({removed}/{total_entries} = {round(removed/total_entries*100, 1)}%) excede o teto de segurança de {int(max_pct*100)}%.", file=sys.stderr)
             return 0
 
@@ -1028,131 +1034,155 @@ def remove_from_database_v2(db_file: Path, target_paths: set = None, mp3_base: P
         return 0
 
 
-def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target_path: str = "", target_paths_json: str = "", max_lost_pct: float = 0.20):
+def parse_target_paths(target_paths_json: str) -> set:
+    """Valida estritamente a lista JSON de caminhos-alvo para limpeza de crates (QA-02)."""
+    if not isinstance(target_paths_json, str):
+        raise ValueError("Lista de caminhos inválida")
+
+    try:
+        parsed = json.loads(target_paths_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON de caminhos inválido: {exc}") from exc
+
+    if not isinstance(parsed, list):
+        raise ValueError("O JSON deve conter uma lista")
+
+    if len(parsed) == 0:
+        raise ValueError("Lista de caminhos vazia: limpeza bloqueada")
+
+    normalized = set()
+    for item in parsed:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("Caminho inválido na lista")
+        clean_norm = os.path.normpath(item.strip())
+        normalized.add(norm_key(clean_norm))
+
+    return normalized
+
+
+def _expand_target_candidates(raw_items: set, serato_dir: Path, mp3_base: Path) -> set:
+    """Expande caminhos exatos (absoluto/relativo à raiz Serato/MP3) sem casar apenas por basename."""
+    from crate_ops import library_root_for
+    lib_root = library_root_for(serato_dir)
+    expanded = set()
+    for norm_item in raw_items:
+        expanded.add(norm_item)
+        p = Path(norm_item)
+        if p.is_absolute():
+            for root in (lib_root, mp3_base):
+                try:
+                    rel = p.resolve().relative_to(root.resolve())
+                    expanded.add(norm_key(rel.as_posix()))
+                except Exception:
+                    pass
+    return expanded
+
+
+def remove_lost_tracks_from_crates(
+    serato_dir_str: str,
+    mp3_dir_str: str,
+    target_path: str = "",
+    target_paths_json: Optional[str] = "",
+    max_lost_pct: float = 0.20,
+    allow_global_cleanup: bool = False,
+):
     """
-    Remove entradas de faixas perdidas (inexistentes no disco ou selecionadas)
-    de todas as crates do Serato e também da biblioteca central (database V2).
-    Preserva 100% dos cabeçalhos vrsn/ovct e blocos válidos.
-    Cria backup automático verificado (.crate.bak / database_V2.bak) antes de alterar qualquer arquivo.
-    Possui travas rigorosas:
-      - Checagem prévia de volume montado (faixas de discos desconectados NUNCA são removidas)
-      - Teto percentual por crate (bloqueia limpeza automática se mais de 20% das faixas forem perdidas)
-      - Gravação temporária atômica com os.replace e os.fsync
+    Remove entradas de faixas perdidas ou selecionadas das crates e database V2
+    EXCLUSIVAMENTE da biblioteca Serato selecionada, reutilizando leitura/escrita atômica
+    e validação estrutural centralizada de crate_ops.py (QA-02 + QA-05).
     """
+    from crate_ops import read_and_validate_crate, write_crate_atomic
+
     serato_dir = resolve_serato_dir(serato_dir_str)
     mp3_base = Path(os.path.expanduser(mp3_dir_str)).resolve()
 
-    # Validação prévia de montagem do volume base
-    if not is_track_volume_available("", mp3_base):
+    def _fail(msg: str) -> dict:
         return {
             "sucesso": False,
-            "erro": f"Volume base da biblioteca de áudio não está montado ou acessível: {mp3_base}",
+            "erro": msg,
             "total_removidas": 0,
             "crates_removidas": 0,
             "database_v2_removidas": 0,
-            "crates_afetadas": []
+            "crates_afetadas": [],
         }
 
-    subcrates_dirs = []
-    if (serato_dir / "Subcrates").exists():
-        subcrates_dirs.append(serato_dir / "Subcrates")
+    # QA-02: Parsing e autorização estrita ANTES de tocar qualquer arquivo
+    target_set: Optional[set] = None
+    has_single_target = isinstance(target_path, str) and bool(target_path.strip())
+    has_json_arg = target_paths_json is not None and target_paths_json != ""
 
-    parts = mp3_base.resolve().parts
-    if len(parts) >= 3 and parts[1] == 'Volumes':
-        ext_sc = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "Subcrates"
-        if ext_sc.exists() and ext_sc not in subcrates_dirs:
-            subcrates_dirs.append(ext_sc)
-
-    try:
-        home_sc = Path.home() / "Music" / "_Serato_" / "Subcrates"
-        if home_sc.exists() and home_sc not in subcrates_dirs:
-            subcrates_dirs.append(home_sc)
-    except (PermissionError, OSError):
-        pass
-
-    target_set = None
-    if target_path and target_path.strip():
-        t = target_path.strip()
-        target_set = {norm_key(t), norm_key(Path(t).name)}
-    elif target_paths_json and target_paths_json.strip():
+    if has_single_target:
+        raw_t = os.path.normpath(target_path.strip())
+        target_set = _expand_target_candidates({norm_key(raw_t)}, serato_dir, mp3_base)
+    elif has_json_arg:
         try:
-            arr = json.loads(target_paths_json)
-            target_set = set()
-            for it in arr:
-                if it and isinstance(it, str):
-                    target_set.add(norm_key(it))
-                    target_set.add(norm_key(Path(it).name))
-        except Exception:
-            target_set = None
+            raw_set = parse_target_paths(target_paths_json)
+        except ValueError as e_json:
+            return _fail(str(e_json))
+        target_set = _expand_target_candidates(raw_set, serato_dir, mp3_base)
+    elif target_paths_json is None and not allow_global_cleanup:
+        return _fail("Lista de caminhos ausente (None) e limpeza global não autorizada.")
+    elif not allow_global_cleanup:
+        return _fail("Limpeza global exige autorização explícita (allow_global_cleanup=True) ou lista de caminhos válida.")
+
+    # Validação prévia de montagem do volume base
+    if not is_track_volume_available("", mp3_base):
+        return _fail(f"Volume base da biblioteca de áudio não está montado ou acessível: {mp3_base}")
+
+    # QA-02: Processar EXCLUSIVAMENTE a biblioteca selecionada (Subcrates de serato_dir)
+    subcrates_dirs = []
+    selected_sc = serato_dir / "Subcrates"
+    if selected_sc.exists():
+        subcrates_dirs.append(selected_sc)
 
     total_removed = 0
     crates_affected = []
 
     for sc_dir in subcrates_dirs:
         for crate_file in sorted(sc_dir.glob("*.crate")):
+            if crate_file.name.startswith("._") or crate_file.name.startswith("."):
+                continue
             try:
-                content = crate_file.read_bytes()
-                pos = 0
-                header_end = 0
-                otrk_blocks = []
+                # QA-05: Validação estrutural completa centralizada em crate_ops.py
+                header_bytes, tracks_list, outros_blocos = read_and_validate_crate(crate_file)
 
-                # 1. Varre o arquivo .crate separando o cabeçalho dos blocos de faixas (otrk)
-                while pos < len(content):
-                    tag = content[pos:pos+4]
-                    if len(tag) < 4:
-                        break
-                    length = int.from_bytes(content[pos+4:pos+8], byteorder='big')
-                    if tag == b'otrk':
-                        block_end = pos + 8 + length
-                        block = content[pos:block_end]
-                        p_idx = block.find(b'ptrk')
-                        if p_idx != -1 and p_idx + 8 <= len(block):
-                            p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
-                            path_str = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
-                            otrk_blocks.append((path_str, block))
-                        pos = block_end
-                    else:
-                        pos += 8 + length
-                        header_end = pos
-
-                if not otrk_blocks:
+                if not tracks_list:
                     continue
 
-                header_bytes = content[:header_end]
-                kept_blocks = []
+                kept_tracks = []
                 removed_in_this = 0
                 skipped_unmounted = 0
 
-                # 2. Verifica se a faixa deve ser removida
-                for rel_path, block in otrk_blocks:
+                for rel_path in tracks_list:
                     should_remove = False
 
                     # CRÍTICO: Checagem de volume montado antes de qualquer deliberação
                     if not is_track_volume_available(rel_path, mp3_base):
-                        # Faixa reside em volume externo atualmente desconectado: PRESERVAR!
                         skipped_unmounted += 1
-                        kept_blocks.append(block)
+                        kept_tracks.append(rel_path)
                         continue
 
                     if target_set is not None:
                         norm_p = norm_key(rel_path)
-                        norm_fname = norm_key(Path(rel_path).name)
-                        if norm_p in target_set or norm_fname in target_set:
+                        if norm_p in target_set:
                             should_remove = True
-                    else:
-                        resolved = resolve_serato_path(rel_path, mp3_base)
-                        if not (resolved and resolved.exists()):
-                            should_remove = True
+                    elif allow_global_cleanup:
+                        try:
+                            resolved = resolve_serato_path(rel_path, mp3_base)
+                            if not (resolved and resolved.exists()):
+                                should_remove = True
+                        except OSError:
+                            # Nunca interpretar falha de leitura/I-O como arquivo inexistente
+                            kept_tracks.append(rel_path)
+                            continue
 
                     if should_remove:
                         removed_in_this += 1
                     else:
-                        kept_blocks.append(block)
+                        kept_tracks.append(rel_path)
 
-                # Trava de segurança: limite percentual por crate (ex: 20%)
-                # Protege contra deleção acidental massiva se a biblioteca foi movida de pasta
-                total_crate_tracks = len(otrk_blocks)
-                if target_set is None and total_crate_tracks > 0 and (removed_in_this / total_crate_tracks) > max_lost_pct:
+                total_crate_tracks = len(tracks_list)
+                if target_set is None and allow_global_cleanup and total_crate_tracks > 0 and (removed_in_this / total_crate_tracks) > max_lost_pct:
                     crates_affected.append({
                         "crate": crate_file.stem.replace('%%', ' -> '),
                         "bloqueado_seguranca": True,
@@ -1164,52 +1194,37 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                     })
                     continue
 
-                # 3. Se houver faixas removidas, cria backup verificado e regrava a crate atomicamente
                 if removed_in_this > 0:
-                    new_content = header_bytes + b''.join(kept_blocks)
-                    backup_path = crate_file.with_suffix('.crate.bak')
-                    try:
-                        import shutil
-                        shutil.copy2(str(crate_file), str(backup_path))
-                        if not backup_path.exists() or backup_path.stat().st_size != crate_file.stat().st_size:
-                            raise IOError("Falha na criação ou validação de tamanho do backup .crate.bak")
-                    except Exception as e_bak:
+                    # QA-05: Escrita atômica centralizada + SHA-256 backup + re-parse + journal + rollback
+                    wres = write_crate_atomic(
+                        crate_file,
+                        kept_tracks,
+                        header_antigo=header_bytes,
+                        outros_blocos=outros_blocos,
+                        action_name="sound_seal_remove_lost",
+                    )
+                    if not wres.get("sucesso"):
                         crates_affected.append({
                             "crate": crate_file.name,
-                            "erro": f"Backup prévio obrigatório falhou: {e_bak}. Alteração abortada."
+                            "erro": wres.get("erro", "Falha na gravação atômica da crate."),
                         })
                         continue
 
-                    import uuid
-                    temp_crate = crate_file.with_name(f".tmp_{crate_file.name}_{uuid.uuid4().hex[:8]}")
-                    try:
-                        with open(temp_crate, 'wb') as f:
-                            f.write(new_content)
-                            f.flush()
-                            os.fsync(f.fileno())
+                    # Compatibilidade com convenção .crate.bak além do .bak de crate_ops
+                    crate_bak = crate_file.with_suffix('.crate.bak')
+                    ops_bak = Path(wres["backup"]) if wres.get("backup") else None
+                    if ops_bak and ops_bak.exists():
+                        import shutil
+                        shutil.copy2(str(ops_bak), str(crate_bak))
 
-                        if not temp_crate.exists() or temp_crate.stat().st_size < len(header_bytes):
-                            raise IOError("Arquivo temporário da crate gerado incompleto.")
-
-                        if not temp_crate.read_bytes().startswith(b'vrsn'):
-                            raise IOError("Arquivo temporário da crate não possui cabeçalho vrsn válido.")
-
-                        os.replace(str(temp_crate), str(crate_file))
-
-                        total_removed += removed_in_this
-                        crates_affected.append({
-                            "crate": crate_file.stem.replace('%%', ' -> '),
-                            "removidas": removed_in_this,
-                            "restantes": len(kept_blocks),
-                            "puladas_desconectadas": skipped_unmounted,
-                            "backup": str(backup_path)
-                        })
-                    finally:
-                        if temp_crate.exists():
-                            try:
-                                temp_crate.unlink()
-                            except Exception:
-                                pass
+                    total_removed += removed_in_this
+                    crates_affected.append({
+                        "crate": crate_file.stem.replace('%%', ' -> '),
+                        "removidas": removed_in_this,
+                        "restantes": len(kept_tracks),
+                        "puladas_desconectadas": skipped_unmounted,
+                        "backup": str(crate_bak if crate_bak.exists() else (ops_bak or "")),
+                    })
 
             except Exception as e:
                 crates_affected.append({
@@ -1218,39 +1233,28 @@ def remove_lost_tracks_from_crates(serato_dir_str: str, mp3_dir_str: str, target
                 })
                 continue
 
-    # Limpa também na database V2 do Serato (banco central de faixas)
-    db_candidates = [serato_dir / "database V2"]
+    # QA-02: Limpa EXCLUSIVAMENTE na database V2 da biblioteca selecionada
+    total_db_removed = 0
+    selected_db = serato_dir / "database V2"
     try:
-        home_db = Path.home() / "Music" / "_Serato_" / "database V2"
-        if home_db.exists():
-            db_candidates.append(home_db)
+        if selected_db.exists():
+            total_db_removed = remove_from_database_v2(
+                selected_db,
+                target_set,
+                mp3_base if (target_set is None and allow_global_cleanup) else None,
+                max_pct=max_lost_pct,
+                allow_global_cleanup=allow_global_cleanup,
+            )
     except (PermissionError, OSError):
         pass
 
-    if len(parts) >= 3 and parts[1] == 'Volumes':
-        try:
-            ext_db = Path(parts[0]) / parts[1] / parts[2] / "_Serato_" / "database V2"
-            if ext_db.exists() and ext_db not in db_candidates:
-                db_candidates.append(ext_db)
-        except (PermissionError, OSError):
-            pass
-
-    total_db_removed = 0
-    for db_cand in db_candidates:
-        try:
-            if db_cand.exists():
-                cnt = remove_from_database_v2(db_cand, target_set, mp3_base if target_set is None else None, max_pct=max_lost_pct)
-                total_db_removed += cnt
-        except (PermissionError, OSError):
-            pass
-
-    # Também remove do banco SQLite de Sound Seals para manter o cache sincronizado
+    # Também remove do banco SQLite de Sound Seals por caminho exato (sem LIKE '%item%')
     try:
         conn = get_db()
         cursor = conn.cursor()
         if target_set:
             for item in target_set:
-                cursor.execute("DELETE FROM sound_seals WHERE filepath LIKE ? OR filename = ?", (f"%{item}%", item))
+                cursor.execute("DELETE FROM sound_seals WHERE LOWER(filepath) = ?", (item.lower(),))
         conn.commit()
         conn.close()
     except Exception:
@@ -1284,7 +1288,8 @@ def main():
     parser.add_argument("--batch-relink", type=str, default="", help="JSON de lista de faixas a religar")
     parser.add_argument("--remove-lost", action="store_true", help="Remove faixas perdidas de todas as crates do Serato")
     parser.add_argument("--target-path", type=str, default="", help="Caminho relativo específico a remover")
-    parser.add_argument("--target-paths", type=str, default="", help="JSON de lista de caminhos a remover")
+    parser.add_argument("--target-paths", type=str, default=None, help="JSON de lista de caminhos a remover")
+    parser.add_argument("--allow-global-cleanup", action="store_true", help="Autoriza explicitamente remoção global de faixas ausentes")
     parser.add_argument("--set-master", nargs=2, metavar=("SEAL", "FILEPATH"), help="Define manualmente o arquivo protegido de um selo acústico")
 
     args = parser.parse_args()
@@ -1351,11 +1356,13 @@ def main():
 
     if args.remove_lost:
         serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
+        tp_json = "" if args.target_paths is None else args.target_paths
         res = remove_lost_tracks_from_crates(
             serato_dir,
             mp3_dir,
             target_path=args.target_path,
-            target_paths_json=args.target_paths
+            target_paths_json=tp_json,
+            allow_global_cleanup=args.allow_global_cleanup,
         )
         print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)

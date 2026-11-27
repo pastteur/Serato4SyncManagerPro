@@ -1315,11 +1315,16 @@ def safe_save_tags(file_path: Path, tag_modifier_fn, action: str = "tag_doctor")
 
     orig_size = file_path.stat().st_size
     temp_file = file_path.with_name(f".tmp_tag_{file_path.name}_{uuid.uuid4().hex[:8]}")
+    pre_backup = file_path.with_name(f".tmp_prebak_{file_path.name}_{uuid.uuid4().hex[:8]}")
 
     try:
         shutil.copy2(str(file_path), str(temp_file))
         if not temp_file.exists() or temp_file.stat().st_size != orig_size:
             raise IOError("Falha ao criar cópia temporária de trabalho para atualização de tags.")
+
+        shutil.copy2(str(file_path), str(pre_backup))
+        if not pre_backup.exists() or pre_backup.stat().st_size != orig_size:
+            raise IOError("Falha ao criar backup temporário pré-operação.")
 
         temp_audio = mutagen.File(str(temp_file))
         if temp_audio is None:
@@ -1340,7 +1345,6 @@ def safe_save_tags(file_path: Path, tag_modifier_fn, action: str = "tag_doctor")
             raise IOError("Validação pós-escrita falhou: arquivo temporário corrompido ou vazio.")
 
         # Registra o estado original no Journal antes da substituição atômica
-        op_id = None
         try:
             op_id = record_id3_before_change(str(file_path), action=action)
         except Exception as e_j:
@@ -1349,9 +1353,26 @@ def safe_save_tags(file_path: Path, tag_modifier_fn, action: str = "tag_doctor")
         # Substituição atômica no mesmo sistema de arquivos
         os.replace(str(temp_file), str(file_path))
 
-        if op_id is not None:
+        # Sela obrigatoriamente o hash_posterior no Journal; se falhar, executa rollback físico usando pre_backup
+        try:
+            sealed = record_operation_after(op_id, str(file_path))
+            if not sealed:
+                raise IOError("record_operation_after não confirmou selagem.")
+        except Exception as e_after:
             try:
-                record_operation_after(op_id, str(file_path))
+                if not pre_backup.exists() or pre_backup.stat().st_size != orig_size:
+                    raise IOError("Backup pré-operação ausente ou inválido.")
+                os.replace(str(pre_backup), str(file_path))
+            except Exception as e_rb:
+                raise IOError(
+                    f"ALERTA CRÍTICO (RECUPERAÇÃO MANUAL NECESSÁRIA): Falha ao selar Journal ({e_after}) "
+                    f"e falha ao restaurar backup ({e_rb}). Backup preservado em: {pre_backup}"
+                ) from e_rb
+            raise IOError(f"Falha ao registrar hash posterior no Journal (rollback físico executado): {e_after}") from e_after
+
+        if pre_backup.exists():
+            try:
+                pre_backup.unlink()
             except Exception:
                 pass
 
@@ -1361,6 +1382,10 @@ def safe_save_tags(file_path: Path, tag_modifier_fn, action: str = "tag_doctor")
                 temp_file.unlink()
             except Exception:
                 pass
+        # Só apaga pre_backup se o arquivo ainda estiver no estado original intacto ou se não houve recuperação manual
+        if pre_backup.exists() and not temp_file.exists():
+            # Se um erro crítico de recuperação manual ocorrer, preservamos pre_backup
+            pass
 
 
 def apply_cleaned_tags(items_to_apply: list, rename_files_on_disk: bool = False, stream_progress: bool = True):
@@ -1655,8 +1680,8 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
 
             safe_save_tags(full_path, modify_tags_lote, action="tag_doctor_lote")
 
-            # Renomeação opcional no disco segura contra colisões de caixa APFS
-            if rename_files and suggested_filename != filename:
+            # Renomeação opcional no disco segura contra colisões de caixa e NFD/NFC no APFS
+            if rename_files and unicodedata.normalize('NFC', suggested_filename) != unicodedata.normalize('NFC', filename):
                 dest_path = full_path.parent / suggested_filename
                 if dest_path != full_path:
                     old_path_str = str(full_path)

@@ -436,6 +436,28 @@ def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az") -
     return res
 
 
+def _update_neworder_pref_crate_name(serato: Path, old_clean_name: str, new_clean_name: str) -> None:
+    """Atualiza o nome da crate em neworder.pref caso o arquivo exista (UTF-16-BE ou UTF-8)."""
+    pref_path = serato / "neworder.pref"
+    if not pref_path.exists():
+        return
+    try:
+        raw = pref_path.read_bytes()
+        for enc in ('utf-16-be', 'utf-16', 'utf-8'):
+            try:
+                text = raw.decode(enc)
+                if old_clean_name in text:
+                    updated = text.replace(old_clean_name, new_clean_name)
+                    tmp_pref = pref_path.with_name(f".tmp_neworder_{uuid.uuid4().hex[:8]}")
+                    tmp_pref.write_bytes(updated.encode(enc))
+                    os.replace(str(tmp_pref), str(pref_path))
+                    return
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
 def prefix_crate(serato_dir: str, crate_name: str, prefix: str, target: str = "subcrate") -> Dict[str, Any]:
     """
     Adiciona um prefixo no nome da crate ou subcrate.
@@ -463,7 +485,26 @@ def prefix_crate(serato_dir: str, crate_name: str, prefix: str, target: str = "s
         return {"sucesso": False, "erro": f"Já existe uma crate com o nome de destino: {new_clean_name}"}
 
     try:
+        orig_hash = calc_crate_sha256(old_crate_path)
+        bak = old_crate_path.with_suffix('.bak')
+        shutil.copy2(old_crate_path, bak)
+        if calc_crate_sha256(bak) != orig_hash:
+            return {"sucesso": False, "erro": "Falha ao validar backup SHA-256 antes de renomear crate."}
+        _, tracks_cur, _ = read_and_validate_crate(old_crate_path)
         shutil.move(old_crate_path, new_crate_path)
+        _update_neworder_pref_crate_name(serato, clean_name, new_clean_name)
+        try:
+            import journal
+            journal.record_crate_operation(
+                crate_path=str(new_crate_path),
+                acao="prefix_crate",
+                hash_anterior=orig_hash,
+                hash_posterior=calc_crate_sha256(new_crate_path),
+                backup_path=str(bak),
+                total_tracks=len(tracks_cur),
+            )
+        except Exception:
+            pass
     except Exception as e:
         return {"sucesso": False, "erro": f"Falha ao renomear crate: {e}"}
 
@@ -498,7 +539,26 @@ def capitalize_crate(serato_dir: str, crate_name: str) -> Dict[str, Any]:
         return {"sucesso": False, "erro": f"Já existe uma crate com o nome: {new_clean_name}"}
 
     try:
+        orig_hash = calc_crate_sha256(old_crate_path)
+        bak = old_crate_path.with_suffix('.bak')
+        shutil.copy2(old_crate_path, bak)
+        if calc_crate_sha256(bak) != orig_hash:
+            return {"sucesso": False, "erro": "Falha ao validar backup SHA-256 antes de capitalizar crate."}
+        _, tracks_cur, _ = read_and_validate_crate(old_crate_path)
         shutil.move(old_crate_path, new_crate_path)
+        _update_neworder_pref_crate_name(serato, clean_name, new_clean_name)
+        try:
+            import journal
+            journal.record_crate_operation(
+                crate_path=str(new_crate_path),
+                acao="capitalize_crate",
+                hash_anterior=orig_hash,
+                hash_posterior=calc_crate_sha256(new_crate_path),
+                backup_path=str(bak),
+                total_tracks=len(tracks_cur),
+            )
+        except Exception:
+            pass
     except Exception as e:
         return {"sucesso": False, "erro": f"Falha ao capitalizar crate: {e}"}
 
@@ -590,6 +650,7 @@ def list_crates_tree(serato_dir: str) -> Dict[str, Any]:
         return {"sucesso": False, "erro": f"Pasta Subcrates não encontrada em: {serato_dir}", "crates_arvore": {}}
 
     tree = {}
+    corrupt_crates = []
     total_tracks = 0
 
     for f in sorted(subcrates_dir.glob("*.crate")):
@@ -598,7 +659,8 @@ def list_crates_tree(serato_dir: str) -> Dict[str, Any]:
         crate_name = f.stem
         try:
             _, tracks, _ = read_and_validate_crate(f)
-        except Exception:
+        except Exception as e_crate:
+            corrupt_crates.append({"crate": f.name, "erro": str(e_crate)})
             continue
 
         parts = crate_name.split("%%")
@@ -630,7 +692,8 @@ def list_crates_tree(serato_dir: str) -> Dict[str, Any]:
         "sucesso": True,
         "total_crates": len(tree),
         "total_faixas": total_tracks,
-        "crates_arvore": tree
+        "crates_arvore": tree,
+        "crates_corrompidas": corrupt_crates,
     }
 
 

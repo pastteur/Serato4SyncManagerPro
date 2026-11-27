@@ -532,16 +532,64 @@ def write_analysis_tags(filepath, bpm=None, key_text=None, overwrite=False):
     if not alterou:
         return {"sucesso": True, "arquivo": path.name, "mensagem": "Sem alterações (campos já preenchidos)", "gravado": False}
 
+    import shutil
+    import uuid
+    tmp = path.with_name(f".tmp_analysis_{path.name}_{uuid.uuid4().hex[:8]}")
+    pre_bak = path.with_name(f".tmp_prebak_{path.name}_{uuid.uuid4().hex[:8]}")
     try:
-        from journal import record_id3_before_change
-        record_id3_before_change(str(path), action="analise_bpm_tom")
+        shutil.copy2(str(path), str(tmp))
+        shutil.copy2(str(path), str(pre_bak))
+        try:
+            tmp_tags = ID3(str(tmp))
+        except Exception:
+            tmp_tags = ID3()
+        if bpm and (overwrite or not tmp_tags.get("TBPM")):
+            tmp_tags.delall("TBPM")
+            tmp_tags.add(TBPM(encoding=3, text=str(int(round(float(bpm))))))
+        if key_text and (overwrite or not tmp_tags.get("TKEY")):
+            tmp_tags.delall("TKEY")
+            tmp_tags.add(TKEY(encoding=3, text=key_text))
+        tmp_tags.save(str(tmp), v2_version=3)
+        ID3(str(tmp))
     except Exception as e:
+        for p_tmp in (tmp, pre_bak):
+            if p_tmp.exists():
+                try:
+                    p_tmp.unlink()
+                except Exception:
+                    pass
+        return {"sucesso": False, "erro": str(e)}
+
+    try:
+        from journal import record_id3_before_change, record_operation_after
+        op_id = record_id3_before_change(str(path), action="analise_bpm_tom")
+    except Exception as e:
+        for p_tmp in (tmp, pre_bak):
+            if p_tmp.exists():
+                try:
+                    p_tmp.unlink()
+                except Exception:
+                    pass
         return {"sucesso": False, "erro": "Journal indisponível; escrita cancelada por segurança: %s" % e}
 
     try:
-        tags.save(str(path), v2_version=3)
+        os.replace(str(tmp), str(path))
+        record_operation_after(op_id, str(path))
+        if pre_bak.exists():
+            pre_bak.unlink()
     except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+        try:
+            if pre_bak.exists():
+                os.replace(str(pre_bak), str(path))
+        except Exception:
+            return {"sucesso": False, "erro": f"RECUPERAÇÃO MANUAL NECESSÁRIA: falha ao selar Journal ({e}). Backup: {pre_bak}"}
+        return {"sucesso": False, "erro": f"Falha ao gravar análise e selar Journal (rollback executado): {e}"}
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
     return {"sucesso": True, "arquivo": path.name, "mensagem": "BPM/Tom gravados", "gravado": True}
 
 

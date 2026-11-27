@@ -346,14 +346,9 @@ export const App: React.FC = () => {
           if (feedback.summary) {
             const sum = feedback.summary as SyncSummary;
             setSummary(sum);
-            if (sum.dry_run && sum.sucesso && sum.plan_id) {
-              setApprovedPlanId(sum.plan_id);
-            } else {
-              setApprovedPlanId(null);
-            }
-          } else {
-            setApprovedPlanId(null);
           }
+          // QA-03: Só libera aprovação quando feedback.ok === true e todas as condições do plano são satisfeitas
+          setApprovedPlanId(feedback.canApprove ? feedback.approvedPlanId : null);
           setSyncFeedback({ type: feedback.bannerType, message: feedback.bannerMessage });
           addLog(feedback.logMessage);
         }).then(unlisten => { unlistenFinish = unlisten; });

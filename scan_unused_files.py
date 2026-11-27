@@ -27,9 +27,10 @@ if str(_SCRIPT_DIR) not in sys.path:
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 
 try:
-    from crate_ops import ler_todas_as_crates
+    from crate_ops import read_and_validate_crate, library_root_for
 except ImportError:
-    ler_todas_as_crates = None
+    read_and_validate_crate = None
+    library_root_for = None
 
 try:
     from serato_v4_engine import SeratoV4Engine
@@ -45,17 +46,48 @@ class UnusedFilesScanner:
         self.serato_dir = Path(os.path.expanduser(serato_dir)).resolve()
 
     def _collect_serato_tracks(self) -> Set[str]:
-        """Extrai todos os caminhos de arquivo conhecidos pelas crates v3 e v4."""
-        used_paths = set()
+        """Extrai todos os caminhos exatos (normalizados) conhecidos pelas crates v3 e v4."""
+        used_paths: Set[str] = set()
+        lib_root = library_root_for(self.serato_dir) if library_root_for else self.serato_dir.parent
 
-        # 1. Crates v3 (.crate)
+        def _add_path_variants(raw_p: str) -> None:
+            if not raw_p:
+                return
+            norm = os.path.normpath(raw_p.strip()).replace('\\', '/').lstrip('/')
+            used_paths.add(norm.lower())
+            p = Path(raw_p)
+            if p.is_absolute():
+                used_paths.add(str(p.resolve()).lower())
+                try:
+                    used_paths.add(p.resolve().relative_to(self.mp3_dir).as_posix().lower())
+                except Exception:
+                    pass
+                try:
+                    used_paths.add(p.resolve().relative_to(lib_root).as_posix().lower())
+                except Exception:
+                    pass
+            else:
+                cand_lib = (lib_root / norm).resolve()
+                used_paths.add(str(cand_lib).lower())
+                cand_mp3 = (self.mp3_dir / norm).resolve()
+                used_paths.add(str(cand_mp3).lower())
+
+        # 1. Crates v3 (.crate) usando parser centralizado de crate_ops
         subcrates_dir = self.serato_dir / "Subcrates"
         if subcrates_dir.is_dir():
-            for crate_file in subcrates_dir.glob("*.crate"):
+            for crate_file in sorted(subcrates_dir.glob("*.crate")):
+                if crate_file.name.startswith("._") or crate_file.name.startswith("."):
+                    continue
+                if read_and_validate_crate:
+                    try:
+                        _, tracks, _ = read_and_validate_crate(crate_file)
+                        for path_str in tracks:
+                            _add_path_variants(path_str)
+                        continue
+                    except Exception:
+                        pass
                 try:
-                    with open(crate_file, "rb") as f:
-                        data = f.read()
-                    # Procura blocos ptrk
+                    data = crate_file.read_bytes()
                     idx = 0
                     while True:
                         idx = data.find(b'ptrk', idx)
@@ -66,26 +98,19 @@ class UnusedFilesScanner:
                             length = int.from_bytes(data[idx:idx+4], byteorder='big')
                             idx += 4
                             if idx + length <= len(data):
-                                raw_str = data[idx:idx+length]
                                 try:
-                                    path_str = raw_str.decode('utf-16-be')
-                                    # Normaliza
-                                    p = Path(path_str)
-                                    used_paths.add(p.name.lower())
-                                    used_paths.add(str(p).lower())
+                                    _add_path_variants(data[idx:idx+length].decode('utf-16-be'))
                                 except UnicodeDecodeError:
                                     pass
                                 idx += length
                 except Exception:
                     pass
 
-        # 2. Serato v4 SQLite (location.sqlite)
+        # 2. Serato v4 SQLite (location.sqlite) apenas da biblioteca selecionada
         if SeratoV4Engine:
-            # Tenta diferentes caminhos para a biblioteca v4
             v4_candidates = [
                 self.serato_dir / "Library",
                 self.serato_dir,
-                Path.home() / "Library" / "Application Support" / "Serato" / "Library"
             ]
             for v4_cand in v4_candidates:
                 try:
@@ -93,9 +118,7 @@ class UnusedFilesScanner:
                     if engine.is_v4_present():
                         locations = engine.resolve_track_locations()
                         for p_str in locations.values():
-                            p = Path(p_str)
-                            used_paths.add(p.name.lower())
-                            used_paths.add(str(p).lower())
+                            _add_path_variants(p_str)
                         break
                 except Exception:
                     pass
@@ -108,6 +131,7 @@ class UnusedFilesScanner:
             return {"sucesso": False, "erro": f"Diretório de músicas inválido: {self.mp3_dir}"}
 
         used_tracks = self._collect_serato_tracks()
+        lib_root = library_root_for(self.serato_dir) if library_root_for else self.serato_dir.parent
         unused_files = []
         total_unused_bytes = 0
         total_scanned_files = 0
@@ -123,12 +147,20 @@ class UnusedFilesScanner:
                     continue
 
                 total_scanned_files += 1
-                full_path = Path(root) / f
-                full_lower = str(full_path).lower()
-                name_lower = f.lower()
+                full_path = (Path(root) / f).resolve()
+                rel_mp3 = full_path.relative_to(self.mp3_dir).as_posix().lower()
+                rel_lib = ""
+                try:
+                    rel_lib = full_path.relative_to(lib_root).as_posix().lower()
+                except Exception:
+                    pass
 
-                # Se o arquivo não está nem pelo caminho nem pelo nome em nenhuma crate
-                if full_lower not in used_tracks and name_lower not in used_tracks:
+                # Casamento apenas por caminho exato/relativo (nunca por basename isolado)
+                if (
+                    str(full_path).lower() not in used_tracks
+                    and rel_mp3 not in used_tracks
+                    and (not rel_lib or rel_lib not in used_tracks)
+                ):
                     try:
                         size = full_path.stat().st_size
                     except OSError:
@@ -164,8 +196,23 @@ class UnusedFilesScanner:
             src = Path(f_path)
             if src.is_file():
                 try:
-                    dest = target_dir / src.name
-                    shutil.move(src, dest)
+                    # Preserva caminho relativo quando dentro de mp3_dir e evita colisão de nomes
+                    try:
+                        rel_parent = src.resolve().parent.relative_to(self.mp3_dir)
+                        dest_folder = target_dir / rel_parent
+                    except Exception:
+                        dest_folder = target_dir
+                    dest_folder.mkdir(parents=True, exist_ok=True)
+                    dest = dest_folder / src.name
+                    if dest.exists():
+                        counter = 1
+                        while True:
+                            cand = dest_folder / f"{src.stem}_{counter}{src.suffix}"
+                            if not cand.exists():
+                                dest = cand
+                                break
+                            counter += 1
+                    shutil.move(str(src), str(dest))
                     moved += 1
                 except Exception as e:
                     errors.append(f"Erro ao mover {src.name}: {e}")

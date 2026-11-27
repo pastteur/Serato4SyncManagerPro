@@ -462,6 +462,7 @@ def scan_audio_health(
         total_audio_files += sum(1 for f in files if not f.startswith('.') and Path(f).suffix.lower() in AUDIO_EXTENSIONS)
 
     total_scanned = 0
+    matched_cat_idx = 0
     items = []
     category_counts = {
         "truncada": 0,
@@ -507,7 +508,8 @@ def scan_audio_health(
 
                     # Filtra por categoria selecionada se não for "todas"
                     if filter_categoria == "todas" or filter_categoria == cat:
-                        if len(items) < limit:
+                        matched_cat_idx += 1
+                        if matched_cat_idx > max(0, int(offset)) and len(items) < limit:
                             crate_parts = [p for p in rel_folder.replace('\\', '/').split('/') if p]
                             c_raiz = crate_parts[0] if crate_parts else ""
                             items.append({
@@ -687,7 +689,6 @@ def repair_track_online(filepath_str: str, serato_dir_str: str = ""):
                 "--max-downloads", "1",
                 "-o", out_template,
                 "--no-playlist",
-                "--no-check-certificates",
                 "--quiet",
                 "--no-warnings"
             ]
@@ -1176,12 +1177,12 @@ def rename_audio_track(filepath_str: str, new_name_str: str) -> dict:
         except Exception:
             pass
 
-        # Sincroniza com banco Sound Seal se o módulo existir
+        # Sincroniza com banco Sound Seal (~/.serato_sound_seals.sqlite)
         try:
-            sound_seal_db = Path.home() / "Library" / "Application Support" / "Serato" / "Library" / "sound_seal.sqlite"
+            sound_seal_db = Path.home() / ".serato_sound_seals.sqlite"
             if sound_seal_db.exists():
                 import sqlite3
-                conn = sqlite3.connect(str(sound_seal_db))
+                conn = sqlite3.connect(str(sound_seal_db), timeout=15.0)
                 conn.execute("""
                     UPDATE sound_seals 
                     SET filepath = ?, filename = ?, updated_at = CURRENT_TIMESTAMP 
@@ -1215,10 +1216,8 @@ def resample_track_local(filepath_str: str) -> dict:
     if not ffmpeg_bin:
         return {"sucesso": False, "erro": "FFmpeg não instalado no sistema. Instale com 'brew install ffmpeg'."}
 
-    temp_id = f"resample_{int(datetime.now().timestamp() * 1000)}"
-    temp_dir = Path("/tmp") / temp_id
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_out = temp_dir / file_p.name
+    import uuid
+    temp_out = file_p.with_name(f".tmp_resample_{uuid.uuid4().hex[:8]}_{file_p.name}")
 
     cmd = [
         ffmpeg_bin,
@@ -1237,22 +1236,52 @@ def resample_track_local(filepath_str: str) -> dict:
             err = proc.stderr.decode('utf-8', errors='ignore')
             return {"sucesso": False, "erro": f"FFmpeg falhou: {err[:200]}"}
 
-        # Backup de segurança na quarentena
+        if not temp_out.exists() or temp_out.stat().st_size == 0:
+            return {"sucesso": False, "erro": "Arquivo reamostrado vazio ou não gerado."}
+
+        # Validação física pós-conversão
+        if mutagen:
+            try:
+                chk = mutagen.File(str(temp_out))
+                if chk is None:
+                    raise IOError("Arquivo reamostrado ilegível pelo Mutagen.")
+            except Exception as e_chk:
+                return {"sucesso": False, "erro": f"Validação pós-conversão falhou: {e_chk}"}
+
+        # Backup de segurança na quarentena + Journal obrigatório
         quarantine_dir = get_quarantine_dir(file_path=file_p)
-        quarantine_file = quarantine_dir / f"pre_resample_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file_p.name}"
+        quarantine_file = quarantine_dir / f"pre_resample_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{file_p.name}"
         shutil.copy2(str(file_p), str(quarantine_file))
 
-        # Substitui com o novo arquivo normalizado
-        shutil.move(str(temp_out), str(file_p))
-        shutil.rmtree(str(temp_dir), ignore_errors=True)
+        op_id = None
+        try:
+            from journal import record_id3_before_change, record_operation_after
+            op_id = record_id3_before_change(str(file_p), action="resample_44k")
+        except Exception:
+            pass
+
+        # Substituição atômica no mesmo sistema de arquivos
+        os.replace(str(temp_out), str(file_p))
+
+        if op_id is not None:
+            try:
+                record_operation_after(op_id, str(file_p))
+            except Exception:
+                pass
 
         return {
             "sucesso": True,
             "arquivo": file_p.name,
-            "mensagem": f"Frequência normalizada com sucesso para 44.100 Hz (320 kbps CBR)."
+            "mensagem": "Frequência normalizada com sucesso para 44.100 Hz (320 kbps CBR)."
         }
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}
+    finally:
+        if temp_out.exists():
+            try:
+                temp_out.unlink()
+            except Exception:
+                pass
 
 
 def batch_resample_tracks_local(filepaths: list):
@@ -1376,7 +1405,7 @@ def main():
     parser.add_argument("--subcrate", type=str, default="", help="Subcrate")
     parser.add_argument("--no-subcrates", action="store_true", help="Não incluir subcrates")
     parser.add_argument("--max-duration", type=float, default=60.0, help="Duração máxima suspeita (segundos)")
-    parser.add_argument("--categoria", type=str, default="todas", choices=["todas", "truncada", "curta", "baixa_qualidade", "corrompida"], help="Categoria em destaque")
+    parser.add_argument("--categoria", type=str, default="todas", choices=["todas", "truncada", "curta", "baixa_qualidade", "fake_320k", "corrompida"], help="Categoria em destaque")
     parser.add_argument("--limit", type=int, default=250, help="Limite de faixas na listagem")
     parser.add_argument("--offset", type=int, default=0, help="Offset de paginação")
     parser.add_argument("--repair-online", type=str, default="", help="Caminho do arquivo a reparar online")

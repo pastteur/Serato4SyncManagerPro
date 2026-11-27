@@ -665,59 +665,38 @@ def match_tracks_against_library(tracks_to_match: list, mp3_dir_str: str):
 
 def export_matched_to_serato_crate(crate_name: str, matched_items: list, serato_dir_str: str):
     """
-    Gera um arquivo .crate binário oficial compatível com Serato 4 contendo as faixas encontradas.
+    Gera um arquivo .crate binário oficial compatível com Serato 4 usando
+    gravação atômica, backup SHA-256 e registro em Journal via crate_ops.
     """
+    from crate_ops import get_crate_path, read_and_validate_crate, write_crate_atomic
+
     subcrates_dir = Path(os.path.expanduser(serato_dir_str)) / "Subcrates"
     subcrates_dir.mkdir(parents=True, exist_ok=True)
+    crate_path = get_crate_path(subcrates_dir, crate_name)
 
-    safe_name = crate_name.replace('/', '%%').replace('\\', '%%')
-    if not safe_name.endswith('.crate'):
-        safe_name += '.crate'
-
-    crate_path = subcrates_dir / safe_name
-
-    # Cabeçalho vrsn idêntico ao usado pelo motor de sincronização (serato_macos_app.py):
-    # 'vrsn' + tamanho (8) + "1.0" em UTF-16BE. A versão anterior declarava 8 bytes
-    # mas gravava 28 bytes de texto ASCII, deixando o cabeçalho malformado.
-    header = b'vrsn\x00\x00\x00\x08\x001\x00.\x000\x000'
-    track_entries = bytearray()
-
-    for item in matched_items:
-        rel_path = item["caminho_rel"]
-        # Serato usa UTF-16-BE sem BOM para ptrk
-        encoded_path = rel_path.encode('utf-16-be')
-        size_bytes = len(encoded_path).to_bytes(4, byteorder='big')
-
-        track_block = bytearray()
-        track_block.extend(b'otrk')
-        inner_content = bytearray(b'ptrk')
-        inner_content.extend(size_bytes)
-        inner_content.extend(encoded_path)
-        track_block.extend(len(inner_content).to_bytes(4, byteorder='big'))
-        track_block.extend(inner_content)
-
-        track_entries.extend(track_block)
-
-    bak = crate_path.with_suffix('.bak')
+    track_rel_list = [item["caminho_rel"] for item in matched_items]
+    header_antigo = None
+    outros_blocos = None
     if crate_path.exists():
-        import shutil as _sh
-        _sh.copy2(crate_path, bak)
+        try:
+            header_antigo, _, outros_blocos = read_and_validate_crate(crate_path)
+        except Exception:
+            pass
 
-    import uuid
-    tmp = crate_path.with_name(f".tmp_{crate_path.name}_{uuid.uuid4().hex[:8]}")
-    try:
-        with open(tmp, 'wb') as f:
-            f.write(header)
-            f.write(track_entries)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, crate_path)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
+    wres = write_crate_atomic(
+        crate_path,
+        track_rel_list,
+        header_antigo=header_antigo,
+        outros_blocos=outros_blocos,
+        action_name="track_matcher_export",
+    )
+    if not wres.get("sucesso"):
+        return {
+            "sucesso": False,
+            "erro": wres.get("erro", "Falha ao gravar crate exportada."),
+            "crate_salva": str(crate_path),
+            "total_faixas": 0,
+        }
 
     return {
         "sucesso": True,
@@ -778,34 +757,59 @@ def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str
 
     quarantine_dir = Path.home() / ".serato_quarentena_audio"
     quarantine_dir.mkdir(parents=True, exist_ok=True)
-    quarantine_file = quarantine_dir / f"upgrade_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{dest_p.name}"
+    quarantine_file = quarantine_dir / f"upgrade_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{dest_p.name}"
+
+    import uuid
+    same_ext = inc_p.suffix.lower() == dest_p.suffix.lower()
+    final_path = dest_p if same_ext else dest_p.with_suffix(inc_p.suffix)
+    temp_dest = final_path.with_name(f".tmp_upgrade_{uuid.uuid4().hex[:8]}_{final_path.name}")
 
     try:
-        # Clona tags Serato e ID3v2.3 da antiga para a nova antes de sobrescrever
-        try:
-            if mutagen:
+        shutil.copy2(str(inc_p), str(temp_dest))
+
+        # Clona tags Serato e ID3v2.3 da antiga para a cópia temporária (sem mutar arquivo de origem inc_p!)
+        if mutagen:
+            try:
                 from mutagen.id3 import ID3
-                old_id3 = ID3(str(dest_p))
-                new_id3 = ID3(str(inc_p))
-                for tag_key in ['GEOB:Serato Markers2', 'GEOB:Serato BeatGrid', 'TBPM', 'TKEY']:
-                    if tag_key in old_id3 and tag_key not in new_id3:
-                        new_id3[tag_key] = old_id3[tag_key]
-                new_id3.save(v2_version=3)
+                if dest_p.suffix.lower() == ".mp3" and inc_p.suffix.lower() == ".mp3":
+                    old_id3 = ID3(str(dest_p))
+                    try:
+                        new_id3 = ID3(str(temp_dest))
+                    except Exception:
+                        new_id3 = ID3()
+                    # Preserva estritamente Hot Cues/Beatgrid do DJ sobre qualquer tag do arquivo novo
+                    for tag_key in ['GEOB:Serato Markers2', 'GEOB:Serato Markers_', 'GEOB:Serato BeatGrid']:
+                        if tag_key in old_id3:
+                            new_id3[tag_key] = old_id3[tag_key]
+                    for tag_key in ['TBPM', 'TKEY']:
+                        if tag_key in old_id3 and tag_key not in new_id3:
+                            new_id3[tag_key] = old_id3[tag_key]
+                    new_id3.save(str(temp_dest), v2_version=3)
+            except Exception as e_tag:
+                return {"sucesso": False, "erro": f"Falha ao preservar metadados Serato durante upgrade: {e_tag}"}
+
+        # Backup obrigatório da faixa antiga na quarentena com validação de tamanho
+        shutil.copy2(str(dest_p), str(quarantine_file))
+        if not quarantine_file.exists() or quarantine_file.stat().st_size != dest_p.stat().st_size:
+            raise IOError("Backup prévio em quarentena falhou; substituição abortada.")
+
+        op_id = None
+        try:
+            from journal import record_id3_before_change, record_operation_after
+            op_id = record_id3_before_change(str(dest_p), action="track_matcher_upgrade")
         except Exception:
             pass
 
-        # Backup da antiga na quarentena
-        shutil.copy2(str(dest_p), str(quarantine_file))
-
-        # Sobrescreve no local exato da biblioteca
-        if inc_p.suffix.lower() == dest_p.suffix.lower():
-            shutil.copy2(str(inc_p), str(dest_p))
-            final_path = dest_p
-        else:
-            new_target = dest_p.with_suffix(inc_p.suffix)
-            shutil.copy2(str(inc_p), str(new_target))
+        # Substituição atômica no destino final
+        os.replace(str(temp_dest), str(final_path))
+        if not same_ext and dest_p.exists() and dest_p != final_path:
             dest_p.unlink(missing_ok=True)
-            final_path = new_target
+
+        if op_id is not None and final_path == dest_p:
+            try:
+                record_operation_after(op_id, str(final_path))
+            except Exception:
+                pass
 
         return {
             "sucesso": True,
@@ -816,6 +820,12 @@ def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str
         }
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}
+    finally:
+        if temp_dest.exists():
+            try:
+                temp_dest.unlink()
+            except Exception:
+                pass
 
 
 def batch_replace_upgrades(upgrades_list: list, force: bool = False) -> dict:

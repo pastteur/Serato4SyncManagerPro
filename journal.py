@@ -256,17 +256,38 @@ def record_id3_before_change(filepath, action="alteracao_tags"):
 def record_operation_after(op_id, filepath=None):
     """Sela a operação gravando o hash final do arquivo após a conclusão com sucesso."""
     p_db = get_journal_path()
-    if not op_id or not p_db.exists():
-        return
+    if not op_id:
+        raise ValueError("Identificador de operação inválido para selar Journal.")
+    if not p_db.exists():
+        raise FileNotFoundError(f"Banco de Journal não encontrado: {p_db}")
     conn = get_journal_db()
-    with conn:
-        row = conn.execute("SELECT arquivo FROM operacoes WHERE id = ?", (int(op_id),)).fetchone()
-        if row:
+    try:
+        with conn:
+            row = conn.execute("SELECT arquivo FROM operacoes WHERE id = ?", (int(op_id),)).fetchone()
+            if not row:
+                raise KeyError(f"Operação #{op_id} não localizada no Journal.")
             p = filepath if filepath else row[0]
-            if Path(p).exists():
-                hash_post = calc_file_sha256(str(Path(p).resolve()))
-                conn.execute("UPDATE operacoes SET hash_posterior = ? WHERE id = ?", (hash_post, int(op_id)))
-    conn.close()
+            if not p or not Path(p).exists():
+                raise FileNotFoundError(f"Arquivo pós-operação ausente no disco: {p}")
+            hash_post = calc_file_sha256(str(Path(p).resolve()))
+            if not hash_post:
+                raise IOError(f"Falha ao calcular SHA-256 pós-operação para: {p}")
+            cur = conn.execute("UPDATE operacoes SET hash_posterior = ? WHERE id = ?", (hash_post, int(op_id)))
+            if cur.rowcount != 1:
+                raise IOError(f"Não foi possível atualizar hash_posterior da operação #{op_id}.")
+        return True
+    finally:
+        conn.close()
+
+
+def validate_undo_state(operation, current_hash):
+    """Valida estritamente se o estado atual do arquivo corresponde ao hash_post da operação."""
+    hash_post = operation.get("hash_post") or operation.get("hash_posterior")
+    if not hash_post:
+        raise ValueError("Undo bloqueado: hash posterior ausente")
+    if current_hash != hash_post:
+        raise ValueError("Undo bloqueado: arquivo foi modificado externamente")
+    return True
 
 
 def list_operations(limit=200, only_active=False):
@@ -354,11 +375,18 @@ def undo_operation(op_id=None):
         conn.close()
         return {"sucesso": True, "id": op, "arquivo": path.name, "mensagem": "Arquivo já se encontrava no estado original."}
 
-    # Se temos o hash registrado do estado gerado pela operação e o arquivo diverge, houve alteração externa
-    if hash_post and curr_hash != hash_post:
+    # Validação estrita: hash_post é obrigatório (nunca pular validação se ausente)
+    try:
+        validate_undo_state({"hash_post": hash_post}, curr_hash)
+    except ValueError as e_val:
+        err_str = str(e_val)
+        if "modificado externamente" in err_str:
+            err_msg = "O arquivo foi modificado externamente ou por outra operação após este registro. Undo recusado para evitar perda de dados."
+        else:
+            err_msg = f"{err_str}. Undo recusado para evitar sobrescrita insegura."
         return {
             "sucesso": False,
-            "erro": "O arquivo foi modificado externamente ou por outra operação após este registro. Undo recusado para evitar perda de dados."
+            "erro": err_msg
         }
 
     # Valida também integridade da cauda de áudio (não deve ter sido corrompida)

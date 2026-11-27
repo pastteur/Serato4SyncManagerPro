@@ -285,6 +285,7 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
       const data = JSON.parse(resJson);
       if (data.sucesso) {
         if (onAddLog) onAddLog(`🎯 Playlist Tool '${action}': ${data.mensagem || 'Operação realizada com sucesso.'}`);
+        if (onRefreshCrates) onRefreshCrates();
         alert(data.mensagem || 'Operação realizada com sucesso na Crate!');
       } else {
         alert(`Erro na Crate: ${data.erro || 'Falha ao executar ação'}`);

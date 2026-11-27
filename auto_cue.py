@@ -64,7 +64,8 @@ BACKUP_DB_PATH = Path.home() / ".serato_sync_cues_backup.sqlite"
 
 def get_backup_db():
     """Conecta e inicializa o banco SQLite de backups de segurança de Hot Cues."""
-    conn = sqlite3.connect(str(BACKUP_DB_PATH))
+    conn = sqlite3.connect(str(BACKUP_DB_PATH), timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cues_backup (
             filepath TEXT PRIMARY KEY,
@@ -529,7 +530,7 @@ def repair_track_cues(filepath_str: str) -> dict:
             duration = getattr(audio.info, 'length', 0.0)
             bpm_val = 0.0
             if 'TBPM' in audio:
-                try: bpm_val = float(str(audio['TBPM']).split('.')[0])
+                try: bpm_val = float(str(audio['TBPM']).strip().replace(',', '.'))
                 except Exception: pass
             existing_cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
 
@@ -620,7 +621,7 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
         bpm_val = 0.0
         if 'TBPM' in audio:
             try:
-                bpm_val = float(str(audio['TBPM']).split('.')[0])
+                bpm_val = float(str(audio['TBPM']).strip().replace(',', '.'))
             except Exception:
                 pass
 
@@ -745,7 +746,7 @@ def audit_crate_cues_detailed(
                             dur = getattr(audio.info, 'length', 0.0)
                             if 'TBPM' in audio:
                                 try:
-                                    bpm = float(str(audio['TBPM']).split('.')[0])
+                                    bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
                                 except Exception:
                                     pass
                             if 'GEOB:Serato Markers2' in audio:
@@ -881,7 +882,7 @@ def scan_crate_cues(
                         if audio is not None:
                             dur = getattr(audio.info, 'length', 0.0)
                             if 'TBPM' in audio:
-                                try: bpm = float(str(audio['TBPM']).split('.')[0])
+                                try: bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
                                 except Exception: pass
                             if 'GEOB:Serato Markers2' in audio:
                                 raw_m2 = audio['GEOB:Serato Markers2'].data
@@ -1029,21 +1030,23 @@ def batch_apply_crate_cues(
     errors = []
 
     for idx, full_p in enumerate(files_to_process, 1):
+        skipped = False
         if (only_pending or not overwrite_existing) and mutagen:
             try:
                 audio = mutagen.File(str(full_p))
                 if audio and 'GEOB:Serato Markers2' in audio:
                     cues_in = extract_cues_from_raw_tag(audio['GEOB:Serato Markers2'].data)
                     if cues_in:
-                        continue
+                        skipped = True
             except Exception:
                 pass
 
-        res = generate_and_save_serato_cues(str(full_p), overwrite_existing=overwrite_existing)
-        if res.get("sucesso") and not res.get("ignorado"):
-            applied_count += 1
-        elif res.get("erro"):
-            errors.append(f"{full_p.name}: {res.get('erro')}")
+        if not skipped:
+            res = generate_and_save_serato_cues(str(full_p), overwrite_existing=overwrite_existing)
+            if res.get("sucesso") and not res.get("ignorado"):
+                applied_count += 1
+            elif res.get("erro"):
+                errors.append(f"{full_p.name}: {res.get('erro')}")
 
         if idx % 15 == 0 or idx == total:
             pct = round((idx / total) * 100, 1)
@@ -1102,7 +1105,7 @@ def main():
             dur = getattr(audio.info, 'length', 0.0) if audio else 0.0
             bpm = 0.0
             if audio and 'TBPM' in audio:
-                bpm = float(str(audio['TBPM']).split('.')[0])
+                bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
             cues = calculate_smart_cues(dur, bpm, filepath_str=str(file_p))
             print(json.dumps({"sucesso": True, "duracao": dur, "bpm": bpm, "cues": cues}, ensure_ascii=False), flush=True)
             sys.exit(0)

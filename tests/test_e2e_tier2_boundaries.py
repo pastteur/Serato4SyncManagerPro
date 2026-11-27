@@ -369,7 +369,8 @@ class TestTier2BoundariesAndCornerCases(E2ESandboxTestCase):
             serato_dir_str=str(self.serato_dir),
             mp3_dir_str=str(self.mp3_dir),
             target_path="",
-            max_lost_pct=0.20
+            max_lost_pct=0.20,
+            allow_global_cleanup=True,
         )
         self.assertTrue(res.get("sucesso"))
         affected = res.get("crates_afetadas", [])

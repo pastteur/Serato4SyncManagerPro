@@ -37,9 +37,15 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
   onMoveToTrash
 }) => {
   const [items, setItems] = useState<any[]>([]);
+  const itemsRef = useRef<any[]>(items);
+  itemsRef.current = items;
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [selectedCategory, setSelectedCategory] = useState<string>('todas');
   const [maxDuration, setMaxDuration] = useState<number>(60);
+  const selectedCategoryRef = useRef<string>(selectedCategory);
+  selectedCategoryRef.current = selectedCategory;
+  const maxDurationRef = useRef<number>(maxDuration);
+  maxDurationRef.current = maxDuration;
   const [totalScanned, setTotalScanned] = useState<number>(0);
   const [totalIssues, setTotalIssues] = useState<number>(0);
   const [categoryCounts, setCategoryCounts] = useState<{
@@ -446,7 +452,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           setRepairProgress(null);
           if (payload.sucesso) {
             onAddLog(`🎉 Correção Online concluída! ${payload.atualizados} faixas substituídas com versões 320kbps de alta fidelidade.`);
-            loadHealthScan(selectedCategory, maxDuration);
+            loadHealthScan(selectedCategoryRef.current, maxDurationRef.current);
           } else {
             onAddLog(`❌ Erro na correção online: ${payload.erro || 'Desconhecido'}`);
           }
@@ -481,7 +487,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
               // SELEÇÃO INTELIGENTE: Seleciona automaticamente APENAS as compatíveis!
               // Desmarca qualquer divergente (>10s) para proteção absoluta do usuário!
               const compIds = new Set<string>();
-              items.forEach(it => {
+              itemsRef.current.forEach(it => {
                 const res = p.resultados[it.caminho];
                 if (res && res.status === 'compativel') {
                   compIds.add(it.id);
@@ -512,7 +518,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
           setResampleProgress(null);
           if (payload.sucesso) {
             onAddLog(`🎉 Normalização concluída! ${payload.atualizados} faixas convertidas com sucesso para 44.100 Hz (320kbps CBR).`);
-            loadHealthScan(selectedCategory, maxDuration);
+            loadHealthScan(selectedCategoryRef.current, maxDurationRef.current);
           } else {
             onAddLog(`❌ Erro na normalização: ${payload.erro || 'Desconhecido'}`);
           }
@@ -530,7 +536,7 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
       if (unlistenResampleProg) unlistenResampleProg();
       if (unlistenResampleFin) unlistenResampleFin();
     };
-  }, [selectedCategory, maxDuration, items]);
+  }, []);
 
   // Limpeza do player de áudio ao desmontar
   useEffect(() => {
@@ -948,10 +954,10 @@ export const AudioHealth: React.FC<AudioHealthProps> = ({
     const rows = filteredItems.map(item => [
       `"${(item.arquivo || item.nome || '').replace(/"/g, '""')}"`,
       `"${(item.categoria || '').replace(/"/g, '""')}"`,
-      item.bitrate || 0,
+      item.bitrate_kbps ?? item.bitrate ?? 0,
       item.sample_rate || 0,
-      (item.duracao || 0).toFixed(1),
-      `"${(item.motivo || item.detalhe || '').replace(/"/g, '""')}"`,
+      Number(item.duracao_seg ?? item.duracao ?? 0).toFixed(1),
+      `"${(item.detalhes || item.motivo || item.detalhe || '').replace(/"/g, '""')}"`,
       `"${(item.caminho || '').replace(/"/g, '""')}"`
     ]);
     const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');

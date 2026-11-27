@@ -68,5 +68,50 @@ describe('interpretSyncFinishedEvent', () => {
     });
     expect(res.ok).toBe(true);
     expect(res.summary).toBeUndefined();
+    expect(res.canApprove).toBe(false);
+    expect(res.approvedPlanId).toBeNull();
+  });
+
+  it('QA-03: bloqueia aprovação quando feedback.success === false mesmo com summary positivo', () => {
+    const res = interpretSyncFinishedEvent({
+      success: false,
+      exit_code: 1,
+      message: 'Processo Python encerrou com erro',
+      summary: {
+        sucesso: true,
+        dry_run: true,
+        plan_id: 'plan-abc',
+      },
+    });
+    expect(res.ok).toBe(false);
+    expect(res.canApprove).toBe(false);
+    expect(res.approvedPlanId).toBeNull();
+  });
+
+  it('QA-03: libera aprovação somente com success===true, dry_run===true, sucesso===true e plan_id válido', () => {
+    const okRes = interpretSyncFinishedEvent({
+      success: true,
+      exit_code: 0,
+      summary: {
+        sucesso: true,
+        dry_run: true,
+        plan_id: 'plan-valid-001',
+      },
+    });
+    expect(okRes.canApprove).toBe(true);
+    expect(okRes.approvedPlanId).toBe('plan-valid-001');
+
+    const partialRes = interpretSyncFinishedEvent({
+      success: true,
+      exit_code: 0,
+      summary: {
+        sucesso: true,
+        dry_run: true,
+        status_analise: 'parcial_com_erros',
+        plan_id: 'plan-valid-001',
+      },
+    });
+    expect(partialRes.canApprove).toBe(false);
+    expect(partialRes.approvedPlanId).toBeNull();
   });
 });

@@ -54,6 +54,7 @@ export const OrphanFilesModal: React.FC<OrphanFilesModalProps> = ({
   const [sortBy, setSortBy] = useState<'name' | 'size_desc' | 'size_asc'>('size_desc');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [batchErrors, setBatchErrors] = useState<Array<{ path: string; error: string }>>([]);
 
   // Modal de Aprovação Obrigatória (Princípio Analisar -> Prévia -> Ajustar)
   const [confirmConfig, setConfirmConfig] = useState<{
@@ -146,25 +147,41 @@ export const OrphanFilesModal: React.FC<OrphanFilesModalProps> = ({
       variant: 'danger',
       action: async () => {
         setIsProcessing(true);
+        setBatchErrors([]);
         setStatusMessage('Movendo arquivos para a Lixeira do macOS...');
-        let movedCount = 0;
+        const successfulPaths: string[] = [];
+        const failedPaths: Array<{ path: string; error: string }> = [];
         try {
           const { invoke } = await import('@tauri-apps/api/core');
           for (const fp of targets) {
             try {
               await invoke('move_to_trash', { path: fp });
-              movedCount++;
-            } catch {
-              // Continua para o próximo
+              successfulPaths.push(fp);
+            } catch (err: any) {
+              failedPaths.push({
+                path: fp,
+                error: typeof err === 'string' ? err : err?.message || String(err),
+              });
             }
           }
-          removeFilesFromState(new Set(targets));
-          if (onAddLog) {
-            onAddLog(`🗑️ ${movedCount} faixa(s) órfã(s) movida(s) para a Lixeira.`);
+          if (successfulPaths.length > 0) {
+            removeFilesFromState(new Set(successfulPaths));
           }
-          setStatusMessage(`✅ ${movedCount} faixas movidas com sucesso para a Lixeira.`);
+          if (failedPaths.length > 0) {
+            setBatchErrors(failedPaths);
+            setSelectedPaths(new Set(failedPaths.map(f => f.path)));
+            const partialMsg = `⚠️ Resultado parcial: ${successfulPaths.length} removida(s), ${failedPaths.length} falhou(aram) e permanecem na lista.`;
+            setStatusMessage(partialMsg);
+            if (onAddLog) onAddLog(partialMsg);
+          } else if (successfulPaths.length > 0) {
+            if (onAddLog) {
+              onAddLog(`🗑️ ${successfulPaths.length} faixa(s) órfã(s) movida(s) para a Lixeira.`);
+            }
+            setStatusMessage(`✅ ${successfulPaths.length} faixas movidas com sucesso para a Lixeira.`);
+          }
         } catch (e: any) {
-          alert(`Erro ao mover para a Lixeira: ${e}`);
+          setBatchErrors(targets.map(fp => ({ path: fp, error: String(e) })));
+          setStatusMessage(`❌ Erro ao mover para a Lixeira: ${e}`);
         } finally {
           setIsProcessing(false);
           setConfirmConfig(prev => ({ ...prev, isOpen: false }));
@@ -335,6 +352,38 @@ export const OrphanFilesModal: React.FC<OrphanFilesModalProps> = ({
           <div className="px-6 py-2 bg-slate-950 border-b border-slate-800 text-xs text-serato-cyan font-mono flex items-center justify-between">
             <span>{statusMessage}</span>
             <button onClick={() => setStatusMessage(null)} className="text-slate-500 hover:text-white">✕</button>
+          </div>
+        )}
+
+        {/* Erros parciais ao mover para a Lixeira (QA-06) */}
+        {batchErrors.length > 0 && (
+          <div className="px-6 py-2.5 bg-rose-950/40 border-b border-rose-500/30 text-xs text-rose-200 space-y-1.5 max-h-32 overflow-y-auto">
+            <div className="flex items-center justify-between font-semibold text-rose-300">
+              <span>Falhas preservadas na lista ({batchErrors.length}):</span>
+              <button type="button" onClick={() => setBatchErrors([])} className="text-rose-400 hover:text-white">✕</button>
+            </div>
+            {batchErrors.map((fe) => (
+              <div key={fe.path} className="flex items-center justify-between gap-2 text-[11px] font-mono bg-black/30 px-2 py-1 rounded">
+                <span className="truncate" title={`${fe.path}: ${fe.error}`}>
+                  {fe.path.split('/').pop()}: {fe.error}
+                </span>
+                {onMoveToTrash && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await onMoveToTrash(fe.path, fe.path);
+                      if (ok) {
+                        removeFilesFromState(new Set([fe.path]));
+                        setBatchErrors(prev => prev.filter(x => x.path !== fe.path));
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded bg-rose-600/80 hover:bg-rose-500 text-white shrink-0 cursor-pointer"
+                  >
+                    Tentar Novamente
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
 

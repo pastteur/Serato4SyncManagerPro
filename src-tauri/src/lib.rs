@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -48,6 +48,12 @@ impl AppSecurityState {
         } else {
             Err("Bloqueio de concorrência: outra operação de gravação ou sincronização já está em execução no momento.".to_string())
         }
+    }
+}
+
+impl Default for AppSecurityState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -151,6 +157,12 @@ impl FsWatcherState {
     }
 }
 
+impl Default for FsWatcherState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -165,6 +177,229 @@ impl ApprovedSyncPlanState {
             current: Arc::new(Mutex::new(None)),
         }
     }
+}
+
+impl Default for ApprovedSyncPlanState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Garante remoção automática de arquivo temporário ao sair de escopo por sucesso ou erro.
+pub(crate) struct TempFileCleanup(Option<PathBuf>);
+
+impl TempFileCleanup {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    pub(crate) fn disarm(&mut self) -> Option<PathBuf> {
+        self.0.take()
+    }
+}
+
+impl Drop for TempFileCleanup {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Calcula SHA-256 em streaming sem dependências externas (FIPS 180-4).
+pub(crate) fn calculate_sha256(path: &Path) -> Result<[u8; 32], String> {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+
+    fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
+        let mut w = [0u32; 64];
+        for (i, word) in w.iter_mut().enumerate().take(16) {
+            let j = i * 4;
+            *word = u32::from_be_bytes([block[j], block[j + 1], block[j + 2], block[j + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = h.wrapping_add(s1).wrapping_add(ch).wrapping_add(K[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        state[0] = state[0].wrapping_add(a);
+        state[1] = state[1].wrapping_add(b);
+        state[2] = state[2].wrapping_add(c);
+        state[3] = state[3].wrapping_add(d);
+        state[4] = state[4].wrapping_add(e);
+        state[5] = state[5].wrapping_add(f);
+        state[6] = state[6].wrapping_add(g);
+        state[7] = state[7].wrapping_add(h);
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Erro ao abrir '{}' para SHA-256: {}", path.display(), e))?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut state: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let mut block = [0u8; 64];
+    let mut block_len = 0usize;
+    let mut total_len = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Erro de leitura em '{}' para SHA-256: {}", path.display(), e))?;
+        if n == 0 {
+            break;
+        }
+        total_len = total_len.saturating_add(n as u64);
+        let mut offset = 0usize;
+        while offset < n {
+            let take = (64 - block_len).min(n - offset);
+            block[block_len..block_len + take].copy_from_slice(&buf[offset..offset + take]);
+            block_len += take;
+            offset += take;
+            if block_len == 64 {
+                compress(&mut state, &block);
+                block_len = 0;
+            }
+        }
+    }
+
+    block[block_len] = 0x80;
+    block_len += 1;
+    if block_len > 56 {
+        block[block_len..64].fill(0);
+        compress(&mut state, &block);
+        block_len = 0;
+    }
+    block[block_len..56].fill(0);
+    let bit_len = total_len.wrapping_mul(8);
+    block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+    compress(&mut state, &block);
+
+    let mut out = [0u8; 32];
+    for (idx, word) in state.iter().enumerate() {
+        out[idx * 4..idx * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    Ok(out)
+}
+
+pub(crate) fn verify_file_copy(original: &Path, destination: &Path) -> Result<(), String> {
+    let original_meta = std::fs::metadata(original)
+        .map_err(|e| format!("Erro ao consultar original: {}", e))?;
+    let copied_meta = std::fs::metadata(destination)
+        .map_err(|e| format!("Erro ao consultar cópia: {}", e))?;
+
+    if original_meta.len() != copied_meta.len() {
+        return Err(format!(
+            "Tamanho da cópia divergente (original={}, cópia={})",
+            original_meta.len(),
+            copied_meta.len()
+        ));
+    }
+
+    let original_hash = calculate_sha256(original)?;
+    let copied_hash = calculate_sha256(destination)?;
+    if original_hash != copied_hash {
+        return Err("SHA-256 da cópia divergente".to_string());
+    }
+
+    Ok(())
+}
+
+pub(crate) fn move_file_with_verified_fallback(
+    file_path: &Path,
+    dest: &Path,
+    force_copy_fallback: bool,
+) -> Result<(), String> {
+    if !force_copy_fallback && std::fs::rename(file_path, dest).is_ok() {
+        return Ok(());
+    }
+
+    if !file_path.exists() {
+        return Err(format!("Arquivo original desapareceu antes da cópia: {}", file_path.display()));
+    }
+
+    if let Err(e) = std::fs::copy(file_path, dest) {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!("Falha ao copiar arquivo para a lixeira '{}': {}", dest.display(), e));
+    }
+
+    if let Ok(f) = std::fs::File::open(dest) {
+        if let Err(e) = f.sync_all() {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("Falha ao sincronizar cópia em disco '{}': {}", dest.display(), e));
+        }
+    }
+
+    if let Err(err) = verify_file_copy(file_path, dest) {
+        let _ = std::fs::remove_file(dest);
+        return Err(format!("Verificação de integridade da cópia falhou (original preservado): {}", err));
+    }
+
+    std::fs::remove_file(file_path).map_err(|e| {
+        format!(
+            "Cópia íntegra criada em '{}', mas falhou ao remover original '{}': {}",
+            dest.display(),
+            file_path.display(),
+            e
+        )
+    })
+}
+
+pub(crate) fn should_store_approved_plan(
+    dry_run: bool,
+    exit_success: bool,
+    summary_val: Option<&serde_json::Value>,
+) -> Option<String> {
+    if !dry_run || !exit_success {
+        return None;
+    }
+    let val = summary_val?;
+    if val.get("sucesso").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    if val.get("dry_run").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    if val.get("status_analise").and_then(|v| v.as_str()) == Some("parcial_com_erros") {
+        return None;
+    }
+    let pid = val.get("plan_id").and_then(|v| v.as_str())?.trim();
+    if pid.is_empty() {
+        return None;
+    }
+    let has_plan = val.get("plan").map(|p| p.is_object()).unwrap_or(false);
+    if !has_plan {
+        return None;
+    }
+    Some(pid.to_string())
 }
 
 #[derive(serde::Serialize)]
@@ -514,13 +749,14 @@ fn make_python_cmd_with_app(app: Option<&AppHandle>, script: &Path, bin: &Path) 
     cmd
 }
 
+#[allow(dead_code)]
 fn make_python_cmd(script: &Path, bin: &Path) -> Command {
     make_python_cmd_with_app(None, script, bin)
 }
 
 fn find_python_cmd(app: Option<&AppHandle>, script_name: &str) -> Result<Command, String> {
     let script = find_canonical_python_script(app, script_name)?;
-    let bin = find_python_binary()?;
+    let bin = find_python_binary_with_app(app)?;
     Ok(make_python_cmd_with_app(app, &script, &bin))
 }
 
@@ -708,7 +944,7 @@ mod commands {
             let mut stat: std::mem::MaybeUninit<libc::statvfs> = std::mem::MaybeUninit::uninit();
             if unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) } == 0 {
                 let stat = unsafe { stat.assume_init() };
-                let block_size = stat.f_frsize as u64;
+                let block_size = stat.f_frsize;
                 let total_bytes = stat.f_blocks as u64 * block_size;
                 let free_bytes = stat.f_bavail as u64 * block_size;
                 let used_bytes = total_bytes.saturating_sub(free_bytes);
@@ -974,9 +1210,9 @@ mod commands {
 
     #[tauri::command]
     pub async fn open_in_finder(path: String) -> Result<(), String> {
-        let expanded = if path.starts_with("~/") {
+        let expanded = if let Some(rest) = path.strip_prefix("~/") {
             if let Some(home) = dirs_home() {
-                home.join(&path[2..])
+                home.join(rest)
             } else {
                 PathBuf::from(&path)
             }
@@ -985,7 +1221,7 @@ mod commands {
         };
 
         if !expanded.exists() {
-            let _ = std::fs::create_dir_all(&expanded);
+            return Err(format!("Caminho não encontrado no sistema: {}", expanded.display()));
         }
 
         Command::new("open")
@@ -1038,9 +1274,9 @@ mod commands {
     #[tauri::command]
     pub async fn open_in_browser(path_or_url: String) -> Result<(), String> {
         let trimmed = path_or_url.trim();
-        let target = if trimmed.starts_with("~/") {
+        let target = if let Some(rest) = trimmed.strip_prefix("~/") {
             if let Some(home) = dirs_home() {
-                home.join(&trimmed[2..]).to_string_lossy().to_string()
+                home.join(rest).to_string_lossy().to_string()
             } else {
                 trimmed.to_string()
             }
@@ -1058,9 +1294,9 @@ mod commands {
 
     #[tauri::command]
     pub async fn save_text_file(path: String, content: String) -> Result<String, String> {
-        let expanded = if path.starts_with("~/") {
+        let expanded = if let Some(rest) = path.strip_prefix("~/") {
             if let Some(home) = dirs_home() {
-                home.join(&path[2..])
+                home.join(rest)
             } else {
                 PathBuf::from(&path)
             }
@@ -1146,7 +1382,8 @@ mod commands {
             let parts: Vec<&str> = path_str.split('/').collect();
             if parts.len() >= 3 {
                 let volume_root = format!("/Volumes/{}", parts[2]);
-                let volume_trash = PathBuf::from(&volume_root).join(".Trashes").join("501");
+                let uid = unsafe { libc::geteuid() };
+                let volume_trash = PathBuf::from(&volume_root).join(".Trashes").join(uid.to_string());
                 if volume_trash.exists() || std::fs::create_dir_all(&volume_trash).is_ok() {
                     let mut dest = volume_trash.join(file_name);
                     if dest.exists() {
@@ -1166,7 +1403,8 @@ mod commands {
         // 2. Destino Lixeira do usuário (~/.Trash)
         let trash_dir = dirs_home().ok_or("Home directory não localizado")?.join(".Trash");
         if !trash_dir.exists() {
-            let _ = std::fs::create_dir_all(&trash_dir);
+            std::fs::create_dir_all(&trash_dir)
+                .map_err(|e| format!("Falha ao preparar Lixeira '{}': {}", trash_dir.display(), e))?;
         }
 
         let mut dest = trash_dir.join(file_name);
@@ -1178,21 +1416,12 @@ mod commands {
             dest = trash_dir.join(format!("{}_{}", ts, file_name.to_string_lossy()));
         }
 
-        // 3. Tenta rename; se falhar por Cross-device link (os error 18), copia e remove a origem!
-        match std::fs::rename(&file_path, &dest) {
-            Ok(_) => Ok(()),
-            Err(_) => {
-                // Cross-device copy fallback
-                if file_path.exists() {
-                    let _ = std::fs::copy(&file_path, &dest);
-                    let _ = std::fs::remove_file(&file_path);
-                }
-                Ok(())
-            }
-        }
+        // 3. Tenta rename(); se falhar (ex: cross-device EXDEV), copia, verifica tamanho + SHA-256 e só então remove a origem
+        crate::move_file_with_verified_fallback(&file_path, &dest, false)
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_sync(
         app: AppHandle,
         window: Window,
@@ -1223,7 +1452,10 @@ mod commands {
             return Err(err_msg);
         }
 
-        let mut temp_plan_file: Option<PathBuf> = None;
+        let mut temp_plan_guard: Option<crate::TempFileCleanup> = None;
+        let mut expected_plan_id: Option<String> = None;
+        let mut validated_plan_payload: Option<serde_json::Value> = None;
+
         if !dry_run {
             let requested_pid = plan_id
                 .as_deref()
@@ -1233,13 +1465,17 @@ mod commands {
                     "Plano imutável ausente. Execute o Modo Análise (Sem Alterar) antes de Ajustar.".to_string()
                 })?;
 
-            let mut lock = approved_plan_state
-                .current
-                .lock()
-                .map_err(|_| "Falha ao acessar estado do plano aprovado.".to_string())?;
-            let (stored_pid, stored_plan) = lock.take().ok_or_else(|| {
-                "Nenhum plano aprovado disponível. Execute o Modo Análise (Sem Alterar) antes de Ajustar.".to_string()
-            })?;
+            // QA-09: inspecionar e validar sem consumir antecipadamente
+            let (stored_pid, stored_plan) = {
+                let lock = approved_plan_state
+                    .current
+                    .lock()
+                    .map_err(|_| "Falha ao acessar estado do plano aprovado.".to_string())?;
+                let (pid, plan) = lock.as_ref().ok_or_else(|| {
+                    "Nenhum plano aprovado disponível. Execute o Modo Análise (Sem Alterar) antes de Ajustar.".to_string()
+                })?;
+                (pid.clone(), plan.clone())
+            };
 
             if stored_pid != requested_pid {
                 return Err("Identificador do plano não corresponde à última análise aprovada. Execute uma nova Análise.".into());
@@ -1259,12 +1495,8 @@ mod commands {
                 return Err("Biblioteca alterada após a análise. Execute uma nova Análise para os caminhos atuais.".into());
             }
 
-            let plan_path = std::env::temp_dir().join(format!("serato_approved_plan_{}.json", stored_pid));
-            let plan_json = serde_json::to_string(&stored_plan)
-                .map_err(|e| format!("Falha ao serializar plano aprovado: {}", e))?;
-            std::fs::write(&plan_path, plan_json)
-                .map_err(|e| format!("Falha ao gravar arquivo temporário do plano: {}", e))?;
-            temp_plan_file = Some(plan_path);
+            expected_plan_id = Some(stored_pid);
+            validated_plan_payload = Some(stored_plan);
         }
 
         let guard = if !dry_run {
@@ -1277,14 +1509,51 @@ mod commands {
         let python_bin = find_python_binary_with_app(Some(&app))?;
         let vendor_paths = collect_vendor_paths(Some(&app), Some(&script_path));
         let py_path_env = build_pythonpath_env(&vendor_paths);
+
+        if let (Some(ref pid), Some(ref plan_val)) = (&expected_plan_id, &validated_plan_payload) {
+            let plan_path = std::env::temp_dir().join(format!("serato_approved_plan_{}.json", pid));
+            let plan_json = serde_json::to_string(plan_val)
+                .map_err(|e| format!("Falha ao serializar plano aprovado: {}", e))?;
+            std::fs::write(&plan_path, plan_json)
+                .map_err(|e| format!("Falha ao gravar arquivo temporário do plano: {}", e))?;
+            let mut guard_tmp = crate::TempFileCleanup::new(plan_path);
+
+            // QA-09: Reservar (consumir) o plano apenas após todas as validações de inicialização
+            let mut lock = approved_plan_state
+                .current
+                .lock()
+                .map_err(|_| "Falha ao reservar plano aprovado para execução.".to_string())?;
+            let matches_expected = lock
+                .as_ref()
+                .map(|(curr_id, _)| curr_id == pid)
+                .unwrap_or(false);
+            if !matches_expected {
+                return Err("Plano aprovado foi alterado ou já está em execução concorrente. Execute nova Análise.".into());
+            }
+            let _ = lock.take();
+            let disarm_path = guard_tmp.disarm();
+            if let Some(p) = disarm_path {
+                temp_plan_guard = Some(crate::TempFileCleanup::new(p));
+            }
+        }
+
         let plan_state_arc = approved_plan_state.current.clone();
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
             let _guard = guard;
+            let _temp_plan_cleanup = temp_plan_guard;
+            let temp_plan_file = _temp_plan_cleanup
+                .as_ref()
+                .and_then(|c| c.0.as_ref())
+                .cloned();
             if !dry_run && is_serato_running() {
-                if let Some(ref pf) = temp_plan_file {
-                    let _ = std::fs::remove_file(pf);
+                if let (Some(pid), Some(plan_val)) = (expected_plan_id.clone(), validated_plan_payload.clone()) {
+                    if let Ok(mut lock) = plan_state_arc.lock() {
+                        if lock.is_none() {
+                            *lock = Some((pid, plan_val));
+                        }
+                    }
                 }
                 let err_msg = "❌ BLOQUEIO DE SEGURANÇA: O Serato DJ Pro foi aberto durante a inicialização da sincronização. Operação cancelada.".to_string();
                 let _ = window_clone.emit("sync-log", &err_msg);
@@ -1330,8 +1599,12 @@ mod commands {
             let mut child = match cmd.spawn() {
                 Ok(child) => child,
                 Err(e) => {
-                    if let Some(ref pf) = temp_plan_file {
-                        let _ = std::fs::remove_file(pf);
+                    if let (Some(pid), Some(plan_val)) = (expected_plan_id, validated_plan_payload) {
+                        if let Ok(mut lock) = plan_state_arc.lock() {
+                            if lock.is_none() {
+                                *lock = Some((pid, plan_val));
+                            }
+                        }
                     }
                     let err_msg = format!("❌ Erro ao disparar processo Python: {}", e);
                     let _ = window_clone.emit("sync-log", &err_msg);
@@ -1357,23 +1630,21 @@ mod commands {
                 let mut captured_summary = None;
                 if let Some(out) = stdout {
                     let reader = BufReader::new(out);
-                    for line_res in reader.lines() {
-                        if let Ok(line) = line_res {
-                            if line.starts_with("__PAYLOAD_JSON_SUMMARY__") {
-                                captured_summary = Some(line.clone());
-                                if let Some(mut parsed) = parse_sync_summary_line(&line) {
-                                    if let Some(obj) = parsed.as_object_mut() {
-                                        obj.remove("plan");
-                                    }
-                                    let _ = win_stdout.emit(
-                                        "sync-log",
-                                        format!("__PAYLOAD_JSON_SUMMARY__{}", parsed),
-                                    );
-                                    continue;
+                    for line in reader.lines().map_while(Result::ok) {
+                        if line.starts_with("__PAYLOAD_JSON_SUMMARY__") {
+                            captured_summary = Some(line.clone());
+                            if let Some(mut parsed) = parse_sync_summary_line(&line) {
+                                if let Some(obj) = parsed.as_object_mut() {
+                                    obj.remove("plan");
                                 }
+                                let _ = win_stdout.emit(
+                                    "sync-log",
+                                    format!("__PAYLOAD_JSON_SUMMARY__{}", parsed),
+                                );
+                                continue;
                             }
-                            let _ = win_stdout.emit("sync-log", line);
                         }
+                        let _ = win_stdout.emit("sync-log", line);
                     }
                 }
                 captured_summary
@@ -1384,11 +1655,9 @@ mod commands {
                 let mut err_lines = Vec::new();
                 if let Some(err) = stderr {
                     let reader = BufReader::new(err);
-                    for line_res in reader.lines() {
-                        if let Ok(line) = line_res {
-                            let _ = win_stderr.emit("sync-log", format!("⚠️ [STDERR] {}", line));
-                            err_lines.push(line);
-                        }
+                    for line in reader.lines().map_while(Result::ok) {
+                        let _ = win_stderr.emit("sync-log", format!("⚠️ [STDERR] {}", line));
+                        err_lines.push(line);
                     }
                 }
                 err_lines.join("\n")
@@ -1402,24 +1671,25 @@ mod commands {
             let stderr_output = stderr_thread.join().unwrap_or_default();
 
             let exit_status = child.wait();
-            if let Some(ref pf) = temp_plan_file {
-                let _ = std::fs::remove_file(pf);
-            }
+            let exit_ok = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
 
-            if dry_run {
-                if let Some(ref mut summary_val) = parsed_summary {
-                    if summary_val.get("sucesso").and_then(|v| v.as_bool()) == Some(true) {
-                        if let (Some(pid), Some(plan_val)) = (
-                            summary_val.get("plan_id").and_then(|v| v.as_str()).map(String::from),
-                            summary_val.as_object_mut().and_then(|obj| obj.remove("plan")),
-                        ) {
-                            if let Ok(mut lock) = plan_state_arc.lock() {
-                                *lock = Some((pid, plan_val));
-                            }
-                        }
+            // QA-03: Armazenar plano aprovado SOMENTE após código de saída == 0 e validação estrita do resumo
+            if let Some(pid) = crate::should_store_approved_plan(dry_run, exit_ok, parsed_summary.as_ref()) {
+                if let Some(plan_val) = parsed_summary
+                    .as_mut()
+                    .and_then(|s| s.as_object_mut())
+                    .and_then(|obj| obj.remove("plan"))
+                {
+                    if let Ok(mut lock) = plan_state_arc.lock() {
+                        *lock = Some((pid, plan_val));
                     }
                 }
+            } else if let Some(ref mut summary_val) = parsed_summary {
+                if let Some(obj) = summary_val.as_object_mut() {
+                    obj.remove("plan");
+                }
             }
+
             let (success, code, message) = match exit_status {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
@@ -1471,6 +1741,7 @@ mod commands {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn scan_tags_doctor(
         app: AppHandle,
         window: Window,
@@ -1527,43 +1798,61 @@ mod commands {
         cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("Falha ao executar scanner: {}", e))?;
+        let stderr_pipe = child.stderr.take();
+        let err_thread = std::thread::spawn(move || {
+            let mut err_buf = String::new();
+            if let Some(err) = stderr_pipe {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !err_buf.is_empty() {
+                        err_buf.push('\n');
+                    }
+                    err_buf.push_str(&line);
+                }
+            }
+            err_buf
+        });
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
-            for line_res in reader.lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('{') {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window.emit("tag-doctor-scan-progress", parsed);
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                        if tipo == "progresso" {
+                            let _ = window.emit("tag-doctor-scan-progress", parsed);
+                            continue;
+                        } else if tipo == "resultado" {
+                            if let Some(dados) = parsed.get("dados") {
+                                final_json = dados.to_string();
                                 continue;
-                            } else if tipo == "resultado" {
-                                if let Some(dados) = parsed.get("dados") {
-                                    final_json = dados.to_string();
-                                    continue;
-                                }
                             }
                         }
                     }
-                    if final_json.is_empty() && trimmed.starts_with('{') {
-                        final_json = trimmed.to_string();
-                    }
+                }
+                if final_json.is_empty() && trimmed.starts_with('{') {
+                    final_json = trimmed.to_string();
                 }
             }
         }
 
+        let stderr_output = err_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar scanner: {}", e))?;
-        if !status.success() && final_json.is_empty() {
-            return Err("Erro na execução do scanner".to_string());
+        if !status.success() {
+            let detail = if stderr_output.trim().is_empty() {
+                format!("Erro na execução do scanner (código {:?})", status.code())
+            } else {
+                format!("Erro na execução do scanner: {}", stderr_output.trim())
+            };
+            return Err(detail);
         }
 
         Ok(final_json)
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn batch_apply_tags_doctor(
         app: AppHandle,
         window: Window,
@@ -1582,7 +1871,7 @@ mod commands {
 
         std::thread::spawn(move || {
             let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
+            let mut cmd = make_python_cmd_with_app(Some(&app), &script, &python_bin);
             cmd.arg("--batch-apply");
             cmd.arg("--mp3");
             cmd.arg(&mp3_path);
@@ -1616,53 +1905,16 @@ mod commands {
                 }
             }
 
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("tag-doctor-batch-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stderr) = child.stderr.take() {
-                std::thread::spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for _ in reader.lines() {}
-                });
-            }
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "inicio" {
-                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
-                                let _ = window_clone.emit("tag-doctor-batch-progress", serde_json::json!({
-                                    "processados": 0,
-                                    "total": total,
-                                    "percentual": 0,
-                                    "atualizados": 0,
-                                    "faixa_atual": "Iniciando gravação..."
-                                }));
-                            } else if tipo == "progresso" {
-                                let _ = window_clone.emit("tag-doctor-batch-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("tag-doctor-batch-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
+            drop(window_clone);
+            run_streaming_py_event_job(
+                cmd,
+                window,
+                "tag-doctor-batch-progress",
+                "tag-doctor-batch-finished",
+                None,
+                Some("Iniciando gravação..."),
+                None,
+            );
         });
 
         Ok(())
@@ -1676,9 +1928,7 @@ mod commands {
         rename_files: Option<bool>,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar tags nas músicas selecionadas")?;
-        let script = find_canonical_python_script(Some(&app), "tag_doctor.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
 
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!(
@@ -1691,65 +1941,21 @@ mod commands {
         std::fs::write(&temp_file, &items_json)
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd_with_app(None, &script, &python_bin);
-            cmd.arg("--apply-tags");
-            cmd.arg(&temp_file);
-            if let Some(true) = rename_files {
-                cmd.arg("--rename-files");
-            }
+        cmd.arg("--apply-tags");
+        cmd.arg(&temp_file);
+        if let Some(true) = rename_files {
+            cmd.arg("--rename-files");
+        }
 
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&temp_file);
-                    let _ = window_clone.emit("tag-doctor-apply-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stderr) = child.stderr.take() {
-                std::thread::spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for _ in reader.lines() {}
-                });
-            }
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "inicio" {
-                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
-                                let _ = window_clone.emit("tag-doctor-apply-progress", serde_json::json!({
-                                    "processados": 0,
-                                    "total": total,
-                                    "percentual": 0,
-                                    "atualizados": 0,
-                                    "faixa_atual": "Iniciando gravação..."
-                                }));
-                            } else if tipo == "progresso" {
-                                let _ = window_clone.emit("tag-doctor-apply-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("tag-doctor-apply-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-            let _ = std::fs::remove_file(&temp_file);
-        });
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "tag-doctor-apply-progress",
+            "tag-doctor-apply-finished",
+            guard,
+            Some("Iniciando gravação..."),
+            Some(temp_file),
+        );
 
         Ok(())
     }
@@ -1761,9 +1967,7 @@ mod commands {
         items_json: String,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "enriquecer artistas ausentes nas tags")?;
-        let script = find_canonical_python_script(Some(&app), "tag_doctor.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
+        let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
 
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join(format!(
@@ -1776,62 +1980,18 @@ mod commands {
         std::fs::write(&temp_file, &items_json)
             .map_err(|e| format!("Falha ao criar arquivo temporário: {}", e))?;
 
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--enrich-artists");
-            cmd.arg(&temp_file);
+        cmd.arg("--enrich-artists");
+        cmd.arg(&temp_file);
 
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = std::fs::remove_file(&temp_file);
-                    let _ = window_clone.emit("tag-doctor-enrich-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stderr) = child.stderr.take() {
-                std::thread::spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for _ in reader.lines() {}
-                });
-            }
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "inicio" {
-                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
-                                let _ = window_clone.emit("tag-doctor-enrich-progress", serde_json::json!({
-                                    "processados": 0,
-                                    "total": total,
-                                    "percentual": 0,
-                                    "enriquecidos": 0,
-                                    "faixa_atual": "Iniciando identificação..."
-                                }));
-                            } else if tipo == "progresso" {
-                                let _ = window_clone.emit("tag-doctor-enrich-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("tag-doctor-enrich-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-            let _ = std::fs::remove_file(&temp_file);
-        });
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "tag-doctor-enrich-progress",
+            "tag-doctor-enrich-finished",
+            guard,
+            Some("Iniciando identificação..."),
+            Some(temp_file),
+        );
 
         Ok(())
     }
@@ -1840,24 +2000,14 @@ mod commands {
     pub async fn backup_serato_db(app: AppHandle) -> Result<String, String> {
         let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--backup-db");
-
-        let output = cmd.output().map_err(|e| format!("Falha ao executar backup: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Erro ao gerar backup: {} {}", stdout, stderr));
-        }
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao executar backup", "Erro ao gerar backup")
     }
 
     #[tauri::command]
     pub async fn list_serato_backups(app: AppHandle) -> Result<String, String> {
         let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--list-backups");
-
-        let output = cmd.output().map_err(|e| format!("Falha ao listar backups: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao listar backups", "Erro ao listar backups")
     }
 
     #[tauri::command]
@@ -1900,35 +2050,52 @@ mod commands {
         cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar Sound Seal: {}", e))?;
+        let stderr_pipe = child.stderr.take();
+        let err_thread = std::thread::spawn(move || {
+            let mut err_buf = String::new();
+            if let Some(err) = stderr_pipe {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !err_buf.is_empty() {
+                        err_buf.push('\n');
+                    }
+                    err_buf.push_str(&line);
+                }
+            }
+            err_buf
+        });
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
-            for line_res in reader.lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('{') {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window.emit("sound-seal-scan-progress", parsed);
-                                continue;
-                            } else if tipo == "fim" {
-                                final_json = trimmed.to_string();
-                                continue;
-                            }
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                        if tipo == "progresso" {
+                            let _ = window.emit("sound-seal-scan-progress", parsed);
+                            continue;
+                        } else if tipo == "fim" {
+                            final_json = trimmed.to_string();
+                            continue;
                         }
                     }
-                    if final_json.is_empty() && trimmed.starts_with('{') {
-                        final_json = trimmed.to_string();
-                    }
+                }
+                if final_json.is_empty() && trimmed.starts_with('{') {
+                    final_json = trimmed.to_string();
                 }
             }
         }
 
+        let stderr_output = err_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar Sound Seal: {}", e))?;
-        if !status.success() && final_json.is_empty() {
-            return Err("Erro na execução do Sound Seal".to_string());
+        if !status.success() {
+            let detail = if stderr_output.trim().is_empty() {
+                format!("Erro na execução do Sound Seal (código {:?})", status.code())
+            } else {
+                format!("Erro na execução do Sound Seal: {}", stderr_output.trim())
+            };
+            return Err(detail);
         }
 
         if final_json.is_empty() {
@@ -1950,7 +2117,7 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao listar backups de cues: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
@@ -2024,6 +2191,134 @@ mod commands {
         None
     }
 
+    /// Helper unificado para streaming de eventos em lote com drenagem concorrente de stderr e validação de ExitStatus.
+    pub(crate) fn run_streaming_py_event_job(
+        mut cmd: Command,
+        window: Window,
+        progress_event: &str,
+        finished_event: &str,
+        guard: Option<OperationGuard>,
+        init_progress_label: Option<&str>,
+        temp_cleanup_path: Option<PathBuf>,
+    ) {
+        let progress_ev = progress_event.to_string();
+        let finished_ev = finished_event.to_string();
+        let init_label = init_progress_label.map(String::from);
+
+        std::thread::spawn(move || {
+            let _guard = guard;
+            let _tmp_cleanup = temp_cleanup_path.map(crate::TempFileCleanup::new);
+
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+
+            let mut child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = window.emit(
+                        &finished_ev,
+                        serde_json::json!({
+                            "tipo": "fim",
+                            "sucesso": false,
+                            "erro": e.to_string(),
+                        }),
+                    );
+                    return;
+                }
+            };
+
+            let stderr_pipe = child.stderr.take();
+            let err_drain = std::thread::spawn(move || {
+                let mut err_buf = String::new();
+                if let Some(pipe) = stderr_pipe {
+                    for line in BufReader::new(pipe).lines().map_while(Result::ok) {
+                        if !err_buf.is_empty() {
+                            err_buf.push('\n');
+                        }
+                        err_buf.push_str(&line);
+                    }
+                }
+                err_buf
+            });
+
+            let mut finished_emitted = false;
+            let mut finished_ok = false;
+            if let Some(stdout) = child.stdout.take() {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                        if tipo == "inicio" {
+                            if let Some(ref lbl) = init_label {
+                                let total = parsed.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+                                let _ = window.emit(
+                                    &progress_ev,
+                                    serde_json::json!({
+                                        "processados": 0,
+                                        "total": total,
+                                        "percentual": 0,
+                                        "atualizados": 0,
+                                        "enriquecidos": 0,
+                                        "faixa_atual": lbl
+                                    }),
+                                );
+                            }
+                        } else if tipo == "progresso" {
+                            let _ = window.emit(&progress_ev, parsed);
+                        } else if tipo == "fim" {
+                            finished_emitted = true;
+                            finished_ok = parsed.get("sucesso").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let _ = window.emit(&finished_ev, parsed);
+                        }
+                    }
+                }
+            }
+
+            let stderr_output = err_drain.join().unwrap_or_default();
+            let exit_status = child.wait();
+            let exit_ok = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
+
+            if (!exit_ok && (!finished_emitted || finished_ok)) || (exit_ok && !finished_emitted) {
+                let err_msg = if !stderr_output.trim().is_empty() {
+                    stderr_output.trim().to_string()
+                } else {
+                    format!("Processo Python encerrou com status {:?}", exit_status.map(|s| s.code()))
+                };
+                let _ = window.emit(
+                    &finished_ev,
+                    serde_json::json!({
+                        "tipo": "fim",
+                        "sucesso": false,
+                        "erro": err_msg,
+                        "total": 0,
+                        "atualizados": 0,
+                        "erros": [err_msg],
+                    }),
+                );
+            }
+        });
+    }
+
+    pub(crate) fn run_python_output_checked(
+        mut cmd: Command,
+        spawn_err_prefix: &str,
+        exec_err_prefix: &str,
+    ) -> Result<String, String> {
+        let output = cmd.output().map_err(|e| format!("{}: {}", spawn_err_prefix, e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let detail = if !stderr.trim().is_empty() {
+                stderr.trim().to_string()
+            } else if !stdout.trim().is_empty() {
+                stdout.trim().to_string()
+            } else {
+                format!("código de saída {:?}", output.status.code())
+            };
+            return Err(format!("{}: {}", exec_err_prefix, detail));
+        }
+        Ok(stdout)
+    }
+
     /// Executa um script Python e devolve a resposta JSON de forma robusta e resiliente.
     fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
         let path = match find_canonical_python_script(Some(app), script) {
@@ -2037,7 +2332,7 @@ mod commands {
             }
         };
 
-        let python_bin = match find_python_binary() {
+        let python_bin = match find_python_binary_with_app(Some(app)) {
             Ok(b) => b,
             Err(e) => {
                 return Err(format_structured_error(
@@ -2103,7 +2398,7 @@ mod commands {
             let mut out = String::new();
             if let Some(p) = stdout_pipe {
                 let r = BufReader::new(p);
-                for line in r.lines().flatten() {
+                for line in r.lines().map_while(Result::ok) {
                     if !out.is_empty() { out.push('\n'); }
                     out.push_str(&line);
                 }
@@ -2115,7 +2410,7 @@ mod commands {
             let mut err = String::new();
             if let Some(p) = stderr_pipe {
                 let r = BufReader::new(p);
-                for line in r.lines().flatten() {
+                for line in r.lines().map_while(Result::ok) {
                     if !err.is_empty() { err.push('\n'); }
                     err.push_str(&line);
                 }
@@ -2228,11 +2523,8 @@ mod commands {
         roots: Vec<String>,
         include_serato_path: Option<String>,
     ) -> Result<String, String> {
-        let script = find_canonical_python_script(Some(&app), "duplicates_tool.py")?;
-        let python_bin = find_python_binary()?;
-        let mut cmd = Command::new(&python_bin);
-        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
-        cmd.arg(&script).arg("--roots");
+        let mut cmd = find_python_cmd(Some(&app), "duplicates_tool.py")?;
+        cmd.arg("--roots");
         for r in &roots {
             cmd.arg(r);
         }
@@ -2251,15 +2543,13 @@ mod commands {
         let stdout_thread = std::thread::spawn(move || {
             let mut final_json = String::new();
             if let Some(out) = stdout {
-                for line_res in BufReader::new(out).lines() {
-                    if let Ok(line) = line_res {
-                        let t = line.trim().to_string();
-                        if t.starts_with('{') {
-                            if t.contains("\"tipo\": \"progresso\"") {
-                                let _ = window_clone.emit("duplicates-progress", &t);
-                            } else {
-                                final_json = t;
-                            }
+                for line in BufReader::new(out).lines().map_while(Result::ok) {
+                    let t = line.trim().to_string();
+                    if t.starts_with('{') {
+                        if t.contains("\"tipo\": \"progresso\"") {
+                            let _ = window_clone.emit("duplicates-progress", &t);
+                        } else {
+                            final_json = t;
                         }
                     }
                 }
@@ -2270,13 +2560,11 @@ mod commands {
         let stderr_thread = std::thread::spawn(move || {
             let mut err_str = String::new();
             if let Some(err) = stderr {
-                for line_res in BufReader::new(err).lines() {
-                    if let Ok(line) = line_res {
-                        if !err_str.is_empty() {
-                            err_str.push('\n');
-                        }
-                        err_str.push_str(&line);
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !err_str.is_empty() {
+                        err_str.push('\n');
                     }
+                    err_str.push_str(&line);
                 }
             }
             err_str
@@ -2286,7 +2574,7 @@ mod commands {
         let err_output = stderr_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar duplicados: {}", e))?;
 
-        if !status.success() && final_json.is_empty() {
+        if !status.success() {
             let msg = if err_output.trim().is_empty() {
                 "Erro na execução da análise de duplicados".to_string()
             } else {
@@ -2361,11 +2649,8 @@ mod commands {
         } else {
             None
         };
-        let script = find_canonical_python_script(Some(&app), "music_analysis.py")?;
-        let python_bin = find_python_binary()?;
-        let mut cmd = Command::new(&python_bin);
-        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
-        cmd.arg(&script).arg("--analyze-batch").arg(&mp3_path);
+        let mut cmd = find_python_cmd(Some(&app), "music_analysis.py")?;
+        cmd.arg("--analyze-batch").arg(&mp3_path);
         cmd.arg("--limit").arg(limit.to_string());
         if write {
             cmd.arg("--write");
@@ -2383,7 +2668,7 @@ mod commands {
             let mut captured_err = String::new();
             if let Some(pipe) = stderr_pipe {
                 let r = BufReader::new(pipe);
-                for line in r.lines().flatten() {
+                for line in r.lines().map_while(Result::ok) {
                     if !captured_err.is_empty() {
                         captured_err.push('\n');
                     }
@@ -2395,13 +2680,11 @@ mod commands {
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
-            for line_res in BufReader::new(stdout).lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim().to_string();
-                    if trimmed.starts_with('{') {
-                        let _ = window.emit("analysis-progress", trimmed.clone());
-                        final_json = trimmed;
-                    }
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let trimmed = line.trim().to_string();
+                if trimmed.starts_with('{') {
+                    let _ = window.emit("analysis-progress", trimmed.clone());
+                    final_json = trimmed;
                 }
             }
         }
@@ -2529,7 +2812,7 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar status do Sound Seal: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
@@ -2549,7 +2832,7 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao consultar duplicatas do Sound Seal: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
@@ -2567,7 +2850,7 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao definir master do Sound Seal: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
@@ -2584,7 +2867,7 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao salvar masters em lote: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
@@ -2600,7 +2883,7 @@ mod commands {
 
         let output = cmd.output().map_err(|e| format!("Falha ao limpar preferências de master: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { "Execução falhou" } else { stderr.as_ref() };
@@ -2627,35 +2910,52 @@ mod commands {
         cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("Falha ao iniciar scanner de faixas perdidas: {}", e))?;
+        let stderr_pipe = child.stderr.take();
+        let err_thread = std::thread::spawn(move || {
+            let mut err_buf = String::new();
+            if let Some(err) = stderr_pipe {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !err_buf.is_empty() {
+                        err_buf.push('\n');
+                    }
+                    err_buf.push_str(&line);
+                }
+            }
+            err_buf
+        });
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
-            for line_res in reader.lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('{') {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window.emit("relocate-scan-progress", parsed);
-                                continue;
-                            } else if tipo == "fim" {
-                                final_json = trimmed.to_string();
-                                continue;
-                            }
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                        if tipo == "progresso" {
+                            let _ = window.emit("relocate-scan-progress", parsed);
+                            continue;
+                        } else if tipo == "fim" {
+                            final_json = trimmed.to_string();
+                            continue;
                         }
                     }
-                    if final_json.is_empty() && trimmed.starts_with('{') {
-                        final_json = trimmed.to_string();
-                    }
+                }
+                if final_json.is_empty() && trimmed.starts_with('{') {
+                    final_json = trimmed.to_string();
                 }
             }
         }
 
+        let stderr_output = err_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar scanner de faixas perdidas: {}", e))?;
-        if !status.success() && final_json.is_empty() {
-            return Err("Erro na execução do Relocate".to_string());
+        if !status.success() {
+            let detail = if stderr_output.trim().is_empty() {
+                format!("Erro na execução do Relocate (código {:?})", status.code())
+            } else {
+                format!("Erro na execução do Relocate: {}", stderr_output.trim())
+            };
+            return Err(detail);
         }
 
         if final_json.is_empty() {
@@ -2697,49 +2997,21 @@ mod commands {
         items_json: String,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "religar faixas ausentes em lote")?;
-        let script = find_canonical_python_script(Some(&app), "sound_seal.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
+        let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
+        cmd.arg("--batch-relink");
+        cmd.arg(&items_json);
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
 
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--batch-relink");
-            cmd.arg(&items_json);
-            cmd.arg("--mp3");
-            cmd.arg(&mp3_path);
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("sound-seal-relink-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window_clone.emit("sound-seal-relink-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("sound-seal-relink-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-        });
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "sound-seal-relink-progress",
+            "sound-seal-relink-finished",
+            guard,
+            None,
+            None,
+        );
 
         Ok(())
     }
@@ -2751,6 +3023,7 @@ mod commands {
         serato_path: String,
         target_path: Option<String>,
         target_paths: Option<String>,
+        allow_global_cleanup: Option<bool>,
     ) -> Result<String, String> {
         let _guard = bloqueio_serato_e_concorrencia(Some(&app), "remover faixas perdidas das crates")?;
         let mut cmd = find_python_cmd(Some(&app), "sound_seal.py")?;
@@ -2766,10 +3039,11 @@ mod commands {
             }
         }
         if let Some(tps) = target_paths {
-            if !tps.trim().is_empty() {
-                cmd.arg("--target-paths");
-                cmd.arg(tps);
-            }
+            cmd.arg("--target-paths");
+            cmd.arg(tps);
+        }
+        if allow_global_cleanup == Some(true) {
+            cmd.arg("--allow-global-cleanup");
         }
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -2779,7 +3053,7 @@ mod commands {
             .map_err(|e| format!("Erro ao executar sound_seal.py --remove-lost: {e}"))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: String = stdout.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("{}").to_string();
+        let result: String = stdout.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("{}").to_string();
         if !output.status.success() || result.is_empty() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let msg = if stderr.trim().is_empty() { result.as_str() } else { stderr.as_ref() };
@@ -2827,22 +3101,42 @@ mod commands {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| format!("Falha no Track Matcher: {}", e))?;
+        let stderr_pipe = child.stderr.take();
+        let err_thread = std::thread::spawn(move || {
+            let mut err_buf = String::new();
+            if let Some(err) = stderr_pipe {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !err_buf.is_empty() {
+                        err_buf.push('\n');
+                    }
+                    err_buf.push_str(&line);
+                }
+            }
+            err_buf
+        });
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
-            for line_res in BufReader::new(stdout).lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim().to_string();
-                    if !trimmed.starts_with('{') {
-                        continue;
-                    }
-                    // Progresso é repassado à interface; a última linha é o resultado
-                    let _ = window.emit("match-progress", &trimmed);
-                    final_json = trimmed;
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let trimmed = line.trim().to_string();
+                if !trimmed.starts_with('{') {
+                    continue;
                 }
+                // Progresso é repassado à interface; a última linha é o resultado
+                let _ = window.emit("match-progress", &trimmed);
+                final_json = trimmed;
             }
         }
-        let _ = child.wait();
+        let stderr_output = err_thread.join().unwrap_or_default();
+        let status = child.wait().map_err(|e| format!("Falha ao aguardar Track Matcher: {}", e))?;
+        if !status.success() {
+            let msg = if stderr_output.trim().is_empty() {
+                format!("Track Matcher encerrou com erro (código {:?})", status.code())
+            } else {
+                format!("Track Matcher falhou: {}", stderr_output.trim())
+            };
+            return Err(msg);
+        }
         if final_json.is_empty() {
             return Err("Track Matcher não retornou resultado".into());
         }
@@ -2858,10 +3152,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "track_matcher.py")?;
         cmd.arg("--replace-upgrades");
         cmd.arg(&upgrades_json);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao substituir upgrades: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao substituir upgrades", "Erro ao substituir upgrades")
     }
 
     #[tauri::command]
@@ -2876,13 +3167,11 @@ mod commands {
         cmd.arg(&tracks_json);
         cmd.arg("--target-folder");
         cmd.arg(&target_folder);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao integrar faixas na Crate: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao integrar faixas na Crate", "Erro ao integrar faixas na Crate")
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn scan_audio_health(
         app: AppHandle,
         window: Window,
@@ -2937,37 +3226,54 @@ mod commands {
         cmd.stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(|e| format!("Falha na auditoria de áudio: {}", e))?;
+        let stderr_pipe = child.stderr.take();
+        let err_thread = std::thread::spawn(move || {
+            let mut err_buf = String::new();
+            if let Some(err) = stderr_pipe {
+                for line in BufReader::new(err).lines().map_while(Result::ok) {
+                    if !err_buf.is_empty() {
+                        err_buf.push('\n');
+                    }
+                    err_buf.push_str(&line);
+                }
+            }
+            err_buf
+        });
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
             let reader = BufReader::new(stdout);
-            for line_res in reader.lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('{') {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window.emit("audio-health-scan-progress", parsed);
+            for line in reader.lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
+                        if tipo == "progresso" {
+                            let _ = window.emit("audio-health-scan-progress", parsed);
+                            continue;
+                        } else if tipo == "resultado" {
+                            if let Some(dados) = parsed.get("dados") {
+                                final_json = dados.to_string();
                                 continue;
-                            } else if tipo == "resultado" {
-                                if let Some(dados) = parsed.get("dados") {
-                                    final_json = dados.to_string();
-                                    continue;
-                                }
                             }
                         }
                     }
-                    if final_json.is_empty() && trimmed.starts_with('{') {
-                        final_json = trimmed.to_string();
-                    }
+                }
+                if final_json.is_empty() && trimmed.starts_with('{') {
+                    final_json = trimmed.to_string();
                 }
             }
         }
 
+        let stderr_output = err_thread.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar auditoria de áudio: {}", e))?;
-        if !status.success() && final_json.is_empty() {
-            return Err("Erro na execução da auditoria de áudio".to_string());
+        if !status.success() {
+            let detail = if stderr_output.trim().is_empty() {
+                format!("Erro na execução da auditoria de áudio (código {:?})", status.code())
+            } else {
+                format!("Erro na execução da auditoria de áudio: {}", stderr_output.trim())
+            };
+            return Err(detail);
         }
 
         if final_json.is_empty() {
@@ -2996,10 +3302,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--resample-local");
         cmd.arg(&filepath);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao normalizar frequência: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao normalizar frequência", "Erro ao normalizar frequência")
     }
 
     #[tauri::command]
@@ -3009,48 +3312,18 @@ mod commands {
         filepaths_json: String,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "normalizar frequência de áudio em lote")?;
-        let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
-
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--batch-resample-local");
-            cmd.arg(&filepaths_json);
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("audio-health-resample-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window_clone.emit("audio-health-resample-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("audio-health-resample-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-        });
-
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
+        cmd.arg("--batch-resample-local");
+        cmd.arg(&filepaths_json);
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "audio-health-resample-progress",
+            "audio-health-resample-finished",
+            guard,
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -3101,92 +3374,24 @@ mod commands {
         serato_dir: Option<String>,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "reparar faixas online em lote")?;
-        let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
-
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--batch-repair-online");
-            cmd.arg(&filepaths_json);
-            if let Some(ref s_dir) = serato_dir {
-                if !s_dir.trim().is_empty() {
-                    cmd.arg("--serato");
-                    cmd.arg(s_dir);
-                }
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
+        cmd.arg("--batch-repair-online");
+        cmd.arg(&filepaths_json);
+        if let Some(ref s_dir) = serato_dir {
+            if !s_dir.trim().is_empty() {
+                cmd.arg("--serato");
+                cmd.arg(s_dir);
             }
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("audio-health-batch-finished", serde_json::json!({
-                        "tipo": "fim",
-                        "sucesso": false,
-                        "erro": e.to_string(),
-                        "total": 0,
-                        "atualizados": 0,
-                        "erros": [e.to_string()]
-                    }));
-                    return;
-                }
-            };
-
-            // Drenagem concorrente de STDERR para prevenir DEADLOCK de pipe cheio
-            let stderr_pipe = child.stderr.take();
-            let err_drain_thread = std::thread::spawn(move || {
-                let mut captured_err = String::new();
-                if let Some(pipe) = stderr_pipe {
-                    let r = BufReader::new(pipe);
-                    for line in r.lines().flatten() {
-                        if !captured_err.is_empty() {
-                            captured_err.push('\n');
-                        }
-                        captured_err.push_str(&line);
-                    }
-                }
-                captured_err
-            });
-
-            let mut finished_emitted = false;
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines().flatten() {
-                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line_res) {
-                        let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                        if tipo == "progresso" {
-                            let _ = window_clone.emit("audio-health-batch-progress", parsed);
-                        } else if tipo == "fim" {
-                            let _ = window_clone.emit("audio-health-batch-finished", parsed);
-                            finished_emitted = true;
-                        }
-                    }
-                }
-            }
-
-            let stderr_output = err_drain_thread.join().unwrap_or_default();
-            let exit_status = child.wait();
-            let success = exit_status.as_ref().map(|s| s.success()).unwrap_or(false);
-
-            if !success && !finished_emitted {
-                let err_msg = if !stderr_output.trim().is_empty() {
-                    stderr_output
-                } else {
-                    format!("Processo Python encerrou com status {:?}", exit_status)
-                };
-                let _ = window_clone.emit("audio-health-batch-finished", serde_json::json!({
-                    "tipo": "fim",
-                    "sucesso": false,
-                    "erro": err_msg,
-                    "total": 0,
-                    "atualizados": 0,
-                    "erros": [err_msg]
-                }));
-            }
-        });
-
+        }
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "audio-health-batch-progress",
+            "audio-health-batch-finished",
+            guard,
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -3195,10 +3400,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--preaudit-online");
         cmd.arg(&filepath);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao pré-auditar faixa online: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao pré-auditar faixa online", "Erro ao pré-auditar faixa online")
     }
 
     #[tauri::command]
@@ -3207,47 +3409,18 @@ mod commands {
         window: Window,
         filepaths_json: String,
     ) -> Result<(), String> {
-        let script = find_canonical_python_script(Some(&app), "audio_health.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
-
-        std::thread::spawn(move || {
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--batch-preaudit-online");
-            cmd.arg(&filepaths_json);
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("audio-health-preaudit-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window_clone.emit("audio-health-preaudit-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("audio-health-preaudit-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-        });
-
+        let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
+        cmd.arg("--batch-preaudit-online");
+        cmd.arg(&filepaths_json);
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "audio-health-preaudit-progress",
+            "audio-health-preaudit-finished",
+            None,
+            None,
+            None,
+        );
         Ok(())
     }
 
@@ -3263,10 +3436,7 @@ mod commands {
         cmd.arg(&filepath);
         cmd.arg("--new-name");
         cmd.arg(&new_name);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao renomear arquivo: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao renomear arquivo", "Falha ao renomear faixa")
     }
 
     #[tauri::command]
@@ -3274,10 +3444,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--preview");
         cmd.arg(&filepath);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao calcular Hot Cues: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao calcular Hot Cues", "Erro ao calcular Hot Cues")
     }
 
     #[tauri::command]
@@ -3333,9 +3500,7 @@ mod commands {
             cmd.arg(o.to_string());
         }
 
-        let output = cmd.output().map_err(|e| format!("Falha ao escanear cues na crate: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        Ok(stdout)
+        run_python_output_checked(cmd, "Falha ao escanear cues na crate", "Erro ao escanear cues na crate")
     }
 
     #[tauri::command]
@@ -3346,10 +3511,7 @@ mod commands {
         subcrate: Option<String>,
         include_subcrates: Option<bool>,
     ) -> Result<String, String> {
-        let script = find_canonical_python_script(Some(&app), "auto_cue.py")?;
-        let python_bin = find_python_binary()?;
-        let mut cmd = Command::new(&python_bin);
-        cmd.arg(&script);
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--audit-crate");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
@@ -3385,6 +3547,7 @@ mod commands {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn batch_apply_crate_cues(
         app: AppHandle,
         window: Window,
@@ -3396,70 +3559,41 @@ mod commands {
         overwrite_existing: Option<bool>,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar Hot Cues na crate")?;
-        let script = find_canonical_python_script(Some(&app), "auto_cue.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
+        cmd.arg("--batch-crate");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+        if let Some(cr) = crate_raiz {
+            if !cr.is_empty() {
+                cmd.arg("--crate-raiz");
+                cmd.arg(cr);
+            }
+        }
+        if let Some(sub) = subcrate {
+            if !sub.is_empty() {
+                cmd.arg("--subcrate");
+                cmd.arg(sub);
+            }
+        }
+        if let Some(false) = include_subcrates {
+            cmd.arg("--no-subcrates");
+        }
+        if let Some(true) = only_pending {
+            cmd.arg("--only-pending");
+        }
+        if let Some(true) = overwrite_existing {
+            cmd.arg("--overwrite-existing");
+        }
 
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--batch-crate");
-            cmd.arg("--mp3");
-            cmd.arg(&mp3_path);
-            if let Some(cr) = crate_raiz {
-                if !cr.is_empty() {
-                    cmd.arg("--crate-raiz");
-                    cmd.arg(cr);
-                }
-            }
-            if let Some(sub) = subcrate {
-                if !sub.is_empty() {
-                    cmd.arg("--subcrate");
-                    cmd.arg(sub);
-                }
-            }
-            if let Some(false) = include_subcrates {
-                cmd.arg("--no-subcrates");
-            }
-            if let Some(true) = only_pending {
-                cmd.arg("--only-pending");
-            }
-            if let Some(true) = overwrite_existing {
-                cmd.arg("--overwrite-existing");
-            }
-
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("auto-cue-batch-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window_clone.emit("auto-cue-batch-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("auto-cue-batch-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-        });
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "auto-cue-batch-progress",
+            "auto-cue-batch-finished",
+            guard,
+            None,
+            None,
+        );
 
         Ok(())
     }
@@ -3474,64 +3608,35 @@ mod commands {
         include_subcrates: Option<bool>,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "reparar Hot Cues na crate")?;
-        let script = find_canonical_python_script(Some(&app), "auto_cue.py")?;
-        let python_bin = find_python_binary()?;
-        let window_clone = window.clone();
-
-        std::thread::spawn(move || {
-            let _guard = guard;
-            let mut cmd = make_python_cmd(&script, &python_bin);
-            cmd.arg("--repair-batch");
-            cmd.arg("--mp3");
-            cmd.arg(&mp3_path);
-            if let Some(cr) = crate_raiz {
-                if !cr.is_empty() {
-                    cmd.arg("--crate-raiz");
-                    cmd.arg(cr);
-                }
+        let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
+        cmd.arg("--repair-batch");
+        cmd.arg("--mp3");
+        cmd.arg(&mp3_path);
+        if let Some(cr) = crate_raiz {
+            if !cr.is_empty() {
+                cmd.arg("--crate-raiz");
+                cmd.arg(cr);
             }
-            if let Some(sub) = subcrate {
-                if !sub.is_empty() {
-                    cmd.arg("--subcrate");
-                    cmd.arg(sub);
-                }
+        }
+        if let Some(sub) = subcrate {
+            if !sub.is_empty() {
+                cmd.arg("--subcrate");
+                cmd.arg(sub);
             }
-            if let Some(false) = include_subcrates {
-                cmd.arg("--no-subcrates");
-            }
+        }
+        if let Some(false) = include_subcrates {
+            cmd.arg("--no-subcrates");
+        }
 
-            cmd.stdout(Stdio::piped());
-            cmd.stderr(Stdio::piped());
-
-            let mut child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    let _ = window_clone.emit("auto-cue-repair-finished", serde_json::json!({
-                        "sucesso": false,
-                        "erro": e.to_string()
-                    }));
-                    return;
-                }
-            };
-
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                for line_res in reader.lines() {
-                    if let Ok(line) = line_res {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
-                            let tipo = parsed.get("tipo").and_then(|t| t.as_str()).unwrap_or("");
-                            if tipo == "progresso" {
-                                let _ = window_clone.emit("auto-cue-repair-progress", parsed);
-                            } else if tipo == "fim" {
-                                let _ = window_clone.emit("auto-cue-repair-finished", parsed);
-                            }
-                        }
-                    }
-                }
-            }
-
-            let _ = child.wait();
-        });
+        run_streaming_py_event_job(
+            cmd,
+            window,
+            "auto-cue-repair-progress",
+            "auto-cue-repair-finished",
+            guard,
+            None,
+            None,
+        );
 
         Ok(())
     }
@@ -3970,6 +4075,7 @@ mod commands {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn crate_playlist_tools(
         app: AppHandle,
         serato_path: String,
@@ -4017,6 +4123,7 @@ mod commands {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn analyze_energy_batch(
         app: AppHandle,
         window: Window,
@@ -4032,11 +4139,8 @@ mod commands {
         } else {
             None
         };
-        let script = find_canonical_python_script(Some(&app), "music_analysis.py")?;
-        let python_bin = find_python_binary()?;
-        let mut cmd = Command::new(&python_bin);
-        cmd.env("PYTHONDONTWRITEBYTECODE", "1");
-        cmd.arg(&script).arg("--energy-batch").arg(&mp3_path);
+        let mut cmd = find_python_cmd(Some(&app), "music_analysis.py")?;
+        cmd.arg("--energy-batch").arg(&mp3_path);
         cmd.arg("--limit").arg(limit.to_string());
         cmd.arg("--target-tag").arg(target_tag);
         if let (Some(sp), Some(cn)) = (serato_path, crate_name) {
@@ -4055,7 +4159,7 @@ mod commands {
         let err_drain = std::thread::spawn(move || {
             let mut s = String::new();
             if let Some(pipe) = stderr_pipe {
-                for line in BufReader::new(pipe).lines().flatten() {
+                for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                     if !s.is_empty() { s.push('\n'); }
                     s.push_str(&line);
                 }
@@ -4065,21 +4169,27 @@ mod commands {
 
         let mut final_json = String::new();
         if let Some(stdout) = child.stdout.take() {
-            for line_res in BufReader::new(stdout).lines() {
-                if let Ok(line) = line_res {
-                    let trimmed = line.trim();
-                    if trimmed.starts_with('{') {
-                        if trimmed.contains("\"tipo\": \"progresso\"") || trimmed.contains("\"tipo\":\"progresso\"") {
-                            let _ = window.emit("energy-progress", trimmed);
-                        } else if trimmed.contains("\"tipo\": \"fim\"") || trimmed.contains("\"tipo\":\"fim\"") {
-                            final_json = trimmed.to_string();
-                        }
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let trimmed = line.trim();
+                if trimmed.starts_with('{') {
+                    if trimmed.contains("\"tipo\": \"progresso\"") || trimmed.contains("\"tipo\":\"progresso\"") {
+                        let _ = window.emit("energy-progress", trimmed);
+                    } else if trimmed.contains("\"tipo\": \"fim\"") || trimmed.contains("\"tipo\":\"fim\"") {
+                        final_json = trimmed.to_string();
                     }
                 }
             }
         }
-        let _ = child.wait();
-        let _ = err_drain.join();
+        let stderr_output = err_drain.join().unwrap_or_default();
+        let status = child.wait().map_err(|e| format!("Falha ao aguardar análise de energia: {}", e))?;
+        if !status.success() {
+            let detail = if stderr_output.trim().is_empty() {
+                format!("Análise de energia falhou (código {:?})", status.code())
+            } else {
+                format!("Análise de energia falhou: {}", stderr_output.trim())
+            };
+            return Err(detail);
+        }
         if final_json.is_empty() {
             Ok("{\"sucesso\": true}".into())
         } else {
@@ -4088,6 +4198,7 @@ mod commands {
     }
 
     #[tauri::command]
+    #[allow(clippy::too_many_arguments)]
     pub async fn generate_curated_set(
         app: AppHandle,
         serato_path: String,
@@ -4198,7 +4309,7 @@ pub fn run() {
                     ) {
                         if watcher.watch(&volumes_path, RecursiveMode::NonRecursive).is_ok() {
                             let mut last_trigger = std::time::Instant::now();
-                            while let Ok(_) = rx.recv() {
+                            while rx.recv().is_ok() {
                                 // Debounce de 1 segundo para estabilizar a montagem do volume
                                 if last_trigger.elapsed() >= Duration::from_secs(1) {
                                     last_trigger = std::time::Instant::now();
@@ -4537,7 +4648,7 @@ mod tests {
         std::fs::set_permissions(&fake_py, perms).unwrap();
 
         assert!(validate_python_candidate_with_vendor(&fake_py, &[]).is_err());
-        assert!(validate_python_candidate_with_vendor(&fake_py, &[vendor.clone()]).is_ok());
+        assert!(validate_python_candidate_with_vendor(&fake_py, std::slice::from_ref(&vendor)).is_ok());
 
         let _ = std::fs::remove_dir_all(&base);
     }
@@ -4602,5 +4713,130 @@ mod tests {
         // Zero exit code with valid JSON MUST succeed
         let ok = commands::evaluate_python_json_output("dummy.py", Some(0), true, r#"{"ok":true}"#, "").unwrap();
         assert_eq!(ok, r#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn test_qa01_move_file_verified_fallback_and_sha256_integrity() {
+        let base = std::env::temp_dir().join(format!("serato_qa01_{}", generate_operacao_id()));
+        let src_dir = base.join("src");
+        let dst_dir = base.join("trash");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+
+        // 0. SHA-256 NIST vector "abc"
+        let abc = src_dir.join("abc.txt");
+        std::fs::write(&abc, b"abc").unwrap();
+        let digest = calculate_sha256(&abc).unwrap();
+        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
+        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+        // 1. Normal rename succeeds and removes original
+        let f1 = src_dir.join("track1.mp3");
+        std::fs::write(&f1, b"ID3\x03\x00AUDIO_ONE").unwrap();
+        let d1 = dst_dir.join("track1.mp3");
+        move_file_with_verified_fallback(&f1, &d1, false).unwrap();
+        assert!(!f1.exists());
+        assert_eq!(std::fs::read(&d1).unwrap(), b"ID3\x03\x00AUDIO_ONE");
+
+        // 2. Forced cross-device copy fallback > 100KB succeeds with SHA-256 verification
+        let f2 = src_dir.join("track2.mp3");
+        let big_payload: Vec<u8> = (0..131072).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&f2, &big_payload).unwrap();
+        let d2 = dst_dir.join("track2.mp3");
+        move_file_with_verified_fallback(&f2, &d2, true).unwrap();
+        assert!(!f2.exists());
+        assert_eq!(std::fs::read(&d2).unwrap(), big_payload);
+
+        // 3. Copy failure (nonexistent destination parent) MUST preserve original and return Err
+        let f3 = src_dir.join("track3.mp3");
+        std::fs::write(&f3, b"KEEP_ME_SAFE").unwrap();
+        let bad_dest = base.join("missing_parent").join("track3.mp3");
+        assert!(move_file_with_verified_fallback(&f3, &bad_dest, true).is_err());
+        assert!(f3.exists());
+        assert_eq!(std::fs::read(&f3).unwrap(), b"KEEP_ME_SAFE");
+
+        // 4. Size mismatch & SHA-256 mismatch detection in verify_file_copy
+        let orig = src_dir.join("orig.bin");
+        let diff_size = dst_dir.join("diff_size.bin");
+        let diff_hash = dst_dir.join("diff_hash.bin");
+        std::fs::write(&orig, b"ABCD1234").unwrap();
+        std::fs::write(&diff_size, b"ABCD").unwrap();
+        std::fs::write(&diff_hash, b"WXYZ1234").unwrap();
+        assert!(verify_file_copy(&orig, &diff_size).is_err());
+        assert!(verify_file_copy(&orig, &diff_hash).is_err());
+        assert!(verify_file_copy(&orig, &orig).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_qa03_should_store_approved_plan_gates() {
+        let valid_summary = serde_json::json!({
+            "sucesso": true,
+            "dry_run": true,
+            "plan_id": "plan-1234",
+            "plan": {"files": []}
+        });
+        assert_eq!(
+            should_store_approved_plan(true, true, Some(&valid_summary)),
+            Some("plan-1234".to_string())
+        );
+
+        // Non-zero exit MUST reject plan even when JSON claims sucesso: true
+        assert_eq!(should_store_approved_plan(true, false, Some(&valid_summary)), None);
+        // Non-dry-run MUST NOT store
+        assert_eq!(should_store_approved_plan(false, true, Some(&valid_summary)), None);
+        // Partial errors MUST block approval
+        let partial = serde_json::json!({
+            "sucesso": true,
+            "dry_run": true,
+            "status_analise": "parcial_com_erros",
+            "plan_id": "plan-1234",
+            "plan": {"files": []}
+        });
+        assert_eq!(should_store_approved_plan(true, true, Some(&partial)), None);
+        // Empty plan_id MUST block
+        let empty_pid = serde_json::json!({
+            "sucesso": true,
+            "dry_run": true,
+            "plan_id": "   ",
+            "plan": {"files": []}
+        });
+        assert_eq!(should_store_approved_plan(true, true, Some(&empty_pid)), None);
+        // Missing plan object MUST block
+        let no_plan = serde_json::json!({
+            "sucesso": true,
+            "dry_run": true,
+            "plan_id": "plan-1234"
+        });
+        assert_eq!(should_store_approved_plan(true, true, Some(&no_plan)), None);
+    }
+
+    #[test]
+    fn test_qa08_and_qa09_checked_output_and_temp_cleanup() {
+        let base = std::env::temp_dir().join(format!("serato_qa08_09_{}", generate_operacao_id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        // QA-09 TempFileCleanup cleans file on scope exit
+        let tmp_plan = base.join("temp_plan.json");
+        std::fs::write(&tmp_plan, b"{}").unwrap();
+        assert!(tmp_plan.exists());
+        {
+            let _guard = TempFileCleanup::new(tmp_plan.clone());
+        }
+        assert!(!tmp_plan.exists(), "TempFileCleanup drop must remove temp plan file");
+
+        // QA-08 run_python_output_checked fails on non-zero exit with stderr
+        let mut fail_cmd = Command::new("/bin/sh");
+        fail_cmd.arg("-c").arg("echo '{\"sucesso\":true}'; echo 'boom error' >&2; exit 1");
+        let err = commands::run_python_output_checked(fail_cmd, "spawn", "exec").unwrap_err();
+        assert!(err.contains("boom error"));
+
+        let mut ok_cmd = Command::new("/bin/sh");
+        ok_cmd.arg("-c").arg("echo '{\"sucesso\":true}'");
+        let out = commands::run_python_output_checked(ok_cmd, "spawn", "exec").unwrap();
+        assert!(out.contains("sucesso"));
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

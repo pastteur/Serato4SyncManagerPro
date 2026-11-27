@@ -307,3 +307,137 @@ def test_qa004_custom_paths_preserve_exact_caminho_abs(tmp_path, monkeypatch):
     abs_reported = Path(faixas[0]["caminho_abs"])
     assert abs_reported == track.resolve()
     assert abs_reported.exists()
+
+
+def test_qa02_strict_target_paths_rejects_invalid_and_isolated_libraries(tmp_path):
+    import sound_seal
+    import struct
+    from serato_macos_app import criar_tag_tlv, parse_crate_binary
+
+    mp3_dir = tmp_path / "Music" / "MP3"
+    serato_a = tmp_path / "LibA" / "_Serato_"
+    serato_b = tmp_path / "LibB" / "_Serato_"
+    for d in (mp3_dir, serato_a / "Subcrates", serato_b / "Subcrates"):
+        d.mkdir(parents=True, exist_ok=True)
+
+    _make_audio(mp3_dir / "House" / "KeepMe.mp3")
+    _make_audio(mp3_dir / "Techno" / "SameName.mp3")
+
+    def make_crate(path, tracks, extra=b""):
+        hdr = b"vrsn\x00\x00\x00\x08\x001\x00.\x000\x000"
+        body = bytearray(hdr + extra)
+        for t in tracks:
+            pt = criar_tag_tlv("ptrk", t)
+            body.extend(b"otrk" + struct.pack(">I", len(pt)) + pt)
+        path.write_bytes(bytes(body))
+
+    crate_a = serato_a / "Subcrates" / "House.crate"
+    crate_b = serato_b / "Subcrates" / "OtherLib.crate"
+    make_crate(crate_a, ["Music/MP3/House/KeepMe.mp3", "Music/MP3/Ghost.mp3"], extra=b"osrt" + struct.pack(">I", 4) + b"\x00\x01\x02\x03")
+    make_crate(crate_b, ["Music/MP3/Ghost.mp3"])
+    crate_b_before = crate_b.read_bytes()
+
+    # Negative inputs: invalid JSON, dict instead of list, empty list, None, omitted global flag
+    for bad_arg in ["{bad json", '{"a": 1}', "[]", "[123]", None, ""]:
+        res = sound_seal.remove_lost_tracks_from_crates(
+            str(serato_a), str(mp3_dir), target_paths_json=bad_arg
+        )
+        assert res["sucesso"] is False
+        assert res["total_removidas"] == 0
+
+    # Valid targeted removal preserves unknown block osrt and does NOT touch LibB
+    res_ok = sound_seal.remove_lost_tracks_from_crates(
+        str(serato_a),
+        str(mp3_dir),
+        target_paths_json='["Music/MP3/Ghost.mp3", "Music/MP3/Ghost.mp3", "Music/MP3/NotPresent.mp3"]',
+    )
+    assert res_ok["sucesso"] is True
+    assert res_ok["crates_removidas"] == 1
+    _, rem_a, _, outros_a = parse_crate_binary(crate_a.read_bytes())
+    assert rem_a == ["Music/MP3/House/KeepMe.mp3"]
+    assert len(outros_a) == 1
+    assert crate_b.read_bytes() == crate_b_before
+
+
+def test_qa05_sound_seal_rejects_corrupt_crate_via_crate_ops(tmp_path):
+    import sound_seal
+    mp3_dir = tmp_path / "Music" / "MP3"
+    serato_dir = tmp_path / "_Serato_"
+    (serato_dir / "Subcrates").mkdir(parents=True, exist_ok=True)
+    _make_audio(mp3_dir / "Keep.mp3")
+
+    corrupt = serato_dir / "Subcrates" / "Corrupt.crate"
+    corrupt_bytes = b"vrsn\x00\x00\x00\x08\x001\x00.\x000\x000otrk\x00\x00\x01\x00broken"
+    corrupt.write_bytes(corrupt_bytes)
+
+    res = sound_seal.remove_lost_tracks_from_crates(
+        str(serato_dir), str(mp3_dir), target_paths_json='["Music/MP3/Keep.mp3"]'
+    )
+    assert res["sucesso"] is True
+    assert corrupt.read_bytes() == corrupt_bytes
+    assert any("Corrupt" in item.get("crate", "") and "erro" in item for item in res["crates_afetadas"])
+
+
+def test_p1_p2_remediations_smoke(tmp_path, monkeypatch):
+    import auto_cue
+    import crate_ops
+    import pioneer_usb_exporter
+    import scan_unused_files
+    import track_matcher
+    import subprocess
+    from mutagen.id3 import ID3, TIT2, TBPM
+
+    monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
+    monkeypatch.setattr(auto_cue, "BACKUP_DB_PATH", tmp_path / "cues.sqlite")
+
+    # 1. Pioneer cue conversion + deterministic content_id (no duplicate djmdCue rows on re-export)
+    mp3 = tmp_path / "Lib" / "Track.mp3"
+    mp3.parent.mkdir(parents=True, exist_ok=True)
+    # 1200 MPEG frames (~31s duration) so auto_cue duration check (>=10s) succeeds
+    mp3.write_bytes((b"\xff\xfb\x90\x00" + b"\x00" * 413) * 1200)
+    tags = ID3()
+    tags.add(TIT2(encoding=3, text="DJ Track"))
+    tags.add(TBPM(encoding=3, text="128.75"))
+    tags.save(str(mp3), v2_version=3)
+    res_cue = auto_cue.generate_and_save_serato_cues(str(mp3), overwrite_existing=True)
+    assert res_cue["sucesso"] is True, res_cue
+
+    usb_dir = tmp_path / "USB"
+    exporter = pioneer_usb_exporter.PioneerUsbExporter(usb_dir)
+    tlist = [{"filepath": str(mp3), "title": "DJ Track", "artist": "Art", "bpm": 128.75}]
+    s1 = exporter.export_crate("House", tlist, copy_audio=False)
+    s2 = exporter.export_crate("House", tlist, copy_audio=False)
+    assert s1["cues_converted"] > 0
+    assert s2["cues_converted"] == s1["cues_converted"]
+
+    # 2. Track matcher upgrade preserves DJ Serato Markers2 without mutating source incoming file
+    inc = tmp_path / "Downloads" / "TrackNew.mp3"
+    inc.parent.mkdir(parents=True, exist_ok=True)
+    inc.write_bytes((b"\xff\xfb\x90\x00" + b"\x00" * 413) * 1200)
+    inc_before = inc.read_bytes()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "FakeHome"))
+    up = track_matcher.replace_track_with_upgrade(str(inc), str(mp3), force=True)
+    assert up["sucesso"] is True
+    assert inc.read_bytes() == inc_before
+    assert "GEOB:Serato Markers2" in ID3(str(mp3))
+
+    # 3. UnusedFilesScanner distinguishes homonyms across folders and never overwrites duplicates in quarantine
+    m_dir = tmp_path / "Media"
+    s_dir = tmp_path / "MediaSerato"
+    (s_dir / "Subcrates").mkdir(parents=True, exist_ok=True)
+    _make_audio(m_dir / "Used" / "Intro.mp3")
+    _make_audio(m_dir / "UnusedA" / "Intro.mp3", b"ID3\x03\x00A")
+    _make_audio(m_dir / "UnusedB" / "Intro.mp3", b"ID3\x03\x00B")
+    crate_ops.write_crate_atomic(s_dir / "Subcrates" / "Used.crate", ["Media/Used/Intro.mp3"])
+    scanner = scan_unused_files.UnusedFilesScanner(str(m_dir), str(s_dir))
+    scan_res = scanner.scan()
+    assert scan_res["total_unused"] == 2
+    q_res = scanner.quarantine_files([str(m_dir / "UnusedA" / "Intro.mp3"), str(m_dir / "UnusedB" / "Intro.mp3")])
+    assert q_res["moved_count"] == 2
+
+    # 4. audio_health.py CLI accepts --categoria fake_320k cleanly
+    help_proc = subprocess.run(
+        [sys.executable, "audio_health.py", "--mp3", str(m_dir), "--categoria", "fake_320k", "--scan"],
+        capture_output=True, text=True, check=False
+    )
+    assert help_proc.returncode == 0

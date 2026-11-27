@@ -110,10 +110,11 @@ class TestAuditRemediations(unittest.TestCase):
         ]
         self._create_synthetic_crate(crate_file, tracks)
 
-        # Executa remoção de faixas perdidas
+        # Executa remoção global explícita de faixas perdidas
         res = sound_seal.remove_lost_tracks_from_crates(
             str(self.serato_dir),
-            str(self.mp3_dir)
+            str(self.mp3_dir),
+            allow_global_cleanup=True,
         )
 
         self.assertTrue(res["sucesso"])
@@ -140,7 +141,8 @@ class TestAuditRemediations(unittest.TestCase):
 
         res = sound_seal.remove_lost_tracks_from_crates(
             str(self.serato_dir),
-            str(self.mp3_dir)
+            str(self.mp3_dir),
+            allow_global_cleanup=True,
         )
 
         self.assertTrue(res["sucesso"])
@@ -172,7 +174,8 @@ class TestAuditRemediations(unittest.TestCase):
 
         res = sound_seal.remove_lost_tracks_from_crates(
             str(self.serato_dir),
-            str(self.mp3_dir)
+            str(self.mp3_dir),
+            allow_global_cleanup=True,
         )
 
         self.assertTrue(res["sucesso"])
@@ -565,6 +568,37 @@ class TestAuditRemediations(unittest.TestCase):
         # O arquivo original não deve ter sido movido para fora da pasta
         self.assertTrue(track.exists())
         self.assertFalse((self.root_path / "evil_escape.mp3").exists())
+
+    # =========================================================================
+    # QA-04: Rollback físico se record_operation_after falhar + Undo bloqueado sem hash_post
+    # =========================================================================
+
+    def test_qa04_safe_save_tags_rolls_back_when_journal_after_fails(self):
+        track = self._create_synthetic_mp3(self.mp3_dir / "RollbackAfterFail.mp3", title="OrigTitle")
+        orig_bytes = track.read_bytes()
+
+        with patch("journal.record_operation_after", side_effect=RuntimeError("Simulated Journal After Failure")):
+            with self.assertRaises(IOError):
+                tag_doctor.safe_save_tags(
+                    track,
+                    lambda audio: audio.tags.__setitem__("TIT2", tag_doctor.TIT2(encoding=3, text="NewTitle")),
+                )
+
+        # Arquivo restaurado integralmente ao estado original byte-a-byte
+        self.assertEqual(track.read_bytes(), orig_bytes)
+
+    def test_qa04_undo_refused_when_hash_posterior_missing(self):
+        track = self._create_synthetic_mp3(self.mp3_dir / "NoPostHash.mp3", title="OrigTitle")
+        op_id = journal.record_id3_before_change(str(track), action="manual_test")
+        from mutagen.id3 import ID3, TIT2
+        audio = ID3(str(track))
+        audio["TIT2"] = TIT2(encoding=3, text="ChangedTitle")
+        audio.save(str(track), v2_version=3)
+        # Não chama record_operation_after -> hash_posterior permanece NULL/ausente
+
+        res = journal.undo_operation(op_id)
+        self.assertFalse(res["sucesso"])
+        self.assertIn("hash posterior ausente", res["erro"])
 
 
 if __name__ == "__main__":

@@ -30,14 +30,43 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 # Tenta carregar o parser de Cues do Serato existente no projeto
 try:
-    from auto_cue import extract_serato_cues_from_file
+    from auto_cue import extract_cues_from_raw_tag
 except ImportError:
-    extract_serato_cues_from_file = None
+    extract_cues_from_raw_tag = None
 
 try:
     import mutagen
 except ImportError:
     mutagen = None
+
+
+def _extract_serato_cues_from_file(filepath: str) -> List[Dict[str, Any]]:
+    """Extrai Hot Cues do frame GEOB:Serato Markers2 via auto_cue.extract_cues_from_raw_tag."""
+    if not mutagen or not extract_cues_from_raw_tag:
+        return []
+    audio = mutagen.File(str(filepath))
+    if not audio or not getattr(audio, "tags", None):
+        return []
+    m2 = audio.tags.get("GEOB:Serato Markers2")
+    if not m2 or not hasattr(m2, "data"):
+        return []
+    parsed = extract_cues_from_raw_tag(m2.data)
+    out = []
+    for c in parsed:
+        col_hex = str(c.get("color", "#00cc00")).lstrip("#")
+        rgb = (0, 204, 0)
+        if len(col_hex) == 6:
+            try:
+                rgb = (int(col_hex[0:2], 16), int(col_hex[2:4], 16), int(col_hex[4:6], 16))
+            except ValueError:
+                pass
+        out.append({
+            "index": int(c.get("id", c.get("index", 0))),
+            "position_ms": int(c.get("pos_ms", c.get("position_ms", 0))),
+            "color_rgb": rgb,
+            "label": str(c.get("name", c.get("label", "")) or f"Cue {int(c.get('id', 0)) + 1}"),
+        })
+    return out
 
 
 def calc_quick_hash(filepath: Path) -> str:
@@ -272,7 +301,7 @@ class PioneerUsbExporter:
                 stats["errors"].append(f"Arquivo não encontrado: {src_path}")
                 continue
 
-            content_id = str(uuid.uuid4())[:12]
+            content_id = hashlib.sha256(str(src_path).encode("utf-8")).hexdigest()[:12]
             artist_name = track_data.get("artist") or "Artista Desconhecido"
             album_name = track_data.get("album") or "Álbum Desconhecido"
             title = track_data.get("title") or src_path.stem
@@ -342,23 +371,23 @@ class PioneerUsbExporter:
                 VALUES (?, ?, ?);
             """, (playlist_id, content_id, idx))
 
-            # Converte Hot Cues do Serato para djmdCue
+            # Converte Hot Cues do Serato para djmdCue (evita duplicatas por ContentID na reexportação)
+            cursor.execute("DELETE FROM djmdCue WHERE ContentID = ?;", (content_id,))
             serato_cues = []
-            if extract_serato_cues_from_file:
-                try:
-                    serato_cues = extract_serato_cues_from_file(str(src_path))
-                except Exception:
-                    pass
+            try:
+                serato_cues = _extract_serato_cues_from_file(str(src_path))
+            except Exception:
+                pass
 
             for cue in serato_cues:
-                cue_id = str(uuid.uuid4())[:8]
                 pad_index = cue.get("index", 0)  # 0..7
+                cue_id = hashlib.sha256(f"{content_id}:{pad_index}".encode("ascii")).hexdigest()[:12]
                 pos_ms = cue.get("position_ms", 0)
                 rgb = cue.get("color_rgb", (0, 255, 0))
                 label = cue.get("label", f"Cue {pad_index + 1}")
 
                 cursor.execute("""
-                    INSERT INTO djmdCue (
+                    INSERT OR REPLACE INTO djmdCue (
                         ID, ContentID, CueType, HotCueNumber, InMsec, ColorR, ColorG, ColorB, Comment
                     ) VALUES (?, ?, 2, ?, ?, ?, ?, ?, ?);
                 """, (cue_id, content_id, pad_index, pos_ms, rgb[0], rgb[1], rgb[2], label))
