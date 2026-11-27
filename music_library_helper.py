@@ -47,6 +47,8 @@ class MusicLibraryHelper:
             BIN_PATH.parent.mkdir(parents=True, exist_ok=True)
             cmd = [
                 "clang",
+                "-arch", "arm64",
+                "-arch", "x86_64",
                 "-framework", "Foundation",
                 "-framework", "iTunesLibrary",
                 "-O2",

@@ -85,7 +85,7 @@ def compute_audio_seal(filepath_str: str) -> str:
             start_offset = 0
             if len(header) >= 10 and header[:3] == b'ID3':
                 # Synchsafe integer para tamanho do ID3v2
-                size = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9]
+                size = ((header[6] & 0x7F) << 21) | ((header[7] & 0x7F) << 14) | ((header[8] & 0x7F) << 7) | (header[9] & 0x7F)
                 start_offset = 10 + size
                 if header[5] & 0x10:
                     start_offset += 10
@@ -922,9 +922,11 @@ def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
             "faixa_atual": Path(rel_p).name
         }, ensure_ascii=False), flush=True)
 
+    has_errors = len(errors) > 0
     print(json.dumps({
         "tipo": "fim",
-        "sucesso": True,
+        "sucesso": not has_errors,
+        "sucesso_parcial": (has_errors and relinked > 0),
         "total": total,
         "atualizados": relinked,
         "erros": errors[:10]
@@ -1067,12 +1069,21 @@ def _expand_target_candidates(raw_items: set, serato_dir: Path, mp3_base: Path) 
     expanded = set()
     for norm_item in raw_items:
         expanded.add(norm_item)
-        p = Path(norm_item)
-        if p.is_absolute():
+        # norm_key() remove a '/' inicial; testamos também com '/' restaurada para caminhos absolutos normalizados
+        abs_candidates = [norm_item] if norm_item.startswith('/') else ['/' + norm_item]
+        for cand_abs in abs_candidates:
+            p_res = Path(cand_abs).resolve()
+            p_str = p_res.as_posix()
             for root in (lib_root, mp3_base):
                 try:
-                    rel = p.resolve().relative_to(root.resolve())
-                    expanded.add(norm_key(rel.as_posix()))
+                    root_res = root.resolve()
+                    try:
+                        rel = p_res.relative_to(root_res)
+                        expanded.add(norm_key(rel.as_posix()))
+                    except ValueError:
+                        root_prefix = root_res.as_posix().rstrip('/') + '/'
+                        if p_str.lower().startswith(root_prefix.lower()):
+                            expanded.add(norm_key(p_str[len(root_prefix):]))
                 except Exception:
                     pass
     return expanded
@@ -1325,7 +1336,7 @@ def main():
         print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0)
 
-    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+    mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
 
     if args.relink:
         res = relink_track(mp3_dir, args.rel_path, args.source_path)
@@ -1350,12 +1361,12 @@ def main():
         sys.exit(0)
 
     if args.relocate:
-        serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
+        serato_dir = args.serato or str(Path.home() / "Music" / "_Serato_")
         scan_missing_and_relocate(serato_dir, mp3_dir, stream_json=True)
         sys.exit(0)
 
     if args.remove_lost:
-        serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
+        serato_dir = args.serato or str(Path.home() / "Music" / "_Serato_")
         tp_json = "" if args.target_paths is None else args.target_paths
         res = remove_lost_tracks_from_crates(
             serato_dir,

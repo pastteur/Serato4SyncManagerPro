@@ -227,8 +227,8 @@ export const App: React.FC = () => {
       }
     } else {
       // Browser Mock
-      if (!mp3Path) setMp3Path('/Volumes/Pastteyr/Music/MP3');
-      if (!seratoPath) setSeratoPath('/Volumes/Pastteyr/_Serato_');
+      if (!mp3Path) setMp3Path('~/Music/MP3');
+      if (!seratoPath) setSeratoPath('~/Music/_Serato_');
       addLog('🔍 Auto-detecção simulada em ambiente Web Dev.');
     }
   }, [mp3Path, seratoPath, addLog]);
@@ -398,7 +398,7 @@ export const App: React.FC = () => {
         addLog(`❌ Erro ao abrir diálogo do Finder: ${err}`);
       }
     } else {
-      const promptVal = prompt('Informe o caminho da pasta MP3 Master:', mp3Path || '/Volumes/Pastteyr/Music/MP3');
+      const promptVal = prompt('Informe o caminho da pasta MP3 Master:', mp3Path || '~/Music/MP3');
       if (promptVal) {
         setMp3Path(promptVal);
         addLog(`📂 Pasta MP3 Master definida: ${promptVal}`);
@@ -424,7 +424,7 @@ export const App: React.FC = () => {
         addLog(`❌ Erro ao abrir diálogo do Finder: ${err}`);
       }
     } else {
-      const promptVal = prompt('Informe o caminho da pasta Serato:', seratoPath || '/Volumes/Pastteyr/_Serato_');
+      const promptVal = prompt('Informe o caminho da pasta Serato:', seratoPath || '~/Music/_Serato_');
       if (promptVal) {
         setSeratoPath(promptVal);
         addLog(`📂 Pasta Serato definida: ${promptVal}`);
@@ -595,17 +595,25 @@ export const App: React.FC = () => {
   };
 
   const handleMoveToTrash = async (filePath: string, itemId: string): Promise<boolean> => {
+    const removeMatchingDuplicate = (prev: SyncSummary): SyncSummary => {
+      const removedCount = prev.duplicados.filter(d => d.id === itemId).length;
+      if (removedCount === 0) {
+        return prev;
+      }
+      return {
+        ...prev,
+        duplicados: prev.duplicados.filter(d => d.id !== itemId),
+        total_duplicados: Math.max(0, prev.total_duplicados - removedCount),
+      };
+    };
+
     if (isTauri) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         await invoke('move_to_trash', { path: filePath });
-        addLog(`🗑️ Cópia redundante movida para a Lixeira do Mac: ${filePath.split('/').pop()}`);
+        addLog(`🗑️ Arquivo movido para a Lixeira do Mac: ${filePath.split('/').pop()}`);
         if (summary) {
-          setSummary({
-            ...summary,
-            duplicados: summary.duplicados.filter(d => d.id !== itemId),
-            total_duplicados: Math.max(0, summary.total_duplicados - 1)
-          });
+          setSummary(removeMatchingDuplicate(summary));
         }
         return true;
       } catch (err) {
@@ -615,11 +623,7 @@ export const App: React.FC = () => {
     } else {
       addLog(`[SIMULAÇÃO] Arquivo movido para a Lixeira: ${filePath.split('/').pop()}`);
       if (summary) {
-        setSummary({
-          ...summary,
-          duplicados: summary.duplicados.filter(d => d.id !== itemId),
-          total_duplicados: Math.max(0, summary.total_duplicados - 1)
-        });
+        setSummary(removeMatchingDuplicate(summary));
       }
       return true;
     }

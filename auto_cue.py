@@ -1093,7 +1093,7 @@ def main():
     parser.add_argument("--offset", type=int, default=0, help="Offset de paginação")
 
     args = parser.parse_args()
-    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+    mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
 
     if args.preview:
         file_p = Path(args.preview)
@@ -1136,24 +1136,35 @@ def main():
         try:
             files = json.loads(args.apply_batch)
             updated = 0
-            
+            errors = []
+
             def process_file(file_path):
                 return generate_and_save_serato_cues(file_path, overwrite_existing=args.overwrite_existing)
 
             # Execução paralela aproveitando múltiplos núcleos do Apple Silicon (4 a 8 threads)
             max_workers = min(8, max(2, (os.cpu_count() or 4)))
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = [executor.submit(process_file, f) for f in files]
-                for future in as_completed(futures):
+                future_map = {executor.submit(process_file, f): f for f in files}
+                for future in as_completed(future_map):
+                    fpath = future_map[future]
                     try:
                         r = future.result()
                         if r.get("sucesso") and not r.get("ignorado"):
                             updated += 1
-                    except Exception:
-                        pass
+                        elif not r.get("sucesso"):
+                            errors.append(f"{Path(str(fpath)).name}: {r.get('erro', 'erro desconhecido')}")
+                    except Exception as exc:
+                        errors.append(f"{Path(str(fpath)).name}: {exc}")
 
-            print(json.dumps({"sucesso": True, "total": len(files), "atualizados": updated}, ensure_ascii=False), flush=True)
-            sys.exit(0)
+            has_errors = len(errors) > 0
+            print(json.dumps({
+                "sucesso": not has_errors,
+                "sucesso_parcial": (has_errors and updated > 0),
+                "total": len(files),
+                "atualizados": updated,
+                "erros": errors[:10]
+            }, ensure_ascii=False), flush=True)
+            sys.exit(0 if not has_errors else 1)
         except Exception as e:
             print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)

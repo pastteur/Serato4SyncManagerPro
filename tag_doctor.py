@@ -1788,7 +1788,7 @@ def main():
         print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
-    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+    mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
 
     if args.list_crates:
         res = list_crates_and_subcrates(mp3_dir)

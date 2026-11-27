@@ -115,13 +115,30 @@ class SmartTagManager:
         new_comment = f"{free_text} {sorted_tags}".strip() if free_text else sorted_tags
 
         try:
-            try:
-                audio = ID3(str(path))
-            except Exception:
-                audio = ID3()
+            import shutil
+            import uuid
+            from journal import record_id3_before_change, record_operation_after
 
-            audio["COMM"] = COMM(encoding=3, lang="eng", desc="", text=new_comment)
-            audio.save(str(path), v2_version=3)
+            tmp_path = path.with_name(f".tmp_st_{path.name}_{uuid.uuid4().hex[:8]}")
+            try:
+                shutil.copy2(str(path), str(tmp_path))
+                try:
+                    audio = ID3(str(tmp_path))
+                except Exception:
+                    audio = ID3()
+
+                audio["COMM"] = COMM(encoding=3, lang="eng", desc="", text=new_comment)
+                audio.save(str(tmp_path), v2_version=3)
+
+                op_id = record_id3_before_change(str(path), action="smart_tags")
+                os.replace(str(tmp_path), str(path))
+                record_operation_after(op_id, str(path))
+            finally:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except Exception:
+                        pass
 
             return {
                 "sucesso": True,

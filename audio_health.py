@@ -1248,17 +1248,18 @@ def resample_track_local(filepath_str: str) -> dict:
             except Exception as e_chk:
                 return {"sucesso": False, "erro": f"Validação pós-conversão falhou: {e_chk}"}
 
-        # Backup de segurança na quarentena + Journal obrigatório
+        # Backup de segurança na quarentena + Journal obrigatório (fail-closed)
         quarantine_dir = get_quarantine_dir(file_path=file_p)
         quarantine_file = quarantine_dir / f"pre_resample_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{file_p.name}"
         shutil.copy2(str(file_p), str(quarantine_file))
 
         op_id = None
-        try:
-            from journal import record_id3_before_change, record_operation_after
-            op_id = record_id3_before_change(str(file_p), action="resample_44k")
-        except Exception:
-            pass
+        if file_p.suffix.lower() == ".mp3":
+            try:
+                from journal import record_id3_before_change, record_operation_after
+                op_id = record_id3_before_change(str(file_p), action="resample_44k")
+            except Exception as j_err:
+                return {"sucesso": False, "erro": f"Cancelado por segurança: Journal indisponível ({j_err})."}
 
         # Substituição atômica no mesmo sistema de arquivos
         os.replace(str(temp_out), str(file_p))
@@ -1266,8 +1267,13 @@ def resample_track_local(filepath_str: str) -> dict:
         if op_id is not None:
             try:
                 record_operation_after(op_id, str(file_p))
-            except Exception:
-                pass
+            except Exception as j_after_err:
+                if quarantine_file.exists():
+                    try:
+                        shutil.copy2(str(quarantine_file), str(file_p))
+                    except Exception:
+                        pass
+                return {"sucesso": False, "erro": f"Falha ao selar Journal pós-conversão (original restaurado): {j_after_err}"}
 
         return {
             "sucesso": True,
@@ -1419,7 +1425,7 @@ def main():
     parser.add_argument("--new-name", type=str, default="", help="Novo nome do arquivo")
 
     args = parser.parse_args()
-    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+    mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
     serato_dir = args.serato or ""
 
     if args.rename_track and args.new_name:

@@ -112,11 +112,29 @@ class TaxonomyCleaner:
             changed = (old_genre != new_genre) or (old_artist != new_artist)
 
             if changed and not dry_run:
-                if update_genre and new_genre:
-                    audio["TCON"] = TCON(encoding=3, text=new_genre)
-                if update_artist and new_artist:
-                    audio["TPE1"] = TPE1(encoding=3, text=new_artist)
-                audio.save(str(path), v2_version=3)
+                import shutil
+                import uuid
+                from journal import record_id3_before_change, record_operation_after
+
+                tmp_path = path.with_name(f".tmp_tax_{path.name}_{uuid.uuid4().hex[:8]}")
+                try:
+                    shutil.copy2(str(path), str(tmp_path))
+                    tmp_audio = ID3(str(tmp_path))
+                    if update_genre and new_genre:
+                        tmp_audio["TCON"] = TCON(encoding=3, text=new_genre)
+                    if update_artist and new_artist:
+                        tmp_audio["TPE1"] = TPE1(encoding=3, text=new_artist)
+                    tmp_audio.save(str(tmp_path), v2_version=3)
+
+                    op_id = record_id3_before_change(str(path), action="taxonomy_cleaner")
+                    os.replace(str(tmp_path), str(path))
+                    record_operation_after(op_id, str(path))
+                finally:
+                    if tmp_path.exists():
+                        try:
+                            tmp_path.unlink()
+                        except Exception:
+                            pass
 
             return {
                 "sucesso": True,

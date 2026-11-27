@@ -77,7 +77,7 @@ def compute_audio_seal(filepath_str: str) -> str:
             header = f.read(10)
             start_offset = 0
             if len(header) >= 10 and header[:3] == b'ID3':
-                size = (header[6] << 21) | (header[7] << 14) | (header[8] << 7) | header[9]
+                size = ((header[6] & 0x7F) << 21) | ((header[7] & 0x7F) << 14) | ((header[8] & 0x7F) << 7) | (header[9] & 0x7F)
                 start_offset = 10 + size
                 if header[5] & 0x10:
                     start_offset += 10
@@ -909,7 +909,7 @@ def main():
     parser.add_argument("--target-folder", type=str, default="", help="Pasta de destino para integração")
 
     args = parser.parse_args()
-    mp3_dir = args.mp3 or "/Volumes/Pastteyr/Music/MP3"
+    mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
 
     if args.replace_upgrades:
         try:
@@ -956,7 +956,7 @@ def main():
     if tracks:
         match_res = match_tracks_against_library(tracks, mp3_dir)
         if args.export_crate and match_res.get("encontradas"):
-            serato_dir = args.serato or "/Volumes/Pastteyr/Serato"
+            serato_dir = args.serato or str(Path.home() / "Music" / "_Serato_")
             exp_res = export_matched_to_serato_crate(args.export_crate, match_res["encontradas"], serato_dir)
             match_res["export_serato"] = exp_res
 

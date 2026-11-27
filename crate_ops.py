@@ -37,7 +37,7 @@ if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
 from serato_macos_app import (
-    parse_crate_binary, criar_tag_tlv, ler_faixas_crate_binaria, normalizar_nfc,
+    parse_crate_binary, parse_neworder_pref, criar_tag_tlv, ler_faixas_crate_binaria, normalizar_nfc,
 )
 
 
@@ -437,23 +437,53 @@ def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az") -
 
 
 def _update_neworder_pref_crate_name(serato: Path, old_clean_name: str, new_clean_name: str) -> None:
-    """Atualiza o nome da crate em neworder.pref caso o arquivo exista (UTF-16-BE ou UTF-8)."""
+    """Atualiza o nome da crate em neworder.pref preservando integralmente o formato binário TLV."""
     pref_path = serato / "neworder.pref"
     if not pref_path.exists():
         return
     try:
         raw = pref_path.read_bytes()
-        for enc in ('utf-16-be', 'utf-16', 'utf-8'):
-            try:
-                text = raw.decode(enc)
-                if old_clean_name in text:
-                    updated = text.replace(old_clean_name, new_clean_name)
-                    tmp_pref = pref_path.with_name(f".tmp_neworder_{uuid.uuid4().hex[:8]}")
-                    tmp_pref.write_bytes(updated.encode(enc))
-                    os.replace(str(tmp_pref), str(pref_path))
-                    return
-            except Exception:
-                continue
+        header, ordered_crates, outros_blocos = parse_neworder_pref(raw)
+        if header is None:
+            return
+
+        old_nfc = normalizar_nfc(old_clean_name)
+        new_nfc = normalizar_nfc(new_clean_name)
+
+        updated_crates: List[str] = []
+        changed = False
+        for name in ordered_crates:
+            norm_name = normalizar_nfc(name)
+            if norm_name == old_nfc:
+                candidate = new_nfc
+                changed = True
+            else:
+                candidate = norm_name
+            if candidate and candidate not in updated_crates:
+                updated_crates.append(candidate)
+
+        if not changed:
+            return
+
+        blocos_nior = []
+        for item in updated_crates:
+            nior = criar_tag_tlv('tvcn', normalizar_nfc(item))
+            blocos_nior.append(b'nior' + struct.pack('>I', len(nior)) + nior)
+
+        new_bytes = header + b''.join(outros_blocos) + b''.join(blocos_nior)
+        tmp_pref = pref_path.with_name(f".tmp_neworder_{uuid.uuid4().hex[:8]}")
+        try:
+            with open(tmp_pref, 'wb') as f:
+                f.write(new_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp_pref), str(pref_path))
+        finally:
+            if tmp_pref.exists():
+                try:
+                    tmp_pref.unlink()
+                except Exception:
+                    pass
     except Exception:
         pass
 

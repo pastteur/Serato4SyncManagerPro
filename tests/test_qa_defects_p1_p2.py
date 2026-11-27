@@ -441,3 +441,83 @@ def test_p1_p2_remediations_smoke(tmp_path, monkeypatch):
         capture_output=True, text=True, check=False
     )
     assert help_proc.returncode == 0
+
+
+def test_audit_bugfixes_neworder_pref_expand_paths_apply_batch_and_id3_journal(tmp_path, monkeypatch):
+    import json
+    import struct
+    import subprocess
+    import crate_ops
+    import sound_seal
+    import smart_tags
+    import taxonomy_cleaner
+    from mutagen.id3 import ID3, COMM, TCON, TPE1
+    from serato_macos_app import criar_tag_tlv, parse_neworder_pref
+
+    monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
+
+    # 1. crate_ops._update_neworder_pref_crate_name preserves TLV lengths in neworder.pref
+    serato_dir = tmp_path / "_Serato_"
+    subcrates = serato_dir / "Subcrates"
+    subcrates.mkdir(parents=True, exist_ok=True)
+    crate_ops.write_crate_atomic(subcrates / "House.crate", ["Music/House/Track.mp3"])
+    crate_ops.write_crate_atomic(subcrates / "Techno.crate", ["Music/Techno/Track.mp3"])
+
+    header = b"vrsn\x00\x00\x00\x08\x001\x00.\x000\x000"
+    extra_block = b"oext\x00\x00\x00\x04TEST"
+    nior_blocks = b""
+    for name in ("House", "Techno"):
+        tvcn = criar_tag_tlv("tvcn", name)
+        nior_blocks += b"nior" + struct.pack(">I", len(tvcn)) + tvcn
+    pref_path = serato_dir / "neworder.pref"
+    pref_path.write_bytes(header + extra_block + nior_blocks)
+
+    res_prefix = crate_ops.prefix_crate(str(serato_dir), "House", "01.")
+    assert res_prefix["sucesso"] is True
+    parsed_hdr, parsed_order, parsed_outros = parse_neworder_pref(pref_path.read_bytes())
+    assert parsed_hdr == header
+    assert parsed_outros == [extra_block]
+    assert parsed_order == ["01. House", "Techno"]
+
+    # 2. sound_seal._expand_target_candidates handles lowercased absolute paths against mixed-case root
+    mp3_mixed = tmp_path / "MixedCaseDrive" / "Music" / "MP3"
+    serato_mixed = tmp_path / "MixedCaseDrive" / "_Serato_"
+    mp3_mixed.mkdir(parents=True, exist_ok=True)
+    serato_mixed.mkdir(parents=True, exist_ok=True)
+    lowered_abs = sound_seal.norm_key(str(mp3_mixed / "Sub" / "Ghost.mp3"))
+    expanded = sound_seal._expand_target_candidates({lowered_abs}, serato_mixed, mp3_mixed)
+    assert "music/mp3/sub/ghost.mp3" in expanded
+    assert "sub/ghost.mp3" in expanded
+
+    # 3. auto_cue.py --apply-batch reports failure when a track is missing
+    batch_proc = subprocess.run(
+        [sys.executable, "auto_cue.py", "--apply-batch", json.dumps([str(tmp_path / "missing.mp3")])],
+        capture_output=True, text=True, check=False
+    )
+    assert batch_proc.returncode != 0
+    batch_data = json.loads(batch_proc.stdout.strip())
+    assert batch_data["sucesso"] is False
+    assert len(batch_data["erros"]) == 1
+
+    # 4. smart_tags and taxonomy_cleaner write atomically (ID3v2.3) and register in journal
+    mp3_tag = tmp_path / "TagTest.mp3"
+    mp3_tag.write_bytes((b"\xff\xfb\x90\x00" + b"\x00" * 413) * 10)
+    id3 = ID3()
+    id3["COMM"] = COMM(encoding=3, lang="eng", desc="", text="Original note")
+    id3["TCON"] = TCON(encoding=3, text="tech-house")
+    id3["TPE1"] = TPE1(encoding=3, text="Artist Featuring Guest")
+    id3.save(str(mp3_tag), v2_version=3)
+
+    st_res = smart_tags.SmartTagManager.update_tags(str(mp3_tag), tags_to_add=["#PeakTime"])
+    assert st_res["sucesso"] is True
+    assert "#PeakTime" in st_res["tags"]
+
+    tx_res = taxonomy_cleaner.TaxonomyCleaner.process_file(str(mp3_tag), dry_run=False)
+    assert tx_res["sucesso"] is True
+    assert tx_res["new_genre"] == "Tech House"
+    assert tx_res["new_artist"] == "Artist feat. Guest"
+
+    ops = journal.list_operations(limit=10)
+    actions = [op["acao"] for op in ops["items"]]
+    assert "smart_tags" in actions
+    assert "taxonomy_cleaner" in actions

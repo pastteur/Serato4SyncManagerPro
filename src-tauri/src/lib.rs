@@ -623,10 +623,6 @@ fn find_python_binary_with_app(app: Option<&AppHandle>) -> Result<PathBuf, Strin
     ))
 }
 
-fn find_python_binary() -> Result<PathBuf, String> {
-    find_python_binary_with_app(None)
-}
-
 fn find_canonical_python_script(app: Option<&AppHandle>, script_name: &str) -> Result<PathBuf, String> {
     let mut possible = Vec::new();
 
@@ -929,18 +925,44 @@ mod commands {
             0.0
         };
 
-        // 3. Disk Usage
-        let (disk_name, target_path) = if std::path::Path::new("/Volumes/Pastteyr").exists() {
-            ("Pastteyr".to_string(), "/Volumes/Pastteyr")
-        } else {
-            ("Macintosh HD".to_string(), "/")
-        };
+        // 3. Disk Usage: seleciona o primeiro volume externo de DJ montado (ou Macintosh HD)
+        let mut disk_name = "Macintosh HD".to_string();
+        let mut target_path_buf = PathBuf::from("/");
+        if let Ok(entries) = std::fs::read_dir("/Volumes") {
+            let mut candidates: Vec<(String, PathBuf)> = entries
+                .flatten()
+                .filter_map(|entry| {
+                    let p = entry.path();
+                    if !p.is_dir() {
+                        return None;
+                    }
+                    let name = p.file_name()?.to_str()?.to_string();
+                    if name.starts_with('.') || name.starts_with("Macintosh") {
+                        return None;
+                    }
+                    let has_dj_layout = p.join("Serato").is_dir()
+                        || p.join("_Serato_").is_dir()
+                        || p.join("Music").is_dir();
+                    if has_dj_layout {
+                        Some((name, p))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            candidates.sort_by(|a, b| a.0.cmp(&b.0));
+            if let Some((vol_name, vol_path)) = candidates.into_iter().next() {
+                disk_name = vol_name;
+                target_path_buf = vol_path;
+            }
+        }
+        let target_path = target_path_buf.to_string_lossy().to_string();
 
         let mut disk_free_gb = 0.0;
         let mut disk_total_gb = 0.0;
         let mut disk_percent = 0.0;
 
-        if let Ok(c_path) = std::ffi::CString::new(target_path) {
+        if let Ok(c_path) = std::ffi::CString::new(target_path.as_str()) {
             let mut stat: std::mem::MaybeUninit<libc::statvfs> = std::mem::MaybeUninit::uninit();
             if unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) } == 0 {
                 let stat = unsafe { stat.assume_init() };
@@ -1274,6 +1296,9 @@ mod commands {
     #[tauri::command]
     pub async fn open_in_browser(path_or_url: String) -> Result<(), String> {
         let trimmed = path_or_url.trim();
+        if trimmed.is_empty() {
+            return Err("Destino vazio para abertura no navegador.".into());
+        }
         let target = if let Some(rest) = trimmed.strip_prefix("~/") {
             if let Some(home) = dirs_home() {
                 home.join(rest).to_string_lossy().to_string()
@@ -1284,7 +1309,19 @@ mod commands {
             trimmed.to_string()
         };
 
+        let is_http_url = target.starts_with("https://") || target.starts_with("http://");
+        let target_path = Path::new(&target);
+        let is_local_html = target_path.is_file()
+            && matches!(
+                target_path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()).as_deref(),
+                Some("html") | Some("htm")
+            );
+        if !is_http_url && !is_local_html {
+            return Err("Destino inválido: apenas URLs http(s) ou relatórios HTML locais podem ser abertos.".into());
+        }
+
         Command::new("open")
+            .arg("--")
             .arg(&target)
             .spawn()
             .map_err(|e| format!("Falha ao abrir no navegador: {}", e))?;
@@ -1848,6 +1885,10 @@ mod commands {
             return Err(detail);
         }
 
+        if final_json.is_empty() {
+            return Err("O scanner de tags não retornou JSON válido.".into());
+        }
+
         Ok(final_json)
     }
 
@@ -1866,7 +1907,7 @@ mod commands {
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar tags nas músicas em lote")?;
         let script = find_canonical_python_script(Some(&app), "tag_doctor.py")?;
-        let python_bin = find_python_binary()?;
+        let python_bin = find_python_binary_with_app(Some(&app))?;
         let window_clone = window.clone();
 
         std::thread::spawn(move || {
@@ -2016,14 +2057,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "tag_doctor.py")?;
         cmd.arg("--restore-db");
         cmd.arg(&backup_path);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao restaurar banco: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            return Err(format!("Erro ao restaurar banco: {} {}", stdout, stderr));
-        }
-        Ok(stdout)
+        run_python_json_allow_domain_error(cmd, "Falha ao restaurar banco", "Erro ao restaurar banco")
     }
 
     #[tauri::command]
@@ -2132,13 +2166,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--restore");
         cmd.arg(&filepath);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao restaurar Hot Cues: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            return Err(stdout);
-        }
-        Ok(stdout)
+        run_python_json_allow_domain_error(cmd, "Falha ao restaurar Hot Cues", "Erro ao restaurar Hot Cues")
     }
 
     // ------------------------------------------------------------------
@@ -2319,6 +2347,32 @@ mod commands {
         Ok(stdout)
     }
 
+    /// Executa um comando Python que pode sair com código != 0 emitindo JSON estruturado
+    /// (`{"sucesso": false, "erro": ...}`) para o frontend, mas rejeita falhas sem JSON válido.
+    pub(crate) fn run_python_json_allow_domain_error(
+        mut cmd: Command,
+        spawn_err_prefix: &str,
+        exec_err_prefix: &str,
+    ) -> Result<String, String> {
+        let output = cmd.output().map_err(|e| format!("{}: {}", spawn_err_prefix, e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        if output.status.success() {
+            return Ok(stdout);
+        }
+        if let Some(json_val) = try_parse_json(&stdout) {
+            return Ok(json_val.to_string());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("código de saída {:?}", output.status.code())
+        };
+        Err(format!("{}: {}", exec_err_prefix, detail))
+    }
+
     /// Executa um script Python e devolve a resposta JSON de forma robusta e resiliente.
     fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
         let path = match find_canonical_python_script(Some(app), script) {
@@ -2346,20 +2400,14 @@ mod commands {
         let mut cmd = Command::new(&python_bin);
         cmd.env("PYTHONDONTWRITEBYTECODE", "1");
 
-        // Define diretório de trabalho onde o script reside e configura PYTHONPATH
+        // Define diretório de trabalho onde o script reside e configura PYTHONPATH com vendor completo
         if let Some(parent) = path.parent() {
             cmd.current_dir(parent);
-            let mut py_path_parts = vec![parent.to_string_lossy().to_string()];
-            let vendor_dir = parent.join("vendor");
-            if vendor_dir.is_dir() {
-                py_path_parts.push(vendor_dir.to_string_lossy().to_string());
+            let mut vendor_paths = vec![parent.to_path_buf()];
+            vendor_paths.extend(collect_vendor_paths(Some(app), Some(&path)));
+            if let Some(py_path) = build_pythonpath_env(&vendor_paths) {
+                cmd.env("PYTHONPATH", py_path);
             }
-            if let Ok(existing) = std::env::var("PYTHONPATH") {
-                if !existing.is_empty() {
-                    py_path_parts.push(existing);
-                }
-            }
-            cmd.env("PYTHONPATH", py_path_parts.join(":"));
         }
 
         if let Ok(current_path) = std::env::var("PATH") {
@@ -2546,11 +2594,13 @@ mod commands {
                 for line in BufReader::new(out).lines().map_while(Result::ok) {
                     let t = line.trim().to_string();
                     if t.starts_with('{') {
-                        if t.contains("\"tipo\": \"progresso\"") {
-                            let _ = window_clone.emit("duplicates-progress", &t);
-                        } else {
-                            final_json = t;
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&t) {
+                            if parsed.get("tipo").and_then(|v| v.as_str()) == Some("progresso") {
+                                let _ = window_clone.emit("duplicates-progress", &t);
+                                continue;
+                            }
                         }
+                        final_json = t;
                     }
                 }
             }
@@ -2581,6 +2631,9 @@ mod commands {
                 err_output
             };
             return Err(msg);
+        }
+        if final_json.is_empty() {
+            return Err("A análise de duplicados não retornou JSON válido.".into());
         }
         Ok(final_json)
     }
@@ -2980,13 +3033,7 @@ mod commands {
         cmd.arg(&rel_path);
         cmd.arg("--source-path");
         cmd.arg(&source_path);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao religar faixa: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            return Err(stdout);
-        }
-        Ok(stdout)
+        run_python_json_allow_domain_error(cmd, "Falha ao religar faixa", "Erro ao religar faixa")
     }
 
     #[tauri::command]
@@ -3287,13 +3334,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "audio_health.py")?;
         cmd.arg("--spectrogram");
         cmd.arg(&filepath);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao gerar espectrograma: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            return Err(stdout);
-        }
-        Ok(stdout)
+        run_python_json_allow_domain_error(cmd, "Falha ao gerar espectrograma", "Erro ao gerar espectrograma")
     }
 
     #[tauri::command]
@@ -3343,22 +3384,11 @@ mod commands {
                 }
             }
 
-            let res = match cmd.output() {
-                Ok(output) => {
-                    let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
-                    let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
-                    if !output.status.success() && stdout_str.trim().is_empty() {
-                        Err(format!(
-                            "Processo de reparação falhou (código {:?}): {}",
-                            output.status.code(),
-                            stderr_str
-                        ))
-                    } else {
-                        Ok(stdout_str)
-                    }
-                }
-                Err(e) => Err(format!("Falha ao executar motor de reparação: {}", e)),
-            };
+            let res = run_python_json_allow_domain_error(
+                cmd,
+                "Falha ao executar motor de reparação",
+                "Processo de reparação falhou",
+            );
             let _ = tx.send(res);
         });
 
@@ -3453,13 +3483,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--apply");
         cmd.arg(&filepath);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao aplicar Hot Cues: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            return Err(stdout);
-        }
-        Ok(stdout)
+        run_python_json_allow_domain_error(cmd, "Falha ao aplicar Hot Cues", "Erro ao aplicar Hot Cues")
     }
 
     #[tauri::command]
@@ -3647,13 +3671,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--apply-batch");
         cmd.arg(&filepaths_json);
-
-        let output = cmd.output().map_err(|e| format!("Falha ao aplicar lote de Hot Cues: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        if !output.status.success() {
-            return Err(stdout);
-        }
-        Ok(stdout)
+        run_python_json_allow_domain_error(cmd, "Falha ao aplicar lote de Hot Cues", "Erro ao aplicar lote de Hot Cues")
     }
 
     #[tauri::command]
@@ -3959,10 +3977,11 @@ mod commands {
         } else {
             None
         };
-        // Grava tracks_json em arquivo temporário para evitar estouro de buffer de linha de comando
+        // Grava tracks_json em arquivo temporário único para evitar estouro de buffer e colisão concorrente
         let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("pioneer_tracks_{}.json", std::process::id()));
+        let temp_file = temp_dir.join(format!("pioneer_tracks_{}.json", generate_operacao_id()));
         std::fs::write(&temp_file, tracks_json).map_err(|e| format!("Falha ao gravar arquivo temporário: {}", e))?;
+        let _temp_cleanup = crate::TempFileCleanup::new(temp_file.clone());
 
         let mut args = vec![
             "--usb".into(), usb_path,
@@ -3976,9 +3995,7 @@ mod commands {
             args.push("--dry-run".into());
         }
 
-        let res = run_py_json(&app, "pioneer_usb_exporter.py", &args);
-        let _ = std::fs::remove_file(temp_file);
-        res
+        run_py_json(&app, "pioneer_usb_exporter.py", &args)
     }
 
     #[tauri::command]
@@ -4598,7 +4615,7 @@ mod tests {
 
     #[test]
     fn test_find_python_binary_resolves_valid_runtime() {
-        let bin = find_python_binary();
+        let bin = find_python_binary_with_app(None);
         assert!(bin.is_ok(), "Esperava encontrar Python 3.9+ com mutagen: {:?}", bin);
     }
 
@@ -4836,6 +4853,18 @@ mod tests {
         ok_cmd.arg("-c").arg("echo '{\"sucesso\":true}'");
         let out = commands::run_python_output_checked(ok_cmd, "spawn", "exec").unwrap();
         assert!(out.contains("sucesso"));
+
+        // run_python_json_allow_domain_error preserves structured JSON error on non-zero exit
+        let mut domain_err_cmd = Command::new("/bin/sh");
+        domain_err_cmd.arg("-c").arg("echo '{\"sucesso\":false,\"erro\":\"bloqueado\"}'; exit 1");
+        let domain_out = commands::run_python_json_allow_domain_error(domain_err_cmd, "spawn", "exec").unwrap();
+        assert!(domain_out.contains("bloqueado"));
+
+        // run_python_json_allow_domain_error rejects non-JSON crash on non-zero exit
+        let mut crash_cmd = Command::new("/bin/sh");
+        crash_cmd.arg("-c").arg("echo 'Traceback fatal' >&2; exit 1");
+        let crash_err = commands::run_python_json_allow_domain_error(crash_cmd, "spawn", "exec").unwrap_err();
+        assert!(crash_err.contains("Traceback fatal"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

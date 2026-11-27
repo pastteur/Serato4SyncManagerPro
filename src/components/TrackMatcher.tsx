@@ -623,7 +623,7 @@ export const TrackMatcher: React.FC<TrackMatcherProps> = ({
                 type="text"
                 value={inputData}
                 onChange={(e) => setInputData(e.target.value)}
-                placeholder="Selecione ou cole o caminho da pasta de novos MP3s baixados (ex: /Users/pastteur/Downloads/Pack2026)..."
+                placeholder="Selecione ou cole o caminho da pasta de novos MP3s baixados (ex: ~/Downloads/Pack2026)..."
                 className="flex-1 bg-serato-dark border border-serato-cardBorder px-3 py-1.5 text-xs rounded text-slate-200 placeholder-slate-500 font-mono focus:outline-none focus:border-serato-gold"
               />
               <button

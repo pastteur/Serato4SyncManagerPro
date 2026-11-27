@@ -31,14 +31,14 @@ export const Header: React.FC<HeaderProps> = ({ isRunning, mp3Path, seratoPath, 
   
   const [telemetry, setTelemetry] = useState<SystemTelemetry>({
     cpu_percent: 0,
-    ram_used_gb: 4.8,
-    ram_total_gb: 8.0,
-    ram_percent: 60,
-    disk_name: 'Pastteyr',
-    disk_free_gb: 72.9,
-    disk_total_gb: 238.3,
-    disk_percent: 69,
-    serato_running: true
+    ram_used_gb: 0,
+    ram_total_gb: 0,
+    ram_percent: 0,
+    disk_name: 'Macintosh HD',
+    disk_free_gb: 0,
+    disk_total_gb: 0,
+    disk_percent: 0,
+    serato_running: false
   });
 
   useEffect(() => {

@@ -466,9 +466,13 @@ export const OrphanFilesModal: React.FC<OrphanFilesModalProps> = ({
                               count: 1,
                               variant: 'danger',
                               action: async () => {
-                                const ok = await onMoveToTrash(file.filepath, file.filepath);
-                                if (ok) {
-                                  removeFilesFromState(new Set([file.filepath]));
+                                try {
+                                  const ok = await onMoveToTrash(file.filepath, file.filepath);
+                                  if (ok) {
+                                    removeFilesFromState(new Set([file.filepath]));
+                                  }
+                                } finally {
+                                  setConfirmConfig(prev => ({ ...prev, isOpen: false }));
                                 }
                               },
                             });
