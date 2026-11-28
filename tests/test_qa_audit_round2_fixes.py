@@ -326,3 +326,88 @@ def test_qa008_preserves_unknown_otrk_subblocks_across_crate_ops(tmp_path, monke
     _, tracks_m, otrk_blocks_m, _ = serato_macos_app.parse_crate_binary(merged_path.read_bytes(), strict=True)
     assert len(tracks_m) == 2
     assert any(custom_sub in blk for _, blk in otrk_blocks_m)
+
+
+# =============================================================================
+# Regra Crítica: Relink / Relocate NUNCA copia nem move arquivos de áudio
+# =============================================================================
+
+def test_relink_updates_only_logical_references_without_copying_audio(tmp_path, monkeypatch):
+    import sound_seal
+    monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
+    monkeypatch.setattr(sound_seal, "DB_PATH", tmp_path / "seals.sqlite")
+
+    mp3_dir = tmp_path / "Music" / "MP3"
+    serato_dir = tmp_path / "_Serato_"
+    subcrates = serato_dir / "Subcrates"
+    subcrates.mkdir(parents=True)
+
+    # Faixa foi movida de Black/OldSub/Hit.mp3 para Black/00/Hit.mp3 e OldSub foi apagada
+    new_dir = mp3_dir / "Black" / "00"
+    new_dir.mkdir(parents=True)
+    moved_song = new_dir / "Hit.mp3"
+    moved_song.write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00" + (b"\xff\xfb\x90\x00" + b"\x11" * 413) * 20)
+
+    old_dir = mp3_dir / "Black" / "OldSub"
+    old_abs_deleted = old_dir / "Hit.mp3"
+    old_rel = os.path.relpath(old_abs_deleted, crate_ops.library_root_for(serato_dir))
+    new_rel = os.path.relpath(moved_song, crate_ops.library_root_for(serato_dir))
+
+    # Crate com sub-bloco extra dentro de otrk apontando para caminho antigo
+    header = b"vrsn\x00\x00\x00\x08\x001\x00.\x000\x000"
+    ptrk_old = serato_macos_app.criar_tag_tlv("ptrk", old_rel)
+    custom_sub = b"osub\x00\x00\x00\x04KEEP"
+    otrk_crate = b"otrk" + struct.pack(">I", len(ptrk_old + custom_sub)) + ptrk_old + custom_sub
+    crate_path = subcrates / "Black%%00.crate"
+    crate_path.write_bytes(header + otrk_crate)
+
+    # database V2 apontando para caminho antigo + metadado extra
+    db_header = b"vrsn\x00\x00\x00\x08\x002\x00.\x000\x000".ljust(72, b"\x00")
+    pfil_old = serato_macos_app.criar_tag_tlv("pfil", old_rel)
+    tsng = serato_macos_app.criar_tag_tlv("tsng", "Hit Song")
+    db_otrk = b"otrk" + struct.pack(">I", len(pfil_old + tsng)) + pfil_old + tsng
+    db_path = serato_dir / "database V2"
+    db_path.write_bytes(db_header + db_otrk)
+
+    res = sound_seal.relink_track(
+        str(mp3_dir),
+        old_rel,
+        str(moved_song),
+        serato_dir_str=str(serato_dir),
+    )
+    assert res["sucesso"] is True, res
+    assert res["crates_atualizadas"] == 1
+    assert res["database_v2_atualizadas"] == 1
+
+    # 1. Pasta antiga NÃO foi recriada e nenhum MP3 foi copiado
+    assert not old_dir.exists()
+    assert not old_abs_deleted.exists()
+    all_mp3s = list(mp3_dir.rglob("*.mp3"))
+    assert all_mp3s == [moved_song]
+
+    # 2. Crate aponta para novo caminho lógico e preserva sub-bloco `osub`
+    _, tracks_after, otrk_after, _ = serato_macos_app.parse_crate_binary(crate_path.read_bytes(), strict=True)
+    assert tracks_after == [serato_macos_app.normalizar_nfc(new_rel)]
+    assert any(custom_sub in blk for _, blk in otrk_after)
+
+    # 3. database V2 aponta para novo caminho lógico e preserva `tsng`
+    db_bytes = db_path.read_bytes()
+    assert new_rel.encode("utf-16-be") in db_bytes
+    assert old_rel.encode("utf-16-be") not in db_bytes
+    assert tsng in db_bytes
+
+    # 4. Arquivo na Lixeira (.Trashes) não deve ser copiado nem movido
+    trash_dir = tmp_path / ".Trashes" / "501"
+    trash_dir.mkdir(parents=True)
+    trashed = trash_dir / "Deleted.mp3"
+    trashed.write_bytes(b"MP3")
+    res_trash = sound_seal.relink_track(
+        str(mp3_dir),
+        "Music/MP3/Old/Deleted.mp3",
+        str(trashed),
+        serato_dir_str=str(serato_dir),
+    )
+    assert res_trash["sucesso"] is False
+    assert trashed.exists()
+    assert not (mp3_dir / "Old" / "Deleted.mp3").exists()
+

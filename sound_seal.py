@@ -842,95 +842,382 @@ def scan_missing_and_relocate(serato_dir_str: str, mp3_dir_str: str, stream_json
     return res
 
 
-def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str):
+def _resolve_relink_serato_dir(mp3_base: Path, serato_dir_str: str = "") -> Path:
+    """Resolve a pasta _Serato_ alvo para atualizações lógicas de referência."""
+    if serato_dir_str and str(serato_dir_str).strip():
+        return resolve_serato_dir(serato_dir_str)
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        vol_serato = Path(parts[0]) / parts[1] / parts[2] / "_Serato_"
+        try:
+            if vol_serato.exists():
+                return vol_serato
+        except (PermissionError, OSError):
+            pass
+    parent_serato = mp3_base.resolve().parent / "_Serato_"
+    try:
+        if parent_serato.exists():
+            return parent_serato
+    except (PermissionError, OSError):
+        pass
+    try:
+        home_serato = Path.home() / "Music" / "_Serato_"
+        if home_serato.exists():
+            return resolve_serato_dir(str(home_serato))
+    except (PermissionError, OSError):
+        pass
+    return parent_serato
+
+
+def _compute_logical_serato_rel_path(source_path: Path, serato_dir: Path, mp3_base: Path) -> str:
+    """Calcula o caminho relativo lógico esperado pelo Serato para `source_path` sem mover/copiar o arquivo."""
+    from crate_ops import library_root_for
+    from serato_macos_app import normalizar_nfc
+
+    src_res = source_path.resolve()
+    lib_root = library_root_for(serato_dir).resolve()
+    try:
+        return normalizar_nfc(str(src_res.relative_to(lib_root)))
+    except ValueError:
+        pass
+
+    parts = mp3_base.resolve().parts
+    if len(parts) >= 3 and parts[1] == 'Volumes':
+        vol_root = (Path(parts[0]) / parts[1] / parts[2]).resolve()
+        try:
+            return normalizar_nfc(str(src_res.relative_to(vol_root)))
+        except ValueError:
+            pass
+
+    return normalizar_nfc(str(src_res))
+
+
+def _rewrite_otrk_pfil(block: bytes, new_rel_path: str) -> bytes:
+    """Atualiza o sub-bloco `pfil` dentro de um registro `otrk` da database V2 preservando todos os demais sub-blocos."""
+    import struct
+    if len(block) < 8 or block[:4] != b'otrk':
+        return block
+
+    payload = block[8:]
+    pos = 0
+    rebuilt = []
+    replaced = False
+    new_pfil_val = new_rel_path.encode('utf-16-be')
+
+    while pos + 8 <= len(payload):
+        sub_tag = payload[pos:pos+4]
+        sub_len = struct.unpack('>I', payload[pos+4:pos+8])[0]
+        sub_end = pos + 8 + sub_len
+        if sub_end > len(payload):
+            return block
+        if sub_tag == b'pfil' and not replaced:
+            rebuilt.append(b'pfil' + struct.pack('>I', len(new_pfil_val)) + new_pfil_val)
+            replaced = True
+        else:
+            rebuilt.append(payload[pos:sub_end])
+        pos = sub_end
+
+    if pos < len(payload):
+        rebuilt.append(payload[pos:])
+
+    if not replaced:
+        return block
+
+    new_payload = b''.join(rebuilt)
+    return b'otrk' + struct.pack('>I', len(new_payload)) + new_payload
+
+
+def _relink_in_database_v2(db_file: Path, replacements: list) -> int:
     """
-    Restaura ou religa o arquivo de som ao local esperado pela crate do Serato.
-    Se a fonte estiver em .Trashes, move de volta; caso contrário, copia.
-    Possui validação estrita contra travessia de diretório (../).
+    Atualiza caminhos `pfil` em database V2 com backup verificado e escrita atômica.
+    `replacements` é uma lista de tuplas (old_candidates_set, new_rel_path).
+    Nunca copia ou move arquivos de áudio.
+    """
+    if not db_file.exists() or not replacements:
+        return 0
+    try:
+        data = db_file.read_bytes()
+        if len(data) < 72:
+            return 0
+        header = data[:72]
+        pos = 72
+        new_blocks = []
+        updated = 0
+
+        while pos + 8 <= len(data):
+            tag = data[pos:pos+4]
+            length = int.from_bytes(data[pos+4:pos+8], byteorder='big')
+            block_end = pos + 8 + length
+            if block_end > len(data):
+                new_blocks.append(data[pos:])
+                break
+            block = data[pos:block_end]
+
+            if tag == b'otrk':
+                p_idx = block.find(b'pfil')
+                if p_idx != -1 and p_idx + 8 <= len(block):
+                    p_len = int.from_bytes(block[p_idx+4:p_idx+8], byteorder='big')
+                    if p_idx + 8 + p_len <= len(block):
+                        rel_p = block[p_idx+8:p_idx+8+p_len].decode('utf-16-be', errors='ignore').strip()
+                        norm_p = norm_key(rel_p)
+                        for old_cands, new_rel in replacements:
+                            if norm_p in old_cands:
+                                block = _rewrite_otrk_pfil(block, new_rel)
+                                updated += 1
+                                break
+
+            new_blocks.append(block)
+            pos = block_end
+
+        if pos < len(data) and not new_blocks:
+            new_blocks.append(data[pos:])
+
+        if updated > 0:
+            import shutil
+            import uuid
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            bak = db_file.parent / f"database_V2_{ts}.bak"
+            shutil.copy2(str(db_file), str(bak))
+            if not bak.exists() or bak.stat().st_size != db_file.stat().st_size:
+                raise IOError("Falha na criação/verificação de backup do database V2")
+
+            temp_db = db_file.with_name(f".tmp_db_{uuid.uuid4().hex[:8]}")
+            new_db_content = header + b''.join(new_blocks)
+            try:
+                with open(temp_db, 'wb') as f:
+                    f.write(new_db_content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if not temp_db.exists() or temp_db.stat().st_size < len(header):
+                    raise IOError("Arquivo temporário do database V2 incompleto.")
+                os.replace(str(temp_db), str(db_file))
+            finally:
+                if temp_db.exists():
+                    try:
+                        temp_db.unlink()
+                    except Exception:
+                        pass
+        return updated
+    except Exception as e:
+        print(f"Erro ao atualizar database V2 no relink: {e}", file=sys.stderr)
+        return 0
+
+
+def _apply_logical_relink_batch(mp3_base_dir: str, relink_items: list, serato_dir_str: str = "", stream_json: bool = False):
+    """
+    Atualiza EXCLUSIVAMENTE as referências lógicas em `.crate`, `database V2` e SQLite v4.
+    REGRA CRÍTICA: Jamais copia, move ou duplica arquivos de áudio no disco.
+    """
+    from crate_ops import read_and_validate_crate_full, write_crate_atomic
+    from serato_macos_app import normalizar_nfc
+
+    mp3_base = Path(os.path.expanduser(mp3_base_dir)).resolve()
+
+    valid_entries = []
+    errors = []
+    total = len(relink_items)
+
+    if stream_json:
+        print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
+
+    pre_validated = []
+    for item in relink_items:
+        rel_p = item.get("rel_path") or item.get("faixa_perdida", "")
+        src_p = item.get("source_path") or item.get("candidato_caminho", "")
+
+        if not validate_safe_relative_path(rel_p):
+            errors.append(
+                f"Caminho inseguro rejeitado por segurança (travessia de diretório detectada com '..'): {rel_p}"
+            )
+            continue
+
+        if not src_p or not str(src_p).strip():
+            errors.append(f"{rel_p}: Caminho do arquivo localizado não informado.")
+            continue
+
+        src = Path(os.path.expanduser(str(src_p)))
+        if ".Trashes" in str(src) or ".Trash" in str(src):
+            errors.append(
+                f"{rel_p}: Arquivo está na Lixeira (.Trashes). Restaure-o manualmente para a biblioteca antes de atualizar referências lógicas (cópia/movimentação automática desativada)."
+            )
+            continue
+
+        if not src.exists() or not src.is_file():
+            errors.append(f"{rel_p}: Arquivo de som de origem não encontrado em {src}.")
+            continue
+
+        pre_validated.append((rel_p, src))
+
+    if not pre_validated:
+        if stream_json:
+            print(json.dumps({
+                "tipo": "fim",
+                "sucesso": False,
+                "sucesso_parcial": False,
+                "total": total,
+                "atualizados": 0,
+                "erros": errors[:10],
+            }, ensure_ascii=False), flush=True)
+        return {
+            "sucesso": False,
+            "erro": errors[0] if errors else "Nenhuma faixa válida para atualização lógica.",
+            "erros": errors,
+            "atualizados": 0,
+            "crates_atualizadas": 0,
+            "database_v2_atualizadas": 0,
+        }
+
+    serato_dir = _resolve_relink_serato_dir(mp3_base, serato_dir_str)
+    subcrates_dir = serato_dir / "Subcrates"
+
+    for rel_p, src in pre_validated:
+        new_rel = _compute_logical_serato_rel_path(src, serato_dir, mp3_base)
+        old_cands = _expand_target_candidates({norm_key(os.path.normpath(rel_p.strip()))}, serato_dir, mp3_base)
+        valid_entries.append((rel_p, src, old_cands, new_rel))
+
+    # 1. Atualiza referências lógicas nas .crates (passagem única por crate)
+    crates_updated = 0
+    matched_entries = set()
+    if subcrates_dir.exists():
+        for crate_file in sorted(subcrates_dir.glob("*.crate")):
+            if crate_file.name.startswith("._") or crate_file.name.startswith("."):
+                continue
+            try:
+                header_bytes, tracks_list, otrk_blocks, outros_blocos = read_and_validate_crate_full(crate_file)
+                if not tracks_list:
+                    continue
+
+                otrk_by_idx = [blk for _, blk in otrk_blocks]
+                new_tracks = []
+                new_track_blocks = []
+                seen_norm = set()
+                changed = False
+
+                for t_idx, t_rel in enumerate(tracks_list):
+                    raw_blk = otrk_by_idx[t_idx] if t_idx < len(otrk_by_idx) else None
+                    norm_t = norm_key(t_rel)
+                    replaced_rel = None
+                    for e_idx, (_, _, old_cands, new_rel) in enumerate(valid_entries):
+                        if norm_t in old_cands:
+                            replaced_rel = new_rel
+                            matched_entries.add(e_idx)
+                            changed = True
+                            break
+
+                    target_rel = normalizar_nfc(replaced_rel if replaced_rel is not None else t_rel)
+                    dedup_key = norm_key(target_rel)
+                    if dedup_key in seen_norm:
+                        changed = True
+                        continue
+                    seen_norm.add(dedup_key)
+                    new_tracks.append(target_rel)
+                    if raw_blk is not None:
+                        new_track_blocks.append((target_rel, raw_blk))
+
+                if changed:
+                    wres = write_crate_atomic(
+                        crate_file,
+                        new_tracks,
+                        header_antigo=header_bytes,
+                        outros_blocos=outros_blocos,
+                        action_name="relink_logical",
+                        track_blocks=new_track_blocks,
+                    )
+                    if wres.get("sucesso"):
+                        crates_updated += 1
+                    else:
+                        errors.append(f"{crate_file.name}: {wres.get('erro')}")
+            except Exception as e_cr:
+                errors.append(f"{crate_file.name}: {e_cr}")
+
+    # 2. Atualiza referências lógicas em database V2
+    db_replacements = [(old_cands, new_rel) for _, _, old_cands, new_rel in valid_entries]
+    db_updated = 0
+    db_file = serato_dir / "database V2"
+    if db_file.exists():
+        db_updated = _relink_in_database_v2(db_file, db_replacements)
+
+    # 3. Atualiza localizações no Serato DJ 4 SQLite quando aplicável
+    try:
+        from serato_v4_engine import SeratoV4Engine
+        v4 = SeratoV4Engine(str(serato_dir))
+        if v4.is_serato_v4():
+            for rel_p, src, _, new_rel in valid_entries:
+                v4.update_track_location(rel_p, new_rel)
+                v4.update_track_location(str(src), str(src.resolve()))
+    except Exception:
+        pass
+
+    atualizados = len(valid_entries) if (crates_updated > 0 or db_updated > 0) else 0
+    if stream_json:
+        for idx, (rel_p, _, _, _) in enumerate(valid_entries, 1):
+            pct = round((idx / max(1, total)) * 100, 1)
+            print(json.dumps({
+                "tipo": "progresso",
+                "processados": idx,
+                "total": total,
+                "percentual": pct,
+                "atualizados": idx if atualizados > 0 else 0,
+                "faixa_atual": Path(rel_p).name,
+            }, ensure_ascii=False), flush=True)
+
+        has_errors = len(errors) > 0
+        print(json.dumps({
+            "tipo": "fim",
+            "sucesso": not has_errors,
+            "sucesso_parcial": (has_errors and atualizados > 0),
+            "total": total,
+            "atualizados": atualizados,
+            "crates_atualizadas": crates_updated,
+            "database_v2_atualizadas": db_updated,
+            "erros": errors[:10],
+        }, ensure_ascii=False), flush=True)
+
+    return {
+        "sucesso": len(errors) == 0,
+        "atualizados": atualizados,
+        "crates_atualizadas": crates_updated,
+        "database_v2_atualizadas": db_updated,
+        "erros": errors,
+        "novo_caminho_rel": valid_entries[0][3] if len(valid_entries) == 1 else None,
+        "mensagem": (
+            f"Referência lógica atualizada em {crates_updated} crate(s) e {db_updated} registro(s) do database V2 "
+            "(nenhum arquivo de áudio foi copiado ou movido)."
+        ),
+    }
+
+
+def relink_track(mp3_base_dir: str, rel_path: str, source_path_str: str, serato_dir_str: str = ""):
+    """
+    Atualiza apenas as referências lógicas nas Crates e no database V2 do Serato
+    para apontar para o novo caminho existente do arquivo em disco.
+    NUNCA copia, move ou duplica arquivos de áudio na biblioteca.
     """
     if not validate_safe_relative_path(rel_path):
         return {
             "sucesso": False,
             "erro": f"Caminho inseguro rejeitado por segurança (travessia de diretório detectada com '..'): {rel_path}"
         }
-
-    mp3_base = Path(os.path.expanduser(mp3_base_dir)).resolve()
-    try:
-        target_path = get_serato_target_path(rel_path, mp3_base)
-        target_res = target_path.resolve()
-        # Validação contra fuga de diretório autorizado
-        allowed_roots = [mp3_base]
-        try:
-            allowed_roots.append(Path("/Volumes").resolve())
-        except (PermissionError, OSError):
-            pass
-        try:
-            allowed_roots.append(Path.home().resolve())
-        except (PermissionError, OSError):
-            pass
-        if not any(str(target_res).startswith(str(r)) for r in allowed_roots):
-            return {"sucesso": False, "erro": f"Destino fora do diretório autorizado: {target_res}"}
-    except Exception as e:
-        return {"sucesso": False, "erro": f"Caminho inválido: {e}"}
-
-    src = Path(source_path_str)
-
-    if not src.exists():
-        return {"sucesso": False, "erro": "Arquivo de som de origem não encontrado."}
-
-    try:
-        import shutil
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        if ".Trashes" in str(src) or ".Trash" in str(src):
-            shutil.move(str(src), str(target_path))
-        else:
-            shutil.copy2(str(src), str(target_path))
-        return {
-            "sucesso": True,
-            "arquivo": target_path.name,
-            "destino": str(target_path),
-            "mensagem": f"Faixa religada com sucesso ao Serato em: {target_path}"
-        }
-    except Exception as e:
-        return {"sucesso": False, "erro": str(e)}
+    res = _apply_logical_relink_batch(
+        mp3_base_dir,
+        [{"rel_path": rel_path, "source_path": source_path_str}],
+        serato_dir_str=serato_dir_str,
+        stream_json=False,
+    )
+    if res.get("sucesso"):
+        res["arquivo"] = Path(source_path_str).name
+        res["destino"] = res.get("novo_caminho_rel") or source_path_str
+    return res
 
 
-def batch_relink_tracks(mp3_base_dir: str, relink_items: list):
-    """Executa a relocalização/restauração em lote para todas as correspondências confirmadas."""
-    total = len(relink_items)
-    print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
-
-    relinked = 0
-    errors = []
-
-    for idx, item in enumerate(relink_items, 1):
-        rel_p = item.get("rel_path") or item.get("faixa_perdida", "")
-        src_p = item.get("source_path") or item.get("candidato_caminho", "")
-        res = relink_track(mp3_base_dir, rel_p, src_p)
-        if res.get("sucesso"):
-            relinked += 1
-        else:
-            errors.append(f"{rel_p}: {res.get('erro')}")
-
-        pct = round((idx / total) * 100, 1)
-        print(json.dumps({
-            "tipo": "progresso",
-            "processados": idx,
-            "total": total,
-            "percentual": pct,
-            "atualizados": relinked,
-            "faixa_atual": Path(rel_p).name
-        }, ensure_ascii=False), flush=True)
-
-    has_errors = len(errors) > 0
-    print(json.dumps({
-        "tipo": "fim",
-        "sucesso": not has_errors,
-        "sucesso_parcial": (has_errors and relinked > 0),
-        "total": total,
-        "atualizados": relinked,
-        "erros": errors[:10]
-    }, ensure_ascii=False), flush=True)
+def batch_relink_tracks(mp3_base_dir: str, relink_items: list, serato_dir_str: str = ""):
+    """Executa a atualização lógica em lote nas Crates e database V2 sem copiar arquivos de áudio."""
+    return _apply_logical_relink_batch(
+        mp3_base_dir,
+        relink_items,
+        serato_dir_str=serato_dir_str,
+        stream_json=True,
+    )
 
 
 def remove_from_database_v2(
@@ -1337,9 +1624,10 @@ def main():
         sys.exit(0)
 
     mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
+    serato_arg = args.serato or ""
 
     if args.relink:
-        res = relink_track(mp3_dir, args.rel_path, args.source_path)
+        res = relink_track(mp3_dir, args.rel_path, args.source_path, serato_dir_str=serato_arg)
         print(json.dumps(res, ensure_ascii=False), flush=True)
         sys.exit(0 if res.get("sucesso") else 1)
 
@@ -1350,7 +1638,7 @@ def main():
             else:
                 with open(args.batch_relink, 'r', encoding='utf-8') as f:
                     items = json.load(f)
-            batch_relink_tracks(mp3_dir, items)
+            batch_relink_tracks(mp3_dir, items, serato_dir_str=serato_arg)
             sys.exit(0)
         except Exception as e:
             print(json.dumps({"tipo": "fim", "sucesso": False, "erro": str(e)}), flush=True)

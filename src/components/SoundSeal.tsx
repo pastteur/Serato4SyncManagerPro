@@ -974,14 +974,15 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     });
   };
 
-  // Religar faixa individual
+  // Religar faixa individual (somente referências lógicas nas crates/database V2)
   const handleRelinkSingle = async (relPath: string, sourcePath: string, nome: string) => {
-    onAddLog(`⚡ Relocate: Religando ${nome} ao Serato...`);
+    onAddLog(`⚡ Relocate: Atualizando referência lógica de ${nome} no Serato...`);
     try {
       if (isTauri) {
         const { invoke } = await import('@tauri-apps/api/core');
         const resJson = await invoke<string>('relink_track', {
           mp3Path,
+          seratoPath: seratoPath || null,
           relPath,
           sourcePath
         });
@@ -1020,9 +1021,9 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
     const count = selectedRelinkItems.size;
     setModalConfig({
       isOpen: true,
-      title: 'Religar Faixas ao Serato',
-      message: `Deseja religar automaticamente as ${count} faixas perdidas selecionadas ao Serato?\n\nOs arquivos encontrados serão restaurados aos seus locais esperados para tocar imediatamente.`,
-      confirmText: `Religar ${count} Faixas`,
+      title: 'Atualizar Referências no Serato',
+      message: `Deseja atualizar apenas as referências lógicas das ${count} faixas selecionadas nas Crates e no database V2?\n\nNenhum arquivo MP3/áudio será copiado ou movido na sua biblioteca de músicas.`,
+      confirmText: `Atualizar ${count} Referências`,
       variant: 'info',
       onConfirm: async () => {
         setModalConfig(prev => ({ ...prev, isOpen: false }));
@@ -1032,10 +1033,10 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
           total: count,
           percentual: 0,
           atualizados: 0,
-          faixa_atual: 'Iniciando relocalização...'
+          faixa_atual: 'Atualizando referências lógicas...'
         });
 
-        onAddLog(`⚡ Disparando relocalização em massa de ${count} faixas perdidas...`);
+        onAddLog(`⚡ Atualizando referências lógicas em lote de ${count} faixas (sem copiar áudio)...`);
 
         try {
           if (isTauri) {
@@ -1043,6 +1044,7 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
             const items = Array.from(selectedRelinkItems.values());
             await invoke('batch_relink_tracks', {
               mp3Path,
+              seratoPath: seratoPath || null,
               itemsJson: JSON.stringify(items)
             });
           }
@@ -1134,10 +1136,10 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                 onClick={handleBatchRelink}
                 disabled={isScanningRelocate || isRelinkingBatch || selectedRelinkItems.size === 0}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-serato-cyan to-blue-500 hover:opacity-90 text-black shadow-lg shadow-serato-cyan/20 transition disabled:opacity-30 cursor-pointer"
-                title="Restaura e religa todas as faixas encontradas com alta precisão"
+                title="Atualiza apenas as referências lógicas nas Crates e database V2 do Serato (sem copiar ou mover áudios)"
               >
                 <Zap className={`w-3.5 h-3.5 ${isRelinkingBatch ? 'animate-bounce' : ''}`} />
-                <span>{isRelinkingBatch ? 'Religando...' : `⚡ Religar Selecionadas (${selectedRelinkItems.size})`}</span>
+                <span>{isRelinkingBatch ? 'Atualizando Referências...' : `⚡ Atualizar Referências (${selectedRelinkItems.size})`}</span>
               </button>
 
               <button
@@ -1833,12 +1835,6 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                                 const next = new Map(prev);
                                 if (next.has(item.faixa_perdida)) {
                                   next.delete(item.faixa_perdida);
-                                } else if (item.in_trash && item.trash_path) {
-                                  next.set(item.faixa_perdida, {
-                                    rel_path: item.faixa_perdida,
-                                    source_path: item.trash_path,
-                                    nome: item.nome
-                                  });
                                 } else if (bestCandidate) {
                                   next.set(item.faixa_perdida, {
                                     rel_path: item.faixa_perdida,
@@ -1862,16 +1858,9 @@ export const SoundSeal: React.FC<SoundSealProps> = ({
                         <div className="flex items-center gap-2">
                           {item.in_trash && (
                             <div className="flex items-center gap-2">
-                              <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-bold font-mono">
-                                ⚠️ ENCONTRADO NA LIXEIRA (.Trashes)
+                              <span className="text-[10px] bg-amber-950/60 text-amber-300 px-2 py-0.5 rounded border border-amber-800/40 font-bold font-mono" title="Arquivo está na Lixeira (.Trashes). Restaure manualmente no Finder caso queira utilizá-lo.">
+                                ⚠️ NA LIXEIRA (.Trashes)
                               </span>
-                              <button
-                                type="button"
-                                onClick={() => handleRelinkSingle(item.faixa_perdida, item.trash_path, item.nome)}
-                                className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-400 text-black font-bold text-[10px] cursor-pointer"
-                              >
-                                Restaurar do Lixo ♻️
-                              </button>
                             </div>
                           )}
 

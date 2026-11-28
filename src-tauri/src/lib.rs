@@ -3072,6 +3072,7 @@ mod commands {
     pub async fn relink_track(
         app: AppHandle,
         mp3_path: String,
+        serato_path: Option<String>,
         rel_path: String,
         source_path: String,
     ) -> Result<String, String> {
@@ -3080,6 +3081,12 @@ mod commands {
         cmd.arg("--relink");
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
+        if let Some(sp) = serato_path {
+            if !sp.trim().is_empty() {
+                cmd.arg("--serato");
+                cmd.arg(sp.trim());
+            }
+        }
         cmd.arg("--rel-path");
         cmd.arg(&rel_path);
         cmd.arg("--source-path");
@@ -3092,6 +3099,7 @@ mod commands {
         app: AppHandle,
         window: Window,
         mp3_path: String,
+        serato_path: Option<String>,
         items_json: String,
     ) -> Result<(), String> {
         let guard = bloqueio_serato_e_concorrencia(Some(&app), "religar faixas ausentes em lote")?;
@@ -3100,6 +3108,12 @@ mod commands {
         cmd.arg(&items_json);
         cmd.arg("--mp3");
         cmd.arg(&mp3_path);
+        if let Some(sp) = serato_path {
+            if !sp.trim().is_empty() {
+                cmd.arg("--serato");
+                cmd.arg(sp.trim());
+            }
+        }
 
         run_streaming_py_event_job(
             cmd,
