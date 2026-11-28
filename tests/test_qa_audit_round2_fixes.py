@@ -411,3 +411,68 @@ def test_relink_updates_only_logical_references_without_copying_audio(tmp_path, 
     assert trashed.exists()
     assert not (mp3_dir / "Old" / "Deleted.mp3").exists()
 
+
+def test_snapshot_audio_fingerprint_detects_head_middle_tail_and_preserves_sha256(tmp_path):
+    large = tmp_path / "LargeTrack.mp3"
+    base = bytearray(b"ID3" + b"\x00" * 350000)
+    large.write_bytes(base)
+
+    fp_orig = serato_macos_app._snapshot_audio_fingerprint(large)
+    sha_full = serato_macos_app._sha256_file(large)
+    assert len(fp_orig) == 64
+    assert len(sha_full) == 64
+
+    # Alteração no início (< 64 KB)
+    mod_head = bytearray(base)
+    mod_head[100] = 0xAA
+    large.write_bytes(mod_head)
+    assert serato_macos_app._snapshot_audio_fingerprint(large) != fp_orig
+
+    # Alteração no meio exato
+    mod_mid = bytearray(base)
+    mod_mid[len(base) // 2] = 0xBB
+    large.write_bytes(mod_mid)
+    assert serato_macos_app._snapshot_audio_fingerprint(large) != fp_orig
+
+    # Alteração no rodapé (últimos 64 KB)
+    mod_tail = bytearray(base)
+    mod_tail[-10] = 0xCC
+    large.write_bytes(mod_tail)
+    assert serato_macos_app._snapshot_audio_fingerprint(large) != fp_orig
+
+    # Restaura exatamente
+    large.write_bytes(base)
+    assert serato_macos_app._snapshot_audio_fingerprint(large) == fp_orig
+
+
+def test_dry_run_plan_invalidation_with_large_track_fast_fingerprint(tmp_path, monkeypatch):
+    import journal
+    monkeypatch.setattr(journal, "JOURNAL_PATH", tmp_path / "journal.sqlite")
+    mp3_dir = tmp_path / "Music" / "MP3"
+    serato_dir = tmp_path / "_Serato_"
+    logs_dir = tmp_path / "logs"
+
+    track = mp3_dir / "House" / "BigTrack.mp3"
+    track.parent.mkdir(parents=True)
+    payload = bytearray(b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\xff" * 320000)
+    track.write_bytes(payload)
+
+    ok_dry, res_dry = serato_macos_app.sincronizar_biblioteca(
+        str(mp3_dir), str(serato_dir), str(logs_dir), export_csv=False, dry_run=True
+    )
+    assert ok_dry is True
+    plan = res_dry["plan"]
+    st_before = track.stat()
+
+    # Altera byte no meio mantendo tamanho e restaurando mtime original para forçar validação pelo fingerprint
+    payload[len(payload) // 2] = 0x11
+    track.write_bytes(payload)
+    os.utime(track, ns=(st_before.st_atime_ns, st_before.st_mtime_ns))
+
+    ok_exec, res_exec = serato_macos_app.sincronizar_biblioteca(
+        str(mp3_dir), str(serato_dir), str(logs_dir), export_csv=False, dry_run=False, plan=plan
+    )
+    assert ok_exec is False
+    assert res_exec["plan_invalidated"] is True
+
+

@@ -26,7 +26,7 @@ import hashlib
 import uuid
 import base64
 import threading
-import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 # Garante flushing imediato de logs em stdout/stderr para captura em tempo real
@@ -495,17 +495,65 @@ def _build_plan_hash(plan_payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _compute_sha256_batch(paths: list) -> dict:
-    """Calcula SHA-256 integral de uma lista de caminhos em paralelo preservando exatidão."""
+_SNAPSHOT_FULL_HASH_LIMIT = 262144  # 256 KB: arquivos pequenos usam SHA-256 integral
+_SNAPSHOT_SAMPLE_WINDOW = 65536      # 64 KB: amostras início + meio + fim (192 KB max/faixa)
+
+
+def _snapshot_audio_fingerprint(filepath: Path) -> str:
+    """
+    Calcula assinatura SHA-256 rápida para validação de snapshot de plano imutável.
+    - Arquivos <= 256 KB: SHA-256 integral de todo o conteúdo.
+    - Arquivos > 256 KB: SHA-256 do tamanho exato + blocos de 64 KB do início, meio e fim,
+      evitando reler dezenas/centenas de GB em discos externos USB a cada Análise.
+    """
+    try:
+        with open(filepath, 'rb') as f:
+            size = os.fstat(f.fileno()).st_size
+            h = hashlib.sha256()
+            if size <= _SNAPSHOT_FULL_HASH_LIMIT:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                return h.hexdigest()
+
+            h.update(b"SNAP2:")
+            h.update(struct.pack('>Q', size))
+            h.update(f.read(_SNAPSHOT_SAMPLE_WINDOW))
+            mid_offset = max(0, (size // 2) - (_SNAPSHOT_SAMPLE_WINDOW // 2))
+            f.seek(mid_offset)
+            h.update(f.read(_SNAPSHOT_SAMPLE_WINDOW))
+            tail_offset = max(0, size - _SNAPSHOT_SAMPLE_WINDOW)
+            f.seek(tail_offset)
+            h.update(f.read(_SNAPSHOT_SAMPLE_WINDOW))
+            return h.hexdigest()
+    except Exception:
+        return ""
+
+
+def _compute_sha256_batch(paths: list, fast_snapshot: bool = False, progress_label: str = None) -> dict:
+    """Calcula assinaturas SHA-256 em paralelo com controle de concorrência para discos externos."""
     if not paths:
         return {}
-    if len(paths) <= 16:
-        return {p: _sha256_file(p) for p in paths}
-    max_workers = min(8, max(2, os.cpu_count() or 4))
+    hash_fn = _snapshot_audio_fingerprint if fast_snapshot else _sha256_file
+    total = len(paths)
+    if total <= 16:
+        return {p: hash_fn(p) for p in paths}
+
+    is_external = any(str(p).startswith("/Volumes/") for p in paths[: min(5, total)])
+    max_workers = 2 if is_external else min(8, max(2, os.cpu_count() or 4))
     results = {}
+    last_log = time.monotonic()
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        for p, digest in zip(paths, pool.map(_sha256_file, paths, chunksize=16)):
+        for idx, (p, digest) in enumerate(zip(paths, pool.map(hash_fn, paths, chunksize=16)), start=1):
             results[p] = digest
+            if progress_label and total >= 100 and (idx % 500 == 0 or idx == total):
+                now = time.monotonic()
+                if now - last_log >= 2.0 or idx == total:
+                    pct = int((idx / total) * 100)
+                    print(f"   ⏳ {progress_label}: {idx}/{total} faixas verificadas ({pct}%)...", flush=True)
+                    last_log = now
     return results
 
 
@@ -514,6 +562,8 @@ def _scan_audio_files_snapshot(path_mp3: Path) -> tuple:
     snapshot = {}
     erros = []
     pending_paths = []
+    last_walk_log = time.monotonic()
+    dirs_scanned = 0
 
     def _on_err(os_err):
         erros.append(str(os_err))
@@ -522,6 +572,11 @@ def _scan_audio_files_snapshot(path_mp3: Path) -> tuple:
         caminho_atual = Path(raiz)
         if any(part.startswith('.') for part in caminho_atual.parts):
             continue
+        dirs_scanned += 1
+        try:
+            dir_resolved = caminho_atual.resolve()
+        except OSError:
+            dir_resolved = caminho_atual
         for arq in arquivos:
             if arq.startswith('._') or arq.startswith('.'):
                 continue
@@ -532,7 +587,8 @@ def _scan_audio_files_snapshot(path_mp3: Path) -> tuple:
                 continue
             try:
                 st = caminho_completo.stat()
-                abs_str = normalizar_nfc(str(caminho_completo.resolve()))
+                abs_resolved = caminho_completo.resolve() if caminho_completo.is_symlink() else (dir_resolved / arq)
+                abs_str = normalizar_nfc(str(abs_resolved))
                 snapshot[abs_str] = {
                     "abs_path": abs_str,
                     "size": st.st_size,
@@ -542,9 +598,18 @@ def _scan_audio_files_snapshot(path_mp3: Path) -> tuple:
                 pending_paths.append((abs_str, caminho_completo))
             except OSError as e:
                 erros.append(f"{caminho_completo}: {e}")
+        if dirs_scanned % 25 == 0:
+            now = time.monotonic()
+            if now - last_walk_log >= 2.0:
+                print(f"   🔎 Revalidando snapshot: {dirs_scanned} pastas, {len(pending_paths)} faixas...", flush=True)
+                last_walk_log = now
 
     if pending_paths:
-        digests = _compute_sha256_batch([p for _, p in pending_paths])
+        digests = _compute_sha256_batch(
+            [p for _, p in pending_paths],
+            fast_snapshot=True,
+            progress_label="Validando snapshot das faixas",
+        )
         for abs_str, p in pending_paths:
             snapshot[abs_str]["sha256"] = digests.get(p, "")
 
@@ -845,12 +910,21 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             erros_leitura.append(err_msg)
             print(f"   ⚠️ [ERRO DE I/O] {err_msg}", file=sys.stderr, flush=True)
 
+        pastas_varridas = 0
+        ultimo_progresso_walk = time.monotonic()
+
         for raiz, _, arquivos in os.walk(str(path_mp3), onerror=on_walk_error):
             caminho_atual = Path(raiz)
 
             # Filtro de arquivos ocultos do macOS (._*, .DS_Store, .Trash)
             if any(part.startswith('.') for part in caminho_atual.parts):
                 continue
+
+            pastas_varridas += 1
+            try:
+                dir_resolved = caminho_atual.resolve()
+            except OSError:
+                dir_resolved = caminho_atual
 
             musicas_pasta_relativas = []
             arquivos_abs_map = {}
@@ -863,7 +937,8 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
 
                 caminho_completo = caminho_atual / arq
                 if caminho_completo.suffix.lower() in AUDIO_EXTENSIONS:
-                    if caminho_completo.is_symlink() and not caminho_completo.exists():
+                    is_link = caminho_completo.is_symlink()
+                    if is_link and not caminho_completo.exists():
                         if not dry_run:
                             broken_symlinks.append(caminho_completo)
                         continue
@@ -884,15 +959,16 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
 
                     tamanho_total_pasta += tamanho
                     nome_nfc = normalizar_nfc(arq)
-                    abs_resolved_str = normalizar_nfc(str(caminho_completo.resolve()))
+                    abs_resolved = caminho_completo.resolve() if is_link else (dir_resolved / arq)
+                    abs_resolved_str = normalizar_nfc(str(abs_resolved))
 
                     # Regra de caminho relativo estrito (separado do caminho absoluto real)
                     try:
-                        relativo = caminho_completo.resolve().relative_to(raiz_relativa)
+                        relativo = abs_resolved.relative_to(raiz_relativa)
                         relativo_str = normalizar_nfc(str(relativo))
                     except ValueError:
                         try:
-                            relativo = caminho_completo.resolve().relative_to(path_mp3)
+                            relativo = abs_resolved.relative_to(path_mp3)
                             relativo_str = normalizar_nfc(str(relativo))
                         except ValueError:
                             relativo_str = abs_resolved_str
@@ -1057,11 +1133,28 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                     "faixas_removidas": faixas_removidas,
                 })
 
+            if pastas_varridas % 25 == 0:
+                agora_ts = time.monotonic()
+                if agora_ts - ultimo_progresso_walk >= 2.0:
+                    print(
+                        f"   📂 Varrendo pastas... {pastas_varridas} pasta(s) | {total_faixas} faixa(s) mapeada(s)",
+                        flush=True,
+                    )
+                    ultimo_progresso_walk = agora_ts
+
         # ==========================================================================
         # FASE 2: PLANEJAMENTO
         # ==========================================================================
         if dry_run and arquivos_plan_records and not varredura_incompleta:
-            plan_digests = _compute_sha256_batch([rec["_path_obj"] for rec in arquivos_plan_records])
+            print(
+                f"   🔐 Gerando assinatura de verificação para {len(arquivos_plan_records)} faixa(s)...",
+                flush=True,
+            )
+            plan_digests = _compute_sha256_batch(
+                [rec["_path_obj"] for rec in arquivos_plan_records],
+                fast_snapshot=True,
+                progress_label="Assinando faixas do plano",
+            )
             for rec in arquivos_plan_records:
                 p_obj = rec.pop("_path_obj", None)
                 rec["sha256"] = plan_digests.get(p_obj, "") if p_obj is not None else ""
