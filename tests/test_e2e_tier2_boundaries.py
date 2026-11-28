@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SERATO 4 SYNC MANAGER PRO - E2E TEST SUITE TIER 2: BOUNDARIES & CORNER CASES
+SERATO 5 SYNC MANAGER PRO - E2E TEST SUITE TIER 2: BOUNDARIES & CORNER CASES
 ================================================================================
 Comprehensive boundary, edge-case, and security defense verification across all 11
 engine subsystems. Strictly non-destructive, isolated in hermetic sandbox.

@@ -4,16 +4,21 @@ import { X, ShieldCheck, AlertTriangle, CheckCircle2, Database, RefreshCw, Folde
 interface SeratoV4Report {
   library_dir: string;
   v4_detected: boolean;
+  v5_features_detected?: boolean;
+  serato_generation?: string;
   healthy: boolean;
   master_exists: boolean;
   root_exists: boolean;
   location_exists: boolean;
   locations_count?: number;
+  streaming_dbs?: Record<string, boolean>;
   db_uuid: string | null;
   user_version: number | null;
   autosync_disabled: number | null;
   v3_migration_status: string;
   containers_count: number;
+  assets_count?: number;
+  smart_crate_rules_count?: number;
   triggers_count: number;
   warnings: string[];
   errors: string[];
@@ -73,17 +78,17 @@ export const SeratoV4AuditModal: React.FC<SeratoV4AuditModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold text-white flex items-center gap-2">
-                Auditoria de Integridade Serato DJ Pro v4
+                Auditoria de Integridade Serato DJ Pro 5
                 <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
                   report?.v4_detected
                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
                     : 'bg-slate-800 text-slate-400 border-slate-700'
                 }`}>
-                  {report?.v4_detected ? 'v4 SQLite Ativo' : 'v3 Legado'}
+                  {report?.v5_features_detected ? 'v5 SQLite + Streaming' : report?.v4_detected ? 'v4/v5 SQLite Ativo' : 'v3 Legado'}
                 </span>
               </h3>
               <p className="text-xs text-slate-400">
-                Inspeciona integridade de triggers, schema SQLite e status de migração.
+                Inspeciona triggers, schema SQLite, ponte dbv2 e bancos de streaming do Serato 5.
               </p>
             </div>
           </div>
@@ -116,7 +121,7 @@ export const SeratoV4AuditModal: React.FC<SeratoV4AuditModalProps> = ({
                   )}
                   <div>
                     <div className="text-sm font-bold text-white">
-                      {report.healthy ? 'Banco Serato 4 Íntegro e Saudável' : 'Avisos de Inconsistência na Base'}
+                      {report.healthy ? 'Banco Serato 5 Íntegro e Saudável' : 'Avisos de Inconsistência na Base'}
                     </div>
                     <div className="text-xs text-slate-400">
                       {report.v3_migration_status}
@@ -156,7 +161,7 @@ export const SeratoV4AuditModal: React.FC<SeratoV4AuditModalProps> = ({
               {/* Arquivos de Banco */}
               <div className="p-3 bg-slate-900/40 border border-slate-800 rounded-xl space-y-1.5 text-xs">
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] uppercase font-mono text-slate-400 font-bold">Diretório do Banco Serato v4:</span>
+                  <span className="text-[10px] uppercase font-mono text-slate-400 font-bold">Diretório do Banco Serato 5:</span>
                   <span className="text-[10px] font-mono text-serato-cyan truncate max-w-[280px]" title={report.library_dir}>
                     {report.library_dir}
                   </span>
@@ -179,6 +184,30 @@ export const SeratoV4AuditModal: React.FC<SeratoV4AuditModalProps> = ({
                     {report.location_exists ? `PRESENTE (${report.locations_count ? `${report.locations_count} locais` : 'OK'})` : 'AUSENTE'}
                   </span>
                 </div>
+                {(report.assets_count !== undefined || report.smart_crate_rules_count !== undefined) && (
+                  <div className="flex items-center justify-between text-slate-300 font-mono text-[11px]">
+                    <span>Faixas (assets) / Smart Rules:</span>
+                    <span className="text-serato-cyan font-bold">
+                      {report.assets_count ?? 0} assets • {report.smart_crate_rules_count ?? 0} regras
+                    </span>
+                  </div>
+                )}
+                {report.streaming_dbs && (
+                  <div className="pt-1.5 border-t border-white/5 flex flex-wrap gap-1.5">
+                    {Object.entries(report.streaming_dbs).map(([name, present]) => (
+                      <span
+                        key={name}
+                        className={`text-[10px] font-mono px-2 py-0.5 rounded border ${
+                          present
+                            ? 'bg-serato-cyan/10 text-serato-cyan border-serato-cyan/30'
+                            : 'bg-slate-900 text-slate-500 border-slate-800'
+                        }`}
+                      >
+                        {name}: {present ? 'ON' : 'OFF'}
+                      </span>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Erros / Avisos */}

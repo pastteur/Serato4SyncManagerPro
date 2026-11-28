@@ -16,32 +16,34 @@ import { AutoCueGenerator } from './components/AutoCueGenerator';
 import { LibraryTools } from './components/LibraryTools';
 import { LexiconSuite } from './components/LexiconSuite';
 import { PioneerExportModal } from './components/PioneerExportModal';
+import { AnalyticsDashboard } from './components/AnalyticsDashboard';
 import { AudioPlayerBar, PlayingTrackInfo } from './components/AudioPlayerBar';
 import { LogEntry, SyncSummary } from './types';
-import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2, X, Library, Sun, Moon, Zap } from 'lucide-react';
+import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History, Activity, Target, Loader2, X, Library, Sun, Moon, Zap, BarChart3 } from 'lucide-react';
 
 
-type TabId = 'logs' | 'duplicates' | 'tree' | 'library' | 'matcher' | 'soundSeal' | 'tagDoctor' | 'health' | 'autoCue' | 'backups' | 'lexiconSuite';
+type TabId = 'logs' | 'analytics' | 'duplicates' | 'tree' | 'library' | 'matcher' | 'soundSeal' | 'tagDoctor' | 'health' | 'autoCue' | 'backups' | 'lexiconSuite';
 
-const TAB_META: Record<TabId, { label: string; icon: React.ComponentType<{ className?: string }>; iconClass: string }> = {
-  logs: { label: 'Terminal & Sync', icon: Terminal, iconClass: '' },
-  duplicates: { label: 'Duplicados', icon: Copy, iconClass: '' },
-  tree: { label: 'Estrutura de Crates', icon: FolderTree, iconClass: '' },
-  library: { label: 'Biblioteca', icon: Library, iconClass: '' },
-  matcher: { label: 'Track Matcher', icon: Music, iconClass: '' },
-  soundSeal: { label: 'Sound Seal & Relocate', icon: Shield, iconClass: '' },
-  lexiconSuite: { label: 'Universal DJ Tools', icon: Zap, iconClass: 'text-amber-400' },
-  tagDoctor: { label: 'Tag Doctor', icon: Sparkles, iconClass: '' },
-  health: { label: 'Audio Health', icon: Activity, iconClass: '' },
-  autoCue: { label: 'Auto-Cue', icon: Target, iconClass: '' },
-  backups: { label: 'Backups', icon: History, iconClass: '' },
+const TAB_META: Record<TabId, { label: string; subtitle: string; icon: React.ComponentType<{ className?: string }>; iconClass: string }> = {
+  logs: { label: 'Terminal & Sync', subtitle: 'Sincronização segura de Crates', icon: Terminal, iconClass: '' },
+  analytics: { label: 'Analytics & Gráficos', subtitle: 'Saúde, BPM, Keys e performance', icon: BarChart3, iconClass: 'text-serato-cyan' },
+  duplicates: { label: 'Duplicados', subtitle: 'Detecção por hash e título', icon: Copy, iconClass: '' },
+  tree: { label: 'Estrutura de Crates', subtitle: 'Árvore visual de playlists', icon: FolderTree, iconClass: '' },
+  library: { label: 'Biblioteca', subtitle: 'Explorar faixas e metadados', icon: Library, iconClass: '' },
+  matcher: { label: 'Track Matcher', subtitle: 'Upgrade preservando Cues/Stems', icon: Music, iconClass: '' },
+  soundSeal: { label: 'Sound Seal & Relocate', subtitle: 'Assinatura SHA-256 e realocação', icon: Shield, iconClass: '' },
+  lexiconSuite: { label: 'Universal DJ Tools', subtitle: 'Rekordbox, Traktor e USB', icon: Zap, iconClass: 'text-amber-400' },
+  tagDoctor: { label: 'Tag Doctor', subtitle: 'Normalização ID3v2.3 e limpeza', icon: Sparkles, iconClass: '' },
+  health: { label: 'Audio Health', subtitle: 'Auditoria de clipping e bitrate', icon: Activity, iconClass: '' },
+  autoCue: { label: 'Auto-Cue', subtitle: 'Hot Cues inteligentes por frase', icon: Target, iconClass: '' },
+  backups: { label: 'Backups', subtitle: 'Quarentena e restauração', icon: History, iconClass: '' },
 };
 
 const TAB_GROUPS: { label: string; tabs: TabId[] }[] = [
-  { label: 'Sincronização', tabs: ['logs', 'duplicates', 'tree'] },
-  { label: 'Biblioteca & Tools', tabs: ['library', 'matcher', 'soundSeal', 'lexiconSuite'] },
-  { label: 'Tags e áudio', tabs: ['tagDoctor', 'health', 'autoCue'] },
-  { label: 'Segurança', tabs: ['backups'] },
+  { label: 'Comando & Sync', tabs: ['logs', 'analytics', 'tree', 'duplicates'] },
+  { label: 'Biblioteca & Upgrades', tabs: ['library', 'matcher', 'soundSeal', 'lexiconSuite'] },
+  { label: 'Áudio & Tags (Serato 5)', tabs: ['autoCue', 'tagDoctor', 'health'] },
+  { label: 'Proteção', tabs: ['backups'] },
 ];
 
 // Tauri API dynamic loader
@@ -678,7 +680,7 @@ export const App: React.FC = () => {
   }, [isGuideOpen, isRunning, mp3Path, seratoPath, handleStartSync]);
 
   return (
-    <div className="flex flex-col h-screen bg-serato-dark text-slate-100 overflow-hidden font-sans select-none">
+    <div className="flex flex-col h-screen bg-futuristic-deck text-slate-100 overflow-hidden font-sans select-none">
       <Header
         isRunning={isRunning}
         mp3Path={mp3Path}
@@ -800,7 +802,7 @@ export const App: React.FC = () => {
           <div className="bg-serato-cyan/15 border border-serato-cyan/50 px-3 py-1.5 rounded-lg flex items-center justify-between text-xs shrink-0 animate-pulse">
             <span className="flex items-center gap-2 text-serato-cyan font-bold">
               <Loader2 className="w-3.5 h-3.5 animate-spin text-serato-cyan" />
-              <span>Sincronização Serato 4 ativa em segundo plano...</span>
+              <span>Sincronização Serato 5 ativa em segundo plano...</span>
             </span>
             <button
               type="button"
@@ -814,10 +816,10 @@ export const App: React.FC = () => {
 
         <div className="flex-1 min-h-0 flex gap-3 overflow-hidden">
           {/* Navegação lateral agrupada */}
-          <nav className="w-52 shrink-0 flex flex-col gap-3 overflow-y-auto pr-1" aria-label="Seções do aplicativo">
+          <nav className="w-60 shrink-0 flex flex-col gap-3 overflow-y-auto p-2 rounded-2xl glass-panel border border-serato-cardBorder/80" aria-label="Seções do aplicativo">
             {TAB_GROUPS.map(group => (
-              <div key={group.label} className="space-y-0.5">
-                <div className="px-2.5 pb-0.5 text-[10px] font-semibold uppercase tracking-wider text-serato-muted">{group.label}</div>
+              <div key={group.label} className="space-y-1">
+                <div className="px-2.5 pb-0.5 text-[10px] font-mono font-bold uppercase tracking-widest text-serato-cyan/70">{group.label}</div>
                 {group.tabs.map(id => {
                   const meta = TAB_META[id];
                   const Icon = meta.icon;
@@ -831,17 +833,30 @@ export const App: React.FC = () => {
                       type="button"
                       onClick={() => setActiveTab(id)}
                       aria-current={active ? 'page' : undefined}
-                      className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold text-left transition cursor-pointer border ${
+                      title={meta.subtitle}
+                      className={`group relative w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl text-left transition-all duration-150 cursor-pointer border ${
                         active
-                          ? 'bg-serato-cyan/10 text-serato-cyan border-serato-cyan/40'
-                          : 'text-serato-muted hover:text-white hover:bg-serato-hover border-transparent'
+                          ? 'bg-gradient-to-r from-serato-cyan/15 to-serato-purple/10 text-white border-serato-cyan/40 shadow-glow-cyan'
+                          : 'text-serato-muted hover:text-white hover:bg-serato-hover/70 border-transparent'
                       }`}
                     >
-                      <Icon className="w-3.5 h-3.5 shrink-0" />
-                      <span className="truncate flex-1">{meta.label}</span>
+                      {active && (
+                        <span className="absolute left-0 top-2 bottom-2 w-0.5 rounded-r bg-serato-cyan" />
+                      )}
+                      <div className={`p-1.5 rounded-lg border shrink-0 transition ${
+                        active
+                          ? 'bg-serato-cyan/15 border-serato-cyan/40 text-serato-cyan'
+                          : 'bg-serato-card/70 border-serato-cardBorder/70 text-serato-muted group-hover:text-white'
+                      }`}>
+                        <Icon className={`w-3.5 h-3.5 ${meta.iconClass}`} />
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-semibold truncate leading-tight">{meta.label}</div>
+                        <div className="text-[10px] text-serato-muted truncate leading-tight mt-0.5">{meta.subtitle}</div>
+                      </div>
                       {id === 'logs' && isRunning && <Loader2 className="w-3 h-3 animate-spin text-serato-cyan shrink-0" />}
                       {badge !== null && (
-                        <span className="text-[10px] bg-serato-card text-serato-muted px-1.5 rounded-full border border-serato-cardBorder font-mono shrink-0">
+                        <span className="text-[10px] bg-serato-card text-serato-cyan px-1.5 py-0.5 rounded-full border border-serato-cyan/30 font-mono shrink-0">
                           {badge}
                         </span>
                       )}
@@ -871,11 +886,40 @@ export const App: React.FC = () => {
 
           {/* Conteúdo persistente das abas: montadas em background com 'hidden' para não interromper atividades */}
           <div className="flex-1 min-w-0 min-h-0 overflow-hidden flex flex-col relative">
+            {/* Barra contextual do módulo ativo */}
+            <div className="mb-2 px-3.5 py-2 rounded-xl glass-panel border border-serato-cardBorder/80 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5 min-w-0">
+                {(() => {
+                  const ActiveIcon = TAB_META[activeTab].icon;
+                  return <ActiveIcon className="w-4 h-4 text-serato-cyan shrink-0" />;
+                })()}
+                <div className="flex items-baseline gap-2 min-w-0">
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-white shrink-0">
+                    {TAB_META[activeTab].label}
+                  </h2>
+                  <span className="text-[11px] text-serato-muted truncate">
+                    — {TAB_META[activeTab].subtitle}
+                  </span>
+                </div>
+              </div>
+              <span className="hidden sm:inline-flex items-center gap-1.5 text-[10px] font-mono text-serato-muted bg-serato-card/80 px-2 py-0.5 rounded-md border border-serato-cardBorder">
+                <span className="w-1.5 h-1.5 rounded-full bg-serato-cyan" />
+                Serato 5 Ready • ⌘1–9
+              </span>
+            </div>
             <div className={activeTab === 'logs' ? 'flex-1 min-h-0 flex flex-col h-full' : 'hidden'}>
               <TerminalLogs
                 logs={logs}
                 onClear={() => setLogs([])}
                 isRunning={isRunning}
+              />
+            </div>
+
+            <div className={activeTab === 'analytics' ? 'flex-1 min-h-0 overflow-y-auto pr-1 flex flex-col' : 'hidden'}>
+              <AnalyticsDashboard
+                mp3Path={mp3Path}
+                seratoPath={seratoPath}
+                onAddLog={addLog}
               />
             </div>
 

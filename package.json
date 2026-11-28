@@ -1,7 +1,7 @@
 {
-  "name": "serato4-sync-manager-pro",
+  "name": "serato5-sync-manager-pro",
   "private": true,
-  "version": "1.0.0",
+  "version": "5.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

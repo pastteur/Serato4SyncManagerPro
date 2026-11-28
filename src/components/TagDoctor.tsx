@@ -117,9 +117,11 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
 
   const [backupStatus, setBackupStatus] = useState<string | null>(null);
-  const [showSmartFixes, setShowSmartFixes] = useState<boolean>(false);
+  const [showSmartFixes, setShowSmartFixes] = useState<boolean>(true);
   const [undoStatus, setUndoStatus] = useState<string | null>(null);
   const [isSmartFixRunning, setIsSmartFixRunning] = useState<boolean>(false);
+  const [commonTextModalOpen, setCommonTextModalOpen] = useState<boolean>(false);
+  const [commonTextInput, setCommonTextInput] = useState<string>('');
 
   // Modal de Confirmação em Tela
   const [modalConfig, setModalConfig] = useState<{
@@ -571,18 +573,25 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
 
   // Execução de Smart Fixes Rápidos (Lexicon Inspired)
   const handleApplySmartFix = async (recipeName: string, label: string, param?: string) => {
-    const targetFiles = selectedIds.size > 0
+    let targetFiles = selectedIds.size > 0
       ? items.filter(it => selectedIds.has(it.id)).map(it => it.caminho)
       : items.map(it => it.caminho);
 
     if (targetFiles.length === 0) {
+      if (!mp3Path) {
+        alert('Selecione a pasta MP3 Master no topo antes de aplicar correções.');
+        return;
+      }
       setModalConfig({
         isOpen: true,
-        title: 'Nenhuma Música Selecionada',
-        message: 'Por favor, selecione ao menos uma música ou carregue a lista para aplicar o Smart Fix.',
-        confirmText: 'OK',
+        title: 'Nenhuma Música Carregada na Tabela',
+        message: 'A lista de faixas está vazia. Deseja realizar uma varredura agora para carregar as faixas e aplicar este Smart Fix?',
+        confirmText: 'Escanear Agora',
         variant: 'info',
-        onConfirm: () => setModalConfig(prev => ({ ...prev, isOpen: false }))
+        onConfirm: async () => {
+          setModalConfig(prev => ({ ...prev, isOpen: false }));
+          await loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
+        }
       });
       return;
     }
@@ -614,19 +623,32 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
           });
           const data = JSON.parse(resJson);
           if (data.sucesso) {
-            onAddLog(`✅ Smart Fix '${label}' aplicado com sucesso! (${data.affected_count} alterados).`);
+            onAddLog(`✅ Smart Fix '${label}' aplicado com sucesso! (${data.affected_count || 0} alterados).`);
             setUndoStatus(`↩️ Desfazer '${label}'`);
             loadScan(1, searchTerm, selectedCrate, selectedSubcrate, includeSubcrates);
           } else {
-            alert(`Falha no Smart Fix: ${data.errors?.join(', ') || 'Erro desconhecido'}`);
+            const errDetail = data.erro || data.erros?.join(', ') || data.errors?.join(', ') || 'Erro desconhecido';
+            onAddLog(`❌ Falha no Smart Fix: ${errDetail}`);
+            alert(`Falha no Smart Fix: ${errDetail}`);
           }
         } catch (e: any) {
+          onAddLog(`❌ Erro ao executar Smart Fix: ${e}`);
           alert(`Erro ao executar Smart Fix: ${e}`);
         } finally {
           setIsSmartFixRunning(false);
         }
       }
     });
+  };
+
+  const handleConfirmRemoveCommonText = () => {
+    const textToRemove = commonTextInput.trim();
+    if (!textToRemove) {
+      alert('Digite o texto ou palavra que deseja remover.');
+      return;
+    }
+    setCommonTextModalOpen(false);
+    handleApplySmartFix('remove_common_text', `Remover Texto "${textToRemove}"`, textToRemove);
   };
 
   const handleUndoSmartFix = async () => {
@@ -1019,6 +1041,16 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
 
           <button
             type="button"
+            onClick={() => handleApplySmartFix('extract_mix_from_title', 'Extract Mix From Title')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+            title="Extrai e padroniza mix do título (ex: Extended Mix -> (Extended Mix))"
+          >
+            🎛️ Extract Mix
+          </button>
+
+          <button
+            type="button"
             onClick={() => handleApplySmartFix('add_mix_parentheses', 'Add Mix Parentheses')}
             disabled={isSmartFixRunning}
             className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
@@ -1060,6 +1092,36 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
             className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
           >
             🔗 Remove URLs
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setCommonTextModalOpen(true)}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded text-[10px] font-medium transition cursor-pointer"
+            title="Remove uma palavra ou frase arbitrária repetida em várias músicas (ex: [DJ Pack])"
+          >
+            ✂️ Remove Common Text...
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('genre_cleanup', 'Genre Cleanup (Taxonomia)')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/80 rounded text-[10px] font-medium transition cursor-pointer"
+            title="Padroniza variações de gênero (ex: tech-house -> Tech House)"
+          >
+            🏷️ Genre Cleanup
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleApplySmartFix('artist_cleanup', 'Artist Cleanup (Colaborações)')}
+            disabled={isSmartFixRunning}
+            className="px-2 py-0.5 bg-cyan-950/80 hover:bg-cyan-900 text-serato-cyan border border-cyan-800/80 rounded text-[10px] font-medium transition cursor-pointer"
+            title="Padroniza feats, parcerias e colaborações de artistas (feat., vs., pres.)"
+          >
+            👤 Artist Cleanup
           </button>
 
           {undoStatus && (
@@ -1634,6 +1696,50 @@ export const TagDoctor: React.FC<TagDoctorProps> = ({ mp3Path, onAddLog, onOpenF
           </div>
         </div>
       </div>
+
+      {/* Modal para Remoção de Texto Comum Customizado */}
+      {commonTextModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4 animate-in fade-in duration-150">
+          <div className="bg-serato-dark border border-serato-cardBorder rounded-xl shadow-2xl p-5 max-w-md w-full space-y-4">
+            <div className="flex items-center gap-2 text-serato-cyan border-b border-serato-cardBorder pb-2">
+              <Scissors className="w-5 h-5 text-serato-cyan" />
+              <h3 className="text-sm font-bold text-white">Remover Texto Comum (Smart Fix)</h3>
+            </div>
+            <p className="text-xs text-slate-300">
+              Digite uma palavra, frase ou padrão de texto que deseja remover dos títulos e artistas das faixas selecionadas:
+            </p>
+            <input
+              type="text"
+              value={commonTextInput}
+              onChange={(e) => setCommonTextInput(e.target.value)}
+              placeholder="Ex: [DJ Pack], - www.site.com, Exclusivo"
+              autoFocus
+              className="w-full bg-black/60 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-serato-cyan"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleConfirmRemoveCommonText();
+                if (e.key === 'Escape') setCommonTextModalOpen(false);
+              }}
+            />
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-serato-cardBorder">
+              <button
+                type="button"
+                onClick={() => setCommonTextModalOpen(false)}
+                className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRemoveCommonText}
+                disabled={!commonTextInput.trim()}
+                className="px-3.5 py-1.5 rounded-lg text-xs font-bold bg-serato-cyan hover:bg-serato-cyan/80 text-black transition cursor-pointer disabled:opacity-40"
+              >
+                Remover Texto
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal de Confirmação em Tela Integrado */}
       <ConfirmModal

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TAXONOMY CLEANER (taxonomy_cleaner.py)
+SERATO 5 SYNC MANAGER PRO - TAXONOMY CLEANER (taxonomy_cleaner.py)
 ================================================================================
 Normalização inteligente de Gêneros (TCON) e Artistas (TPE1):
   - Funde variações ortográficas de gêneros (ex: tech-house -> Tech House)

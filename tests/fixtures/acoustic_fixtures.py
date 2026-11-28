@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 tests/fixtures/acoustic_fixtures.py
-FFmpeg Acoustic Signal & Edge-Case Fixture Generator for Serato 4 Sync Pro.
+FFmpeg Acoustic Signal & Edge-Case Fixture Generator for Serato 5 Sync Pro.
 
 Provides:
 1. AcousticFixtureGenerator:

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - MOTOR OFICIAL (serato_macos_app.py)
+SERATO 5 SYNC MANAGER PRO - MOTOR OFICIAL (serato_macos_app.py)
 macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Motor de alta performance com auditoria binária estrita de crates,
@@ -420,7 +420,7 @@ def salvar_cache(cache_file: Path, dados: dict, lib_path: str = None, st_dev: in
                 "lib_path": lib_path or "",
                 "st_dev": st_dev,
                 "timestamp": datetime.datetime.now().isoformat(),
-                "engine": "Serato4SyncPro-v4.1"
+                "engine": "Serato5SyncPro-v5.0"
             },
             "crates": dados
         }
@@ -621,10 +621,10 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                            dry_run: bool = False, plan: dict = None, plan_file: str = None):
     
     if dry_run:
-        print("\n🔍 [SERATO 4 SYNC PRO] - MODO ANÁLISE / PRÉ-AVALIAÇÃO ATIVADO (SOMENTE LEITURA) 🔍", flush=True)
+        print("\n🔍 [SERATO 5 SYNC PRO] - MODO ANÁLISE / PRÉ-AVALIAÇÃO ATIVADO (SOMENTE LEITURA) 🔍", flush=True)
         print("💡 Nenhuma alteração física (.crate, .pref, .json ou logs) será gravada em disco.\n", flush=True)
     else:
-        print("\n⚡ [SERATO 4 SYNC MANAGER PRO] - INICIANDO AUDITORIA E SINCRONIZAÇÃO NATIVA ⚡", flush=True)
+        print("\n⚡ [SERATO 5 SYNC MANAGER PRO] - INICIANDO AUDITORIA E SINCRONIZAÇÃO NATIVA ⚡", flush=True)
 
     if not mp3_dir_str or not mp3_dir_str.strip():
         print("❌ ERRO CRÍTICO: Caminho da pasta de músicas MP3 não informado.", flush=True)
@@ -1770,7 +1770,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Engine")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Engine")
     parser.add_argument("mp3_pos", nargs="?", default="", help="Caminho MP3 (posicional)")
     parser.add_argument("serato_pos", nargs="?", default="", help="Caminho Serato (posicional)")
     parser.add_argument("logs_pos", nargs="?", default="", help="Caminho Logs (posicional)")

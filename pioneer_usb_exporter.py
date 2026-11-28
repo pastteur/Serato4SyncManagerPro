@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - PIONEER REKORDBOX USB EXPORTER
+SERATO 5 SYNC MANAGER PRO - PIONEER REKORDBOX USB EXPORTER
 ================================================================================
 Engine de exportação de Crates e faixas do Serato DJ Pro para mídias USB
 compatíveis com tocadores físicos Pioneer CDJ (CDJ-2000NXS2, CDJ-3000, XDJ,
@@ -150,7 +150,7 @@ class PioneerUsbExporter:
         """)
         cursor.execute("INSERT OR REPLACE INTO djmdProperty VALUES ('UUID', ?);", (str(uuid.uuid4()),))
         cursor.execute("INSERT OR REPLACE INTO djmdProperty VALUES ('Version', '1.0.0');")
-        cursor.execute("INSERT OR REPLACE INTO djmdProperty VALUES ('ApplicationName', 'Serato4SyncPro-PioneerEngine');")
+        cursor.execute("INSERT OR REPLACE INTO djmdProperty VALUES ('ApplicationName', 'Serato5SyncPro-PioneerEngine');")
 
         # 2. Tabelas Auxiliares de Metadados
         cursor.execute("""

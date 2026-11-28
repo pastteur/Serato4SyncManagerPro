@@ -2703,8 +2703,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "serato4-sync-pro"
-version = "1.0.0"
+name = "serato5-sync-pro"
+version = "5.0.0"
 dependencies = [
  "libc",
  "notify",

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - ANÁLISE DE BPM E TOM (music_analysis.py)
+SERATO 5 SYNC MANAGER PRO - ANÁLISE DE BPM E TOM (music_analysis.py)
 ================================================================================
 Estimativa local de BPM e tonalidade SEM dependências externas (sem numpy,
 aubio ou librosa). O áudio é decodificado como PCM mono por FFmpeg e analisado
@@ -906,7 +906,7 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Análise de BPM, Tom e Energia")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Análise de BPM, Tom e Energia")
     parser.add_argument("--analyze", type=str, default="", help="Analisa BPM/Tom/Energy de um arquivo (não grava)")
     parser.add_argument("--analyze-batch", type=str, default="", help="Analisa uma pasta de MP3")
     parser.add_argument("--energy-batch", type=str, default="", help="Analisa e grava energia para lote de faixas")

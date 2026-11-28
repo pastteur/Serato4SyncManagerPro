@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - DECKWATCH & NOW PLAYING MONITOR
+SERATO 5 SYNC MANAGER PRO - DECKWATCH & NOW PLAYING MONITOR
 ================================================================================
 Monitora em tempo real a faixa atualmente executada no Serato DJ Pro,
 inspecionando sessões de histórico ativas e integrando com o macOS

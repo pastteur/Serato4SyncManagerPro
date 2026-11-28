@@ -1,4 +1,4 @@
-# Serato 4 Sync Manager Pro 🎧🔥
+# Serato 5 Sync Manager Pro 🎧🔥
 
 > **O ecossistema definitivo para organização, sincronização e proteção de bibliotecas para DJs profissionais no Serato DJ Pro 4.**
 

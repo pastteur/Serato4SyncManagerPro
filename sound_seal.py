@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - SOUND SEAL & RELOCATE ENGINE (sound_seal.py)
+SERATO 5 SYNC MANAGER PRO - SOUND SEAL & RELOCATE ENGINE (sound_seal.py)
 macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Motor de impressão digital acústica (Sound Seal SHA-256) e Relocate inteligente
@@ -1568,7 +1568,7 @@ def remove_lost_tracks_from_crates(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Sound Seal & Relocate")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Sound Seal & Relocate")
     parser.add_argument("--scan", action="store_true", help="Gera Sound Seals na pasta MP3")
     parser.add_argument("--force", action="store_true", help="Força recálculo completo de SHA-256 ignorando o cache")
     parser.add_argument("--mp3", type=str, default="", help="Caminho da pasta MP3")

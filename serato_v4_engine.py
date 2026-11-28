@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - SERATO v4 SQLite ENGINE & DOCTOR
+SERATO 5 SYNC MANAGER PRO - SERATO v4 SQLite ENGINE & DOCTOR
 ================================================================================
 Driver de leitura, inspeção e auditoria de integridade para a biblioteca
 estruturada do Serato DJ Pro v4 (SQLite Engine).
@@ -101,6 +101,13 @@ class SeratoV4Engine:
         self.master_db = self.library_dir / "master.sqlite"
         self.root_db = self.library_dir / "root.sqlite"
         self.location_db = self.library_dir / "location.sqlite"
+        self.streaming_db_files = {
+            "remote_libraries": self.library_dir / "remote_libraries.sqlite",
+            "apple_music": self.library_dir / "apple_music.sqlite",
+            "beatport": self.library_dir / "beatport.sqlite",
+            "soundcloud": self.library_dir / "soundcloud.sqlite",
+            "spotify": self.library_dir / "spotify.sqlite",
+        }
 
     def is_v4_present(self) -> bool:
         """Verifica se os arquivos do Serato v4 existem no diretório da biblioteca."""
@@ -142,18 +149,28 @@ class SeratoV4Engine:
         location_exists = self._safe_exists(self.location_db)
         dir_exists = self._safe_exists(self.library_dir)
 
+        streaming_dbs = {
+            name: self._safe_exists(path)
+            for name, path in self.streaming_db_files.items()
+        }
+
         report: Dict[str, Any] = {
             "library_dir": str(self.library_dir),
             "v4_detected": False,
+            "v5_features_detected": any(streaming_dbs.values()),
+            "serato_generation": "Serato DJ Pro 5.x (SQLite + Stems/Streaming)" if any(streaming_dbs.values()) else "Serato 4/5 SQLite",
             "healthy": False,
             "master_exists": master_exists,
             "root_exists": root_exists,
             "location_exists": location_exists,
+            "streaming_dbs": streaming_dbs,
             "db_uuid": None,
             "user_version": None,
             "autosync_disabled": None,
             "v3_migration_status": "Desconhecido",
             "containers_count": 0,
+            "assets_count": 0,
+            "smart_crate_rules_count": 0,
             "triggers_count": 0,
             "warnings": [],
             "errors": []
@@ -248,6 +265,21 @@ class SeratoV4Engine:
             except sqlite3.OperationalError:
                 report["locations_count"] = 0
                 report["location_exists"] = location_exists
+
+            # 8. Contagem de assets e smart_crate_rules (Serato 4/5)
+            try:
+                cursor.execute("SELECT COUNT(*) FROM asset;")
+                asset_row = cursor.fetchone()
+                report["assets_count"] = asset_row[0] if asset_row else 0
+            except sqlite3.OperationalError:
+                pass
+
+            try:
+                cursor.execute("SELECT COUNT(*) FROM smart_crate_rules;")
+                sc_row = cursor.fetchone()
+                report["smart_crate_rules_count"] = sc_row[0] if sc_row else 0
+            except sqlite3.OperationalError:
+                pass
 
             conn.close()
 
@@ -379,6 +411,169 @@ class SeratoV4Engine:
                 sys.stderr.write(f"[SeratoV4Engine] Erro ao ler localizações de {db}: {e}\n")
 
         return locations
+
+    def collect_playback_analytics(self) -> Dict[str, Any]:
+        """
+        Coleta métricas de reprodução (dj_play_count / play_count), preparação
+        (is_beatgrid_locked / overview_complete) e sessões (history_session) do Serato 4/5.
+        """
+        analytics: Dict[str, Any] = {
+            "available": False,
+            "total_db_assets": 0,
+            "total_plays": 0,
+            "play_distribution": {
+                "0 plays": 0,
+                "1–3 plays": 0,
+                "4–10 plays": 0,
+                "11+ plays": 0,
+            },
+            "zero_play_gb": 0.0,
+            "beatgrid_locked_count": 0,
+            "overview_complete_count": 0,
+            "top_played_tracks": [],
+            "top_played_genres": [],
+            "recent_sessions": [],
+        }
+
+        target_db = self.master_db if self._safe_exists(self.master_db) else self.root_db
+        if not self._safe_exists(target_db):
+            return analytics
+
+        try:
+            conn = self._connect_ro(target_db)
+            cur = conn.cursor()
+
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = {r["name"] for r in cur.fetchall()}
+
+            if "asset" in tables:
+                cur.execute("PRAGMA table_info(asset);")
+                asset_cols = {r["name"] for r in cur.fetchall()}
+
+                play_expr = "COALESCE(a.dj_play_count, 0)" if "dj_play_count" in asset_cols else "0"
+                join_meta = ""
+                if "dj_asset_metadata" in tables:
+                    cur.execute("PRAGMA table_info(dj_asset_metadata);")
+                    meta_cols = {r["name"] for r in cur.fetchall()}
+                    if "asset_id" in meta_cols:
+                        join_meta = "LEFT JOIN dj_asset_metadata m ON m.asset_id = a.id"
+                        if "play_count" in meta_cols and "dj_play_count" in asset_cols:
+                            play_expr = "MAX(COALESCE(a.dj_play_count, 0), COALESCE(m.play_count, 0))"
+                        elif "play_count" in meta_cols:
+                            play_expr = "COALESCE(m.play_count, 0)"
+                        if "is_beatgrid_locked" in meta_cols:
+                            cur.execute("SELECT SUM(CASE WHEN is_beatgrid_locked != 0 THEN 1 ELSE 0 END) FROM dj_asset_metadata;")
+                            row_bg = cur.fetchone()
+                            analytics["beatgrid_locked_count"] = int(row_bg[0] or 0) if row_bg else 0
+                        if "overview_complete" in meta_cols:
+                            cur.execute("SELECT SUM(CASE WHEN overview_complete != 0 THEN 1 ELSE 0 END) FROM dj_asset_metadata;")
+                            row_ov = cur.fetchone()
+                            analytics["overview_complete_count"] = int(row_ov[0] or 0) if row_ov else 0
+
+                size_expr = "COALESCE(a.file_size, 0)" if "file_size" in asset_cols else "0"
+                cur.execute(f"""
+                    SELECT
+                        COUNT(*),
+                        SUM({play_expr}),
+                        SUM(CASE WHEN ({play_expr}) = 0 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN ({play_expr}) BETWEEN 1 AND 3 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN ({play_expr}) BETWEEN 4 AND 10 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN ({play_expr}) >= 11 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN ({play_expr}) = 0 THEN {size_expr} ELSE 0 END)
+                    FROM asset a
+                    {join_meta};
+                """)
+                agg = cur.fetchone()
+                if agg and agg[0]:
+                    analytics["available"] = True
+                    analytics["total_db_assets"] = int(agg[0] or 0)
+                    analytics["total_plays"] = int(agg[1] or 0)
+                    analytics["play_distribution"] = {
+                        "0 plays": int(agg[2] or 0),
+                        "1–3 plays": int(agg[3] or 0),
+                        "4–10 plays": int(agg[4] or 0),
+                        "11+ plays": int(agg[5] or 0),
+                    }
+                    analytics["zero_play_gb"] = round(float(agg[6] or 0) / (1024 ** 3), 2)
+
+                # Top 15 faixas mais tocadas
+                title_col = "a.title" if "title" in asset_cols else ("a.name" if "name" in asset_cols else "CAST(a.id AS TEXT)")
+                artist_col = "a.artist" if "artist" in asset_cols else "''"
+                bpm_col = "a.bpm" if "bpm" in asset_cols else "NULL"
+                key_col = "a.key" if "key" in asset_cols else "''"
+                cur.execute(f"""
+                    SELECT {title_col} AS titulo, {artist_col} AS artista, {bpm_col} AS bpm, {key_col} AS key_val, ({play_expr}) AS plays
+                    FROM asset a
+                    {join_meta}
+                    WHERE ({play_expr}) > 0
+                    ORDER BY plays DESC
+                    LIMIT 15;
+                """)
+                analytics["top_played_tracks"] = [
+                    {
+                        "titulo": r["titulo"] or "Sem título",
+                        "artista": r["artista"] or "",
+                        "bpm": r["bpm"],
+                        "key": r["key_val"] or "",
+                        "plays": int(r["plays"] or 0),
+                    }
+                    for r in cur.fetchall()
+                ]
+
+                # Top gêneros mais tocados
+                if "genre" in asset_cols:
+                    cur.execute(f"""
+                        SELECT COALESCE(NULLIF(TRIM(a.genre), ''), 'Sem Gênero') AS genero, SUM({play_expr}) AS total_plays, COUNT(*) AS tracks
+                        FROM asset a
+                        {join_meta}
+                        GROUP BY genero
+                        HAVING total_plays > 0
+                        ORDER BY total_plays DESC
+                        LIMIT 10;
+                    """)
+                    analytics["top_played_genres"] = [
+                        {"genero": r["genero"], "plays": int(r["total_plays"] or 0), "tracks": int(r["tracks"] or 0)}
+                        for r in cur.fetchall()
+                    ]
+
+            # Sessões de histórico (history_session + history_entry)
+            if "history_session" in tables:
+                cur.execute("PRAGMA table_info(history_session);")
+                hs_cols = {r["name"] for r in cur.fetchall()}
+                name_expr = "hs.name" if "name" in hs_cols else "''"
+                date_col = next((c for c in ("start_time", "created_at", "date", "timestamp") if c in hs_cols), None)
+                date_expr = f"hs.{date_col}" if date_col else "''"
+                if "history_entry" in tables:
+                    cur.execute(f"""
+                        SELECT hs.id, {name_expr} AS nome, {date_expr} AS data_ref, COUNT(he.id) AS faixas
+                        FROM history_session hs
+                        LEFT JOIN history_entry he ON he.session_id = hs.id
+                        GROUP BY hs.id
+                        ORDER BY hs.id DESC
+                        LIMIT 10;
+                    """)
+                else:
+                    cur.execute(f"""
+                        SELECT hs.id, {name_expr} AS nome, {date_expr} AS data_ref, 0 AS faixas
+                        FROM history_session hs
+                        ORDER BY hs.id DESC
+                        LIMIT 10;
+                    """)
+                analytics["recent_sessions"] = [
+                    {
+                        "id": r["id"],
+                        "nome": r["nome"] or f"Sessão #{r['id']}",
+                        "data": str(r["data_ref"] or ""),
+                        "faixas": int(r["faixas"] or 0),
+                    }
+                    for r in cur.fetchall()
+                ]
+
+            conn.close()
+        except Exception as e:
+            sys.stderr.write(f"[SeratoV4Engine] Erro ao coletar playback analytics: {e}\n")
+
+        return analytics
 
 
 def main():

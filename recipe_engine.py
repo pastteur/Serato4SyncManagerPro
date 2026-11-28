@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - RECIPE ENGINE WITH UNDO (recipe_engine.py)
+SERATO 5 SYNC MANAGER PRO - RECIPE ENGINE WITH UNDO (recipe_engine.py)
 ================================================================================
 Executa receitas, transformadores de metadados e Smart Fixes de biblioteca
 com histórico transacional e suporte completo a rollback (Undo).
@@ -32,9 +32,14 @@ if str(_SCRIPT_DIR) not in sys.path:
 
 try:
     import mutagen
-    from mutagen.id3 import ID3, TIT2, TPE1, TPE4
+    from mutagen.id3 import ID3, TIT2, TPE1, TPE4, TCON
 except ImportError:
     mutagen = None
+
+try:
+    from taxonomy_cleaner import TaxonomyCleaner
+except ImportError:
+    TaxonomyCleaner = None
 
 try:
     from journal import calc_file_sha256, calc_audio_tail_sha256, read_leading_id3
@@ -405,11 +410,13 @@ class RecipeEngine:
                 "remixer": str(audio["TPE4"]) if "TPE4" in audio else "",
                 "album": str(audio["TALB"]) if "TALB" in audio else "",
                 "grouping": str(audio["TIT1"]) if "TIT1" in audio else "",
+                "genre": str(audio["TCON"]) if "TCON" in audio else "",
             }
 
             new_title = old_state["title"]
             new_artist = old_state["artist"]
             new_remixer = old_state["remixer"]
+            new_genre = old_state["genre"]
 
             # Roteamento dos Smart Fixes e Receitas
             if recipe_name == "swap_artist_title":
@@ -452,7 +459,10 @@ class RecipeEngine:
                     new_remixer = extracted_rem
                     new_title = clean_title
 
-            elif recipe_name in ("extract_mix", "add_mix_parentheses"):
+            elif recipe_name in ("extract_mix", "extract_mix_from_title"):
+                new_title = smart_extract_mix(old_state["title"])
+
+            elif recipe_name == "add_mix_parentheses":
                 new_title = smart_add_mix_parentheses(old_state["title"])
 
             elif recipe_name == "remove_garbage":
@@ -480,12 +490,20 @@ class RecipeEngine:
                     if new_artist:
                         new_artist = smart_remove_common_text(old_state["artist"], txt)
 
+            elif recipe_name in ("genre_cleanup", "clean_genre"):
+                if TaxonomyCleaner:
+                    new_genre = TaxonomyCleaner.clean_genre(old_state["genre"])
+
+            elif recipe_name in ("artist_cleanup", "clean_artist"):
+                if TaxonomyCleaner:
+                    new_artist = TaxonomyCleaner.clean_artist(old_state["artist"])
+
             else:
                 errors.append(f"Receita desconhecida: {recipe_name}")
                 break
 
             # Se não houve modificação de fato, pula
-            if new_title == old_state["title"] and new_artist == old_state["artist"] and new_remixer == old_state["remixer"]:
+            if new_title == old_state["title"] and new_artist == old_state["artist"] and new_remixer == old_state["remixer"] and new_genre == old_state["genre"]:
                 continue
 
             planned_changes.append({
@@ -496,13 +514,14 @@ class RecipeEngine:
                 "pre_hash": pre_hash,
                 "new_title": new_title,
                 "new_artist": new_artist,
-                "new_remixer": new_remixer
+                "new_remixer": new_remixer,
+                "new_genre": new_genre,
             })
 
         # MODO PRÉVIA (DRY RUN)
         if dry_run:
             return {
-                "sucesso": True,
+                "sucesso": len(errors) == 0,
                 "dry_run": True,
                 "session_id": session_id,
                 "recipe_name": recipe_name,
@@ -512,23 +531,25 @@ class RecipeEngine:
                     {
                         "arquivo": str(c["path"]),
                         "nome": c["path"].name,
-                        "antigo": {"titulo": c["old_state"]["title"], "artista": c["old_state"]["artist"], "remixer": c["old_state"]["remixer"]},
-                        "proposto": {"titulo": c["new_title"], "artista": c["new_artist"], "remixer": c["new_remixer"]},
+                        "antigo": {"titulo": c["old_state"]["title"], "artista": c["old_state"]["artist"], "remixer": c["old_state"]["remixer"], "genero": c["old_state"]["genre"]},
+                        "proposto": {"titulo": c["new_title"], "artista": c["new_artist"], "remixer": c["new_remixer"], "genero": c["new_genre"]},
                         "pre_hash": c["pre_hash"]
                     }
                     for c in planned_changes
                 ],
-                "erros": errors
+                "erros": errors,
+                "errors": errors
             }
 
         if not planned_changes:
             return {
-                "sucesso": True,
+                "sucesso": len(errors) == 0,
                 "session_id": session_id,
                 "recipe_name": recipe_name,
                 "affected_count": 0,
-                "mensagem": "Nenhum arquivo necessita de alteração para esta receita.",
-                "errors": errors
+                "mensagem": "Nenhum arquivo necessita de alteração para esta receita." if len(errors) == 0 else f"Falha na receita: {', '.join(errors)}",
+                "errors": errors,
+                "erros": errors
             }
 
         # ------------------------------------------------------------------
@@ -567,6 +588,12 @@ class RecipeEngine:
                     audio["TPE4"] = TPE4(encoding=3, text=c["new_remixer"])
                 elif "TPE4" in audio:
                     del audio["TPE4"]
+
+                if c.get("new_genre") != c["old_state"].get("genre"):
+                    if c.get("new_genre"):
+                        audio["TCON"] = TCON(encoding=3, text=c["new_genre"])
+                    elif "TCON" in audio:
+                        del audio["TCON"]
 
                 audio.save(str(path), v2_version=3)
                 post_hash = calc_file_sha256(str(path))
@@ -607,6 +634,11 @@ class RecipeEngine:
                             aud["TPE1"] = TPE1(encoding=3, text=c["old_state"]["artist"])
                         if c["old_state"].get("remixer"):
                             aud["TPE4"] = TPE4(encoding=3, text=c["old_state"]["remixer"])
+                        if "genre" in c["old_state"]:
+                            if c["old_state"].get("genre"):
+                                aud["TCON"] = TCON(encoding=3, text=c["old_state"]["genre"])
+                            elif "TCON" in aud:
+                                del aud["TCON"]
                         aud.save(str(path), v2_version=3)
                 except Exception as e_rb:
                     rollback_errors.append(f"Erro no rollback de {path.name}: {e_rb}")
@@ -691,6 +723,12 @@ class RecipeEngine:
                         elif "TPE4" in audio:
                             del audio["TPE4"]
 
+                        if "genre" in old_state:
+                            if old_state.get("genre"):
+                                audio["TCON"] = TCON(encoding=3, text=old_state["genre"])
+                            elif "TCON" in audio:
+                                del audio["TCON"]
+
                         audio.save(str(path), v2_version=3)
 
                     restored_count += 1
@@ -706,14 +744,16 @@ class RecipeEngine:
                 "session_id": session_id,
                 "recipe_name": recipe_name,
                 "restored_count": restored_count,
-                "errors": errors
+                "errors": errors,
+                "erros": errors
             }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Recipe Engine with Undo - Smart Fixes & Transformers")
     parser.add_argument("--recipe", type=str, help="Nome da receita a aplicar")
-    parser.add_argument("--files", nargs="+", help="Arquivos para aplicar a receita")
+    parser.add_argument("--files", nargs="*", default=[], help="Arquivos para aplicar a receita")
+    parser.add_argument("--files-file", type=str, default="", help="Arquivo contendo lista de arquivos em formato JSON")
     parser.add_argument("--param", type=str, default="", help="Parâmetro textual opcional (ex: texto a remover)")
     parser.add_argument("--undo", action="store_true", help="Desfaz a última receita aplicada")
     parser.add_argument("--dry-run", action="store_true", help="Gera prévia das alterações sem modificar arquivos em disco")
@@ -726,11 +766,24 @@ def main():
         print(json.dumps(res, ensure_ascii=False))
         return
 
-    if args.recipe and args.files:
+    target_files = list(args.files) if args.files else []
+    if args.files_file:
+        ff = Path(args.files_file)
+        if ff.is_file():
+            try:
+                with open(ff, 'r', encoding='utf-8') as f:
+                    extra = json.load(f)
+                    if isinstance(extra, list):
+                        target_files.extend(extra)
+            except Exception as e:
+                print(json.dumps({"sucesso": False, "erro": f"Falha ao ler --files-file: {e}"}, ensure_ascii=False))
+                return
+
+    if args.recipe and target_files:
         params = {}
         if args.param:
             params["text"] = args.param
-        res = engine.apply_recipe(args.recipe, args.files, params, dry_run=args.dry_run)
+        res = engine.apply_recipe(args.recipe, target_files, params, dry_run=args.dry_run)
         print(json.dumps(res, ensure_ascii=False))
         return
 

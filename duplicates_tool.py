@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - ANALISADOR DE DUPLICADOS MULTI-PASTA
+SERATO 5 SYNC MANAGER PRO - ANALISADOR DE DUPLICADOS MULTI-PASTA
                   (duplicates_tool.py)
 ================================================================================
 Compara N pastas quaisquer entre si, com opção de incluir a biblioteca Serato,
@@ -700,7 +700,7 @@ def export_csv(grupos, out_path=None):
 # CLI
 # ------------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Duplicados multi-pasta")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Duplicados multi-pasta")
     parser.add_argument("--roots", nargs="*", default=[], help="Pastas a comparar entre si")
     parser.add_argument("--include-serato", type=str, default="", help="Inclui esta pasta na comparação")
     parser.add_argument("--serato-path", type=str, default="", help="Caminho _Serato_ para gravar crates")

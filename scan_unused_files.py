@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - SCAN UNUSED FILES (scan_unused_files.py)
+SERATO 5 SYNC MANAGER PRO - SCAN UNUSED FILES (scan_unused_files.py)
 ================================================================================
 Localiza arquivos de áudio no disco que NÃO estão presentes em nenhuma Crate
 ou playlist do Serato DJ Pro. Identifica gigabytes desperdiçados no SSD

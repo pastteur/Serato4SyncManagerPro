@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - CRATE OPERATIONS & PLAYLIST TOOLS (crate_ops.py)
+SERATO 5 SYNC MANAGER PRO - CRATE OPERATIONS & PLAYLIST TOOLS (crate_ops.py)
 ================================================================================
 Manipulação binária de arquivos .crate do Serato DJ Pro em _Serato_/Subcrates/
 com atomicidade, preservação de cabeçalho vrsn, validação estrutural e backup.
@@ -846,6 +846,7 @@ def main():
     parser.add_argument("--serato", required=True, help="Diretório _Serato_")
     parser.add_argument("--crate", default="", help="Nome da crate")
     parser.add_argument("--paths", nargs="*", default=[], help="Caminhos para add_paths ou rewrite_order")
+    parser.add_argument("--paths-file", type=str, default="", help="Arquivo contendo lista de caminhos em JSON")
     parser.add_argument("--sources", nargs="*", default=[], help="Crates de origem para merge")
     parser.add_argument("--prefix", type=str, default="", help="Prefixo a adicionar")
     parser.add_argument("--sort-mode", type=str, default="az", choices=["az", "za", "shuffle", "path"])
@@ -854,10 +855,23 @@ def main():
 
     args = parser.parse_args()
 
+    paths_list = list(args.paths) if args.paths else []
+    if args.paths_file:
+        pf = Path(args.paths_file)
+        if pf.is_file():
+            try:
+                with open(pf, 'r', encoding='utf-8') as f:
+                    extra = json.load(f)
+                    if isinstance(extra, list):
+                        paths_list.extend(extra)
+            except Exception as e:
+                print(json.dumps({"sucesso": False, "erro": f"Falha ao ler --paths-file: {e}"}, ensure_ascii=False))
+                return
+
     if args.list_tree or args.action == "list_tree":
         res = list_crates_tree(args.serato)
     elif args.action == "add_paths":
-        res = add_paths_to_crate(args.serato, args.crate, args.paths)
+        res = add_paths_to_crate(args.serato, args.crate, paths_list)
     elif args.action == "sort":
         res = sort_crate_tracks(args.serato, args.crate, args.sort_mode)
     elif args.action == "prefix":
@@ -867,7 +881,7 @@ def main():
     elif args.action == "merge":
         res = merge_crates(args.serato, args.sources, args.crate)
     elif args.action == "rewrite_order":
-        res = rewrite_crate_order(args.serato, args.crate, args.paths)
+        res = rewrite_crate_order(args.serato, args.crate, paths_list)
     else:
         res = {"sucesso": False, "erro": f"Ação desconhecida: {args.action}"}
 

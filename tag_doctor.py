@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TAG DOCTOR & BACKUP ENGINE (tag_doctor.py)
+SERATO 5 SYNC MANAGER PRO - TAG DOCTOR & BACKUP ENGINE (tag_doctor.py)
 macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Motor de alta fidelidade para análise, higienização de nomes e regravação de tags ID3,
@@ -393,7 +393,7 @@ def lookup_musicbrainz_track(title: str, artist: str = "", crate: str = ""):
             q = f'artist:"{artist}"'
 
         url = f'https://musicbrainz.org/ws/2/recording/?query={urllib.parse.quote(q)}&fmt=json&limit=3'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Serato4SyncPro/1.0 (contact@serato4sync.pro)'})
+        req = urllib.request.Request(url, headers={'User-Agent': 'Serato5SyncPro/5.0 (contact@serato5sync.pro)'})
         with urllib.request.urlopen(req, timeout=3.5) as res:
             data = json.loads(res.read().decode())
             recs = data.get('recordings', [])
@@ -1752,7 +1752,7 @@ def batch_apply_tags(mp3_dir_str: str, crate_raiz: str = "", subcrate: str = "",
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Tag Doctor")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Tag Doctor")
     parser.add_argument("--backup-db", action="store_true", help="Cria backup seguro do master.sqlite")
     parser.add_argument("--list-backups", action="store_true", help="Lista backups do banco")
     parser.add_argument("--restore-db", type=str, default="", help="Restaura banco especificado")

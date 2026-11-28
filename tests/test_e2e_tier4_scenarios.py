@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-SERATO 4 SYNC MANAGER PRO - E2E TEST SUITE TIER 4: REAL-WORLD APPLICATION SCENARIOS
+SERATO 5 SYNC MANAGER PRO - E2E TEST SUITE TIER 4: REAL-WORLD APPLICATION SCENARIOS
 ================================================================================
 Comprehensive end-to-end real-world user workflows and DJ performance scenarios:
   - Scenario 1: New DJ Music Pack Ingestion, Matching & Upgrading
@@ -13,7 +13,7 @@ Comprehensive end-to-end real-world user workflows and DJ performance scenarios:
   - Scenario 7: Multi-Folder Duplicate Pruning with Quarantine Isolation
   - Scenario 8: Audio Health Resampling Pipeline with Traceable Quarantine
   - Scenario 9: Corrupt Audio Quarantine and Crate Integrity Guard
-  - Scenario 10: Complete Serato 4 Sync Manager Pro End-to-End Lifecycle
+  - Scenario 10: Complete Serato 5 Sync Manager Pro End-to-End Lifecycle
 ================================================================================
 """
 
@@ -531,7 +531,7 @@ class TestTier4RealWorldScenarios(E2ESandboxTestCase):
         self.assertGreaterEqual(summary.get("total_faixas"), 1)
 
     # =========================================================================
-    # SCENARIO 10: COMPLETE SERATO 4 SYNC MANAGER PRO FULL LIFECYCLE
+    # SCENARIO 10: COMPLETE SERATO 5 SYNC MANAGER PRO FULL LIFECYCLE
     # =========================================================================
 
     def test_scenario_10_complete_serato_sync_lifecycle(self):

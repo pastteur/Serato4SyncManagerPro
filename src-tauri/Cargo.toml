@@ -1,12 +1,12 @@
 [package]
-name = "serato4-sync-pro"
-version = "1.0.0"
-description = "Serato 4 Sync Manager Pro"
+name = "serato5-sync-pro"
+version = "5.0.0"
+description = "Serato 5 Sync Manager Pro"
 authors = ["Pastteur"]
 edition = "2021"
 
 [lib]
-name = "serato4_sync_pro_lib"
+name = "serato5_sync_pro_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

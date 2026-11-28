@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - HIGH PERFORMANCE SQLite FTS5 CACHE
+SERATO 5 SYNC MANAGER PRO - HIGH PERFORMANCE SQLite FTS5 CACHE
 ================================================================================
 Banco local SQLite com Write-Ahead Logging (WAL) e Full-Text Search (FTS5)
 com tokenizer 'unicode61 remove_diacritics 1' para busca e matching instantâneo

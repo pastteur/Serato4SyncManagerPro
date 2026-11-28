@@ -1,10 +1,10 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   FolderTree, Music, Search, Disc, Folder, Eye, CheckCircle2, Sparkles, 
   ChevronRight, ChevronDown, Layers, AlertTriangle, Copy, Check, Filter, 
   FolderPlus, ChevronsDown, ChevronsUp, FileText, Play,
   Wrench, ArrowDownAZ, ArrowUpAZ, Shuffle, Save, Edit3, MoreVertical,
-  ShieldCheck, Sliders
+  ShieldCheck, Sliders, GitMerge, ExternalLink, X, ListOrdered
 } from 'lucide-react';
 import { SyncSummary, CrateTreeItem, CrateTrack } from '../types';
 import { PlayingTrackInfo } from './AudioPlayerBar';
@@ -63,6 +63,37 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     sampleTracks: string[];
   } | null>(null);
 
+  // Context Menu da Árvore de Crates (Estilo Lexicon)
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    crateName: string;
+    isMaster: boolean;
+  } | null>(null);
+  const [contextCrateName, setContextCrateName] = useState<string>('');
+  const [mergeModalOpen, setMergeModalOpen] = useState<boolean>(false);
+  const [mergeTargetCrate, setMergeTargetCrate] = useState<string>('');
+  const [crossRefModalOpen, setCrossRefModalOpen] = useState<boolean>(false);
+  const [crossRefCrate, setCrossRefCrate] = useState<string>('');
+  const [subcrateSortMode, setSubcrateSortMode] = useState<'default' | 'count_desc' | 'count_asc'>('default');
+
+  // Fecha o menu de contexto ao clicar fora ou apertar Esc
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setContextMenu(null);
+        setShowToolsMenu(false);
+      }
+    };
+    window.addEventListener('click', handleClick);
+    window.addEventListener('keydown', handleKey);
+    return () => {
+      window.removeEventListener('click', handleClick);
+      window.removeEventListener('keydown', handleKey);
+    };
+  }, []);
+
   // Helper para detectar subcrates dentro de subcrates (aninhamento multinível)
   const isNestedSubcrate = (item: CrateTreeItem) => {
     return item.subcrate.includes('%%') || item.nome_crate.split('%%').length > 2;
@@ -85,7 +116,7 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     return Object.values(cratesMap).filter(isNestedSubcrate).length;
   }, [cratesMap]);
 
-  // Agrupamento de crates por Estilo Master (ordenadas de A-Z)
+  // Agrupamento de crates por Estilo Master (ordenadas de A-Z ou por Qtd de Faixas)
   const groupedCrates = useMemo(() => {
     const groups: Record<string, CrateTreeItem[]> = {};
     const search = crateSearch.trim().toLowerCase();
@@ -110,13 +141,19 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
       }
     });
 
-    // Ordena as subcrates em ordem decrescente (mais recente primeiro)
+    // Ordenação configurável das subcrates
     Object.keys(groups).forEach(master => {
-      groups[master].sort((a, b) => b.subcrate.localeCompare(a.subcrate, undefined, { numeric: true }));
+      if (subcrateSortMode === 'count_desc') {
+        groups[master].sort((a, b) => (b.faixas?.length || b.total_faixas) - (a.faixas?.length || a.total_faixas));
+      } else if (subcrateSortMode === 'count_asc') {
+        groups[master].sort((a, b) => (a.faixas?.length || a.total_faixas) - (b.faixas?.length || b.total_faixas));
+      } else {
+        groups[master].sort((a, b) => b.subcrate.localeCompare(a.subcrate, undefined, { numeric: true }));
+      }
     });
 
     return groups;
-  }, [cratesMap, crateSearch, filterMode]);
+  }, [cratesMap, crateSearch, filterMode, subcrateSortMode]);
 
   // Lista com TODAS as faixas alocadas em crates (com crate de origem mapeada)
   const allTracksAcrossCrates: EnrichedCrateTrack[] = useMemo(() => {
@@ -205,9 +242,22 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Abertura do Menu de Contexto (Right-click ou botão 3-pontos)
+  const handleOpenContextMenu = (e: React.MouseEvent, crateName: string, isMaster: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const menuWidth = 240;
+    const menuHeight = 330;
+    const x = Math.min(e.clientX, window.innerWidth - menuWidth - 10);
+    const y = Math.min(e.clientY, window.innerHeight - menuHeight - 10);
+    setContextMenu({ x, y, crateName, isMaster });
+    setContextCrateName(crateName);
+  };
+
   // Prepara e exibe a Prévia para aprovação obrigatória (Princípio Analisar -> Prévia -> Ajustar)
-  const handlePlaylistToolAction = (action: string, sortMode?: string, prefix?: string) => {
-    if (!activeCrate || isAllSelected) {
+  const handlePlaylistToolAction = (action: string, sortMode?: string, prefix?: string, customCrateName?: string) => {
+    const targetCrateName = customCrateName || (!isAllSelected && activeCrate ? activeCrate.nome_crate : null);
+    if (!targetCrateName) {
       alert('Selecione uma Crate específica para aplicar ferramentas de Playlist.');
       return;
     }
@@ -218,6 +268,12 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
     }
 
     setShowToolsMenu(false);
+    setContextMenu(null);
+
+    const targetCrateObj = cratesMap[targetCrateName] || (activeCrate && activeCrate.nome_crate === targetCrateName ? activeCrate : null);
+    const crateDisplayName = targetCrateObj?.nome_exibicao || targetCrateName;
+    const trackCount = targetCrateObj?.faixas?.length || 0;
+    const sample = (targetCrateObj?.faixas || []).slice(0, 5).map(f => f.nome);
 
     let title = '';
     let desc = '';
@@ -228,19 +284,17 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
         shuffle: 'Embaralhar Faixas (Shuffle Aleatório)'
       };
       title = `Reordenar Crate: ${modeNames[sortMode || 'az'] || sortMode}`;
-      desc = `As faixas da Crate serão reordenadas fisicamente dentro do arquivo Serato .crate de acordo com: ${modeNames[sortMode || 'az'] || sortMode}.`;
+      desc = `As faixas da Crate [${crateDisplayName}] serão reordenadas fisicamente dentro do arquivo Serato .crate de acordo com: ${modeNames[sortMode || 'az'] || sortMode}.`;
     } else if (action === 'prefix') {
       title = `Adicionar Prefixo "${prefix}"`;
-      desc = `O prefixo "${prefix}" será inserido no início do nome da Crate no Serato.`;
+      desc = `O prefixo "${prefix}" será inserido no início do nome da Crate [${crateDisplayName}] no Serato.`;
     } else if (action === 'capitalize') {
       title = 'Capitalizar Nome da Crate';
-      desc = 'O nome da Crate será padronizado em Title Case (Primeiras Letras Maiúsculas).';
+      desc = `O nome da Crate [${crateDisplayName}] será padronizado em Title Case (Primeiras Letras Maiúsculas).`;
     } else if (action === 'rewrite_order') {
       title = 'Salvar Ordem Atual das Faixas';
-      desc = 'A sequência exibida na tela será fixada de forma permanente no arquivo binário .crate.';
+      desc = `A sequência atual das faixas na Crate [${crateDisplayName}] será fixada de forma permanente no arquivo binário .crate.`;
     }
-
-    const sample = (activeCrate.faixas || []).slice(0, 5).map(f => f.nome);
 
     setToolPreview({
       action,
@@ -248,38 +302,40 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
       prefix,
       title,
       desc,
-      crateName: activeCrate.nome_crate,
-      count: activeCrate.faixas.length,
+      crateName: targetCrateName,
+      count: trackCount,
       sampleTracks: sample
     });
   };
 
   // Executa exclusivamente o plano aprovado após confirmação no botão AJUSTAR
   const handleExecuteApprovedTool = async () => {
-    if (!toolPreview || !activeCrate) return;
-    const { action, sortMode, prefix } = toolPreview;
+    if (!toolPreview) return;
+    const { action, sortMode, prefix, crateName } = toolPreview;
     setToolPreview(null);
     setIsToolRunning(true);
     setToolStatus(`Executando ${action}...`);
 
     const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
     if (!isTauri) {
-      if (onAddLog) onAddLog(`[Simulação Web] Playlist Tool '${action}' executada na Crate [${activeCrate.nome_crate}].`);
+      if (onAddLog) onAddLog(`[Simulação Web] Playlist Tool '${action}' executada na Crate [${crateName}].`);
       setIsToolRunning(false);
       setToolStatus(null);
       return;
     }
 
     try {
+      const targetCrateObj = cratesMap[crateName];
+      const paths = action === 'rewrite_order' && targetCrateObj ? targetCrateObj.faixas.map(f => f.caminho_rel) : null;
       const { invoke } = await import('@tauri-apps/api/core');
       const resJson = await invoke<string>('crate_playlist_tools', {
         seratoPath,
         action,
-        crateName: activeCrate.nome_crate,
+        crateName,
         prefix: prefix || null,
         sortMode: sortMode || null,
         sources: null,
-        paths: action === 'rewrite_order' ? activeCrate.faixas.map(f => f.caminho_rel) : null,
+        paths,
         target: 'subcrate'
       });
       const data = JSON.parse(resJson);
@@ -297,6 +353,80 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
       setToolStatus(null);
     }
   };
+
+  // Execução de Mesclagem de Crates (Merge)
+  const handleExecuteMerge = async () => {
+    if (!contextCrateName || !mergeTargetCrate) return;
+    if (contextCrateName === mergeTargetCrate) {
+      alert('Selecione uma Crate de destino diferente da Crate de origem.');
+      return;
+    }
+    setMergeModalOpen(false);
+    setIsToolRunning(true);
+    setToolStatus(`Mesclando [${contextCrateName}] em [${mergeTargetCrate}]...`);
+
+    const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+    if (!isTauri) {
+      if (onAddLog) onAddLog(`[Simulação Web] Merge de [${contextCrateName}] em [${mergeTargetCrate}].`);
+      setIsToolRunning(false);
+      setToolStatus(null);
+      return;
+    }
+
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const resJson = await invoke<string>('crate_playlist_tools', {
+        seratoPath,
+        action: 'merge',
+        crateName: mergeTargetCrate,
+        sources: [contextCrateName],
+        prefix: null,
+        sortMode: null,
+        paths: null,
+        target: 'subcrate'
+      });
+      const data = JSON.parse(resJson);
+      if (data.sucesso) {
+        if (onAddLog) onAddLog(`🔀 Fusão de Crates: ${data.mensagem}`);
+        if (onRefreshCrates) onRefreshCrates();
+        alert(data.mensagem || 'Crates mescladas com sucesso!');
+      } else {
+        alert(`Erro na fusão: ${data.erro || 'Falha ao mesclar crates'}`);
+      }
+    } catch (e: any) {
+      alert(`Falha ao mesclar: ${e}`);
+    } finally {
+      setIsToolRunning(false);
+      setToolStatus(null);
+    }
+  };
+
+  // Mapeamento de Cross Reference (faixas duplicadas / compartilhadas entre crates)
+  const crossRefData = useMemo(() => {
+    if (!crossRefCrate || !cratesMap[crossRefCrate]) return [];
+    const sourceTracks = cratesMap[crossRefCrate].faixas || [];
+    const results: { trackName: string; caminho: string; otherCrates: string[] }[] = [];
+
+    sourceTracks.forEach(t => {
+      const targetRel = t.caminho_rel || t.nome;
+      const otherCrates: string[] = [];
+      Object.entries(cratesMap).forEach(([cKey, cVal]) => {
+        if (cKey !== crossRefCrate) {
+          if ((cVal.faixas || []).some(f => (f.caminho_rel || f.nome) === targetRel)) {
+            otherCrates.push(cVal.nome_exibicao || cKey);
+          }
+        }
+      });
+      if (otherCrates.length > 0) {
+        results.push({
+          trackName: t.nome,
+          caminho: targetRel,
+          otherCrates
+        });
+      }
+    });
+    return results;
+  }, [crossRefCrate, cratesMap]);
 
   const isDemo = !summary?.crates_arvore || Object.keys(summary.crates_arvore).length === 0;
 
@@ -484,37 +614,51 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
               return (
                 <div key={master} className="rounded border border-white/5 bg-black/25 overflow-hidden">
                   
-                  {/* Cabeçalho do Estilo Master: Clicável para Expandir/Minimizar */}
-                  <button
-                    type="button"
-                    onClick={() => toggleMaster(master)}
-                    className="w-full text-left px-2.5 py-1.5 flex items-center justify-between text-xs font-bold text-serato-gold hover:bg-white/[0.04] transition cursor-pointer select-none"
+                  {/* Cabeçalho do Estilo Master: Clicável para Expandir/Minimizar + Context Menu */}
+                  <div
+                    onContextMenu={(e) => handleOpenContextMenu(e, master, true)}
+                    className="w-full flex items-center justify-between text-xs font-bold text-serato-gold hover:bg-white/[0.04] transition select-none group"
                   >
-                    <div className="flex items-center gap-2 truncate">
-                      {isExpanded ? (
-                        <ChevronDown className="w-3.5 h-3.5 text-serato-gold shrink-0 transition-transform" />
-                      ) : (
-                        <ChevronRight className="w-3.5 h-3.5 text-slate-500 shrink-0 transition-transform" />
-                      )}
-                      <Disc className="w-3.5 h-3.5 text-serato-gold shrink-0" />
-                      <span className="truncate">{master}</span>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => toggleMaster(master)}
+                      className="flex-1 text-left px-2.5 py-1.5 flex items-center justify-between truncate cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        {isExpanded ? (
+                          <ChevronDown className="w-3.5 h-3.5 text-serato-gold shrink-0 transition-transform" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5 text-slate-500 shrink-0 transition-transform" />
+                        )}
+                        <Disc className="w-3.5 h-3.5 text-serato-gold shrink-0" />
+                        <span className="truncate">{master}</span>
+                      </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0 ml-2 font-mono text-[10px]">
-                      {nestedCountInMaster > 0 && (
-                        <span 
-                          className="px-1.5 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-700/60 flex items-center gap-1 font-bold"
-                          title={`${nestedCountInMaster} subcrate(s) aninhada(s) dentro de subcrates neste estilo`}
-                        >
-                          <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
-                          <span>{nestedCountInMaster}</span>
+                      <div className="flex items-center gap-1.5 shrink-0 ml-2 font-mono text-[10px]">
+                        {nestedCountInMaster > 0 && (
+                          <span 
+                            className="px-1.5 py-0.2 rounded bg-amber-950/80 text-amber-300 border border-amber-700/60 flex items-center gap-1 font-bold"
+                            title={`${nestedCountInMaster} subcrate(s) aninhada(s) dentro de subcrates neste estilo`}
+                          >
+                            <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
+                            <span>{nestedCountInMaster}</span>
+                          </span>
+                        )}
+                        <span className="text-slate-500">
+                          {subcrates.length} sub
                         </span>
-                      )}
-                      <span className="text-slate-500">
-                        {subcrates.length} sub
-                      </span>
-                    </div>
-                  </button>
+                      </div>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={(e) => handleOpenContextMenu(e, master, true)}
+                      className="p-1.5 text-slate-400 hover:text-serato-cyan opacity-40 group-hover:opacity-100 transition cursor-pointer"
+                      title="Opções da Crate (Playlist Tools)"
+                    >
+                      <MoreVertical className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
 
                   {/* Subcrates (visíveis apenas se expandido) */}
                   {isExpanded && (
@@ -525,11 +669,10 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
                         const depth = getSubcrateDepth(sub);
 
                         return (
-                          <button
+                          <div
                             key={sub.nome_crate}
-                            type="button"
-                            onClick={() => setSelectedCrateKey(sub.nome_crate)}
-                            className={`w-full text-left px-2.5 py-1.5 rounded text-xs flex items-center justify-between transition cursor-pointer border ${
+                            onContextMenu={(e) => handleOpenContextMenu(e, sub.nome_crate, false)}
+                            className={`w-full rounded text-xs flex items-center justify-between transition border group ${
                               isSelected
                                 ? 'bg-serato-cyan/20 text-serato-cyan border-serato-cyan/50 font-semibold shadow-sm'
                                 : isNested
@@ -537,26 +680,41 @@ export const CrateTreePreview: React.FC<CrateTreePreviewProps> = ({
                                 : 'text-slate-300 hover:bg-white/[0.04] hover:text-white border-transparent'
                             }`}
                           >
-                            <div className="flex items-center gap-1.5 truncate">
-                              <span className="text-slate-500 font-mono text-[10px]">└─</span>
-                              <span className="truncate">{sub.subcrate || sub.master}</span>
-                              
-                              {/* Alerta de Subcrate Aninhada */}
-                              {isNested && (
-                                <span 
-                                  className="text-[9px] font-mono px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-700 font-bold shrink-0 flex items-center gap-0.5"
-                                  title={`Subcrate aninhada em ${depth} níveis. Nome completo: ${sub.nome_exibicao}`}
-                                >
-                                  <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
-                                  <span>Nível {depth}</span>
-                                </span>
-                              )}
-                            </div>
+                            <button
+                              type="button"
+                              onClick={() => setSelectedCrateKey(sub.nome_crate)}
+                              className="flex-1 text-left px-2.5 py-1.5 flex items-center justify-between truncate cursor-pointer"
+                            >
+                              <div className="flex items-center gap-1.5 truncate">
+                                <span className="text-slate-500 font-mono text-[10px]">└─</span>
+                                <span className="truncate">{sub.subcrate || sub.master}</span>
+                                
+                                {/* Alerta de Subcrate Aninhada */}
+                                {isNested && (
+                                  <span 
+                                    className="text-[9px] font-mono px-1 py-0.2 rounded bg-amber-950 text-amber-300 border border-amber-700 font-bold shrink-0 flex items-center gap-0.5"
+                                    title={`Subcrate aninhada em ${depth} níveis. Nome completo: ${sub.nome_exibicao}`}
+                                  >
+                                    <AlertTriangle className="w-2.5 h-2.5 text-amber-400" />
+                                    <span>Nível {depth}</span>
+                                  </span>
+                                )}
+                              </div>
 
-                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/50 text-slate-400 shrink-0 ml-1">
-                              {sub.total_faixas} faixas
-                            </span>
-                          </button>
+                              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-black/50 text-slate-400 shrink-0 ml-1">
+                                {sub.total_faixas} faixas
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={(e) => handleOpenContextMenu(e, sub.nome_crate, false)}
+                              className="p-1.5 text-slate-400 hover:text-serato-cyan opacity-40 group-hover:opacity-100 transition cursor-pointer"
+                              title="Opções da Subcrate (Playlist Tools)"
+                            >
+                              <MoreVertical className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         );
                       })}
                     </div>

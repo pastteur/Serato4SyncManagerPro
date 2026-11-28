@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - HIGH SPEED TAGGER DAEMON (tagger_daemon.py)
+SERATO 5 SYNC MANAGER PRO - HIGH SPEED TAGGER DAEMON (tagger_daemon.py)
 ================================================================================
 Processo auxiliar especializado para leitura e gravação ultrarrápida de tags
 ID3v2.3 (com preservação de Serato Markers2) comunicando via NDJSON sobre

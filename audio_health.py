@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - AUDIO HEALTH DOCTOR (audio_health.py)
+SERATO 5 SYNC MANAGER PRO - AUDIO HEALTH DOCTOR (audio_health.py)
 macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Auditoria profunda de integridade e reparação de faixas:
@@ -1403,7 +1403,7 @@ def batch_repair_tracks_online(filepaths: list, serato_dir_str: str = ""):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Audio Health Doctor")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Audio Health Doctor")
     parser.add_argument("--scan", action="store_true", help="Executa auditoria de saúde")
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3")
     parser.add_argument("--serato", type=str, default="", help="Pasta _Serato_")

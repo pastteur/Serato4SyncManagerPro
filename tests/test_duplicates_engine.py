@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TESTES DO MOTOR DE DUPLICATAS (duplicates_tool.py)
+SERATO 5 SYNC MANAGER PRO - TESTES DO MOTOR DE DUPLICATAS (duplicates_tool.py)
 ================================================================================
 Testa rigorosamente:
 1. Correspondência exata por hash SHA-256 do áudio (IDENTICO_COMPROVADO).

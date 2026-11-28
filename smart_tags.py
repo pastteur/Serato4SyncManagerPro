@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - SMART TAGS / MYTAGS (smart_tags.py)
+SERATO 5 SYNC MANAGER PRO - SMART TAGS / MYTAGS (smart_tags.py)
 ================================================================================
 Injeção e gerenciamento de MyTags estruturadas através do campo ID3 COMM (Comment)
 utilizando formato padronizado com hashtags (#PeakTime, #Vocal, #WarmUp).

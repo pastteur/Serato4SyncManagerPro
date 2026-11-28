@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TESTES DOS NOVOS MÓDULOS (LEXICON REVERSAL ENGINE)
+SERATO 5 SYNC MANAGER PRO - TESTES DOS NOVOS MÓDULOS (LEXICON REVERSAL ENGINE)
 ================================================================================
 Testa a integração e integridade dos 5 módulos extraídos da engenharia reversa:
   1. serato_v4_engine.py

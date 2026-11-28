@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - FERRAMENTAS DE BIBLIOTECA (library_tools.py)
+SERATO 5 SYNC MANAGER PRO - FERRAMENTAS DE BIBLIOTECA (library_tools.py)
 ================================================================================
 - Verificação de referências quebradas nas crates (faixas que sumiram do disco)
 - Exportação de crate para M3U e importação de M3U como nova crate
@@ -174,8 +174,8 @@ def import_m3u_as_crate(serato_dir, m3u_path, crate_name):
 # Leitura de metadados (para saúde e crates inteligentes)
 # ------------------------------------------------------------------------------
 def read_track_meta(filepath):
-    """Lê BPM, tom (em Camelot), bitrate, duração e presença de cues."""
-    meta = {"bpm": None, "camelot": "", "bitrate_kbps": 0, "duracao": 0.0, "tem_cues": False}
+    """Lê BPM, tom (em Camelot), bitrate, duração, gênero, ano e presença de cues."""
+    meta = {"bpm": None, "camelot": "", "bitrate_kbps": 0, "duracao": 0.0, "tem_cues": False, "genre": "", "year": None}
     if mutagen is None:
         return meta
     try:
@@ -227,6 +227,33 @@ def read_track_meta(filepath):
             m2 = tags.get("GEOB:Serato Markers2")
             if m2 is not None and hasattr(m2, "data") and _extract_cues_from_raw_tag is not None:
                 meta["tem_cues"] = bool(_extract_cues_from_raw_tag(m2.data))
+        except Exception:
+            pass
+        try:
+            g_raw = None
+            if "TCON" in tags:
+                g_raw = str(tags["TCON"])
+            elif hasattr(tags, "get"):
+                for g_field in ("GENRE", "genre", "©gen"):
+                    if tags.get(g_field):
+                        v = tags.get(g_field)
+                        g_raw = str(v[0] if isinstance(v, (list, tuple)) else v)
+                        break
+            if g_raw:
+                meta["genre"] = g_raw.strip()
+        except Exception:
+            pass
+        try:
+            y_raw = None
+            for y_field in ("TDRC", "TYER", "DATE", "date", "©day"):
+                if y_field in tags:
+                    v = tags[y_field]
+                    y_raw = str(v[0] if isinstance(v, (list, tuple)) else v)
+                    break
+            if y_raw:
+                m_yr = re.search(r"(19\d{2}|20\d{2})", y_raw)
+                if m_yr:
+                    meta["year"] = int(m_yr.group(1))
         except Exception:
             pass
     return meta
@@ -310,53 +337,252 @@ def _inspect_health_track(p):
     return sz, read_track_meta(p)
 
 
+def _collect_journal_stats():
+    """Coleta estatísticas de execuções e performance do app no journal SQLite."""
+    stats = {
+        "total_syncs": 0,
+        "syncs_sucesso": 0,
+        "syncs_dry_run": 0,
+        "total_tag_ops": 0,
+        "total_crate_ops": 0,
+        "recent_syncs": [],
+    }
+    try:
+        from journal import get_journal_db
+        conn = get_journal_db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*), SUM(CASE WHEN sucesso = 1 THEN 1 ELSE 0 END), SUM(CASE WHEN dry_run = 1 THEN 1 ELSE 0 END) FROM sync_operacoes;")
+        row = cur.fetchone()
+        if row:
+            stats["total_syncs"] = int(row[0] or 0)
+            stats["syncs_sucesso"] = int(row[1] or 0)
+            stats["syncs_dry_run"] = int(row[2] or 0)
+
+        cur.execute("SELECT COUNT(*) FROM operacoes;")
+        r_ops = cur.fetchone()
+        stats["total_tag_ops"] = int(r_ops[0] or 0) if r_ops else 0
+
+        cur.execute("SELECT COUNT(*) FROM crate_operacoes;")
+        r_cops = cur.fetchone()
+        stats["total_crate_ops"] = int(r_cops[0] or 0) if r_cops else 0
+
+        cur.execute("""
+            SELECT id, iniciado_em, finalizado_em, dry_run, estado, sucesso
+            FROM sync_operacoes
+            ORDER BY id DESC
+            LIMIT 10;
+        """)
+        for s_id, ini, fim, dry, estado, suc in cur.fetchall():
+            dur_seg = None
+            if ini and fim:
+                try:
+                    t0 = datetime.fromisoformat(ini)
+                    t1 = datetime.fromisoformat(fim)
+                    dur_seg = round(max(0.0, (t1 - t0).total_seconds()), 1)
+                except Exception:
+                    pass
+            stats["recent_syncs"].append({
+                "id": s_id,
+                "iniciado_em": ini,
+                "dry_run": bool(dry),
+                "estado": estado,
+                "sucesso": bool(suc) if suc is not None else None,
+                "duracao_seg": dur_seg,
+            })
+        conn.close()
+    except Exception:
+        pass
+    return stats
+
+
 def library_health(mp3_folder, serato_dir=None):
     paths = list(_iter_audio(mp3_folder))
     total = len(paths)
     sem_bpm = sem_tom = baixa_qualidade = sem_cues = 0
     bytes_total = 0
+    low_quality_bytes = 0
+    total_duracao_seg = 0.0
+
+    bpm_ranges = {
+        "< 90": 0,
+        "90–109": 0,
+        "110–119": 0,
+        "120–125": 0,
+        "126–132": 0,
+        "133+": 0,
+        "Sem BPM": 0,
+    }
+    duration_ranges = {
+        "< 2:30": 0,
+        "2:30–4:00": 0,
+        "4:00–6:00": 0,
+        "6:00+": 0,
+    }
+    key_counts: dict[str, int] = {}
+    format_counts: dict[str, int] = {}
+    genre_counts: dict[str, int] = {}
+    decade_counts: dict[str, int] = {}
+    bpm_key_matrix: dict[str, dict[str, int]] = {}
+    bitrate_ranges = {
+        "320+ kbps": 0,
+        "256–319 kbps": 0,
+        "192–255 kbps": 0,
+        "< 192 kbps": 0,
+        "Outro / Sem info": 0,
+    }
+
+    def _accumulate(ext, sz, m):
+        nonlocal bytes_total, low_quality_bytes, sem_bpm, sem_tom, baixa_qualidade, sem_cues, total_duracao_seg
+        bytes_total += sz
+        dur = float(m.get("duracao") or 0.0)
+        total_duracao_seg += dur
+        if dur > 0:
+            if dur < 150:
+                duration_ranges["< 2:30"] += 1
+            elif dur <= 240:
+                duration_ranges["2:30–4:00"] += 1
+            elif dur <= 360:
+                duration_ranges["4:00–6:00"] += 1
+            else:
+                duration_ranges["6:00+"] += 1
+
+        ext_label = (ext or "").upper().lstrip(".") or "OUTRO"
+        format_counts[ext_label] = format_counts.get(ext_label, 0) + 1
+
+        gen = (m.get("genre") or "").strip() or "Sem Gênero"
+        genre_counts[gen] = genre_counts.get(gen, 0) + 1
+
+        yr = m.get("year")
+        if yr and isinstance(yr, int):
+            dec = f"{(yr // 10) * 10}s"
+        else:
+            dec = "Sem Ano"
+        decade_counts[dec] = decade_counts.get(dec, 0) + 1
+
+        bpm = m["bpm"]
+        bpm_bucket = "Sem BPM"
+        if bpm is None:
+            sem_bpm += 1
+            bpm_ranges["Sem BPM"] += 1
+        elif bpm < 90:
+            bpm_bucket = "< 90"
+            bpm_ranges[bpm_bucket] += 1
+        elif bpm <= 109:
+            bpm_bucket = "90–109"
+            bpm_ranges[bpm_bucket] += 1
+        elif bpm <= 119:
+            bpm_bucket = "110–119"
+            bpm_ranges[bpm_bucket] += 1
+        elif bpm <= 125:
+            bpm_bucket = "120–125"
+            bpm_ranges[bpm_bucket] += 1
+        elif bpm <= 132:
+            bpm_bucket = "126–132"
+            bpm_ranges[bpm_bucket] += 1
+        else:
+            bpm_bucket = "133+"
+            bpm_ranges[bpm_bucket] += 1
+
+        cam = m["camelot"]
+        if not cam:
+            sem_tom += 1
+            key_counts["Sem Tom"] = key_counts.get("Sem Tom", 0) + 1
+        else:
+            key_counts[cam] = key_counts.get(cam, 0) + 1
+            if bpm_bucket != "Sem BPM":
+                row_map = bpm_key_matrix.setdefault(bpm_bucket, {})
+                row_map[cam] = row_map.get(cam, 0) + 1
+
+        kbps = m["bitrate_kbps"]
+        if 0 < kbps < LOW_BITRATE_KBPS:
+            baixa_qualidade += 1
+            low_quality_bytes += sz
+        if kbps >= 320:
+            bitrate_ranges["320+ kbps"] += 1
+        elif kbps >= 256:
+            bitrate_ranges["256–319 kbps"] += 1
+        elif kbps >= 192:
+            bitrate_ranges["192–255 kbps"] += 1
+        elif kbps > 0:
+            bitrate_ranges["< 192 kbps"] += 1
+        else:
+            bitrate_ranges["Outro / Sem info"] += 1
+
+        if not m["tem_cues"]:
+            sem_cues += 1
 
     if total > 32:
         max_workers = min(8, max(2, os.cpu_count() or 4))
         with ThreadPoolExecutor(max_workers=max_workers) as pool:
             results = pool.map(_inspect_health_track, paths, chunksize=16)
-            for sz, m in results:
-                bytes_total += sz
-                if m["bpm"] is None:
-                    sem_bpm += 1
-                if not m["camelot"]:
-                    sem_tom += 1
-                if 0 < m["bitrate_kbps"] < LOW_BITRATE_KBPS:
-                    baixa_qualidade += 1
-                if not m["tem_cues"]:
-                    sem_cues += 1
+            for p, (sz, m) in zip(paths, results):
+                _accumulate(p.suffix, sz, m)
     else:
         for p in paths:
             sz, m = _inspect_health_track(p)
-            bytes_total += sz
-            if m["bpm"] is None:
-                sem_bpm += 1
-            if not m["camelot"]:
-                sem_tom += 1
-            if 0 < m["bitrate_kbps"] < LOW_BITRATE_KBPS:
-                baixa_qualidade += 1
-            if not m["tem_cues"]:
-                sem_cues += 1
+            _accumulate(p.suffix, sz, m)
+
+    # Ordena Camelot de 1A..12B e deixa "Sem Tom" no fim
+    def _camelot_sort_key(item):
+        k = item[0]
+        if k == "Sem Tom":
+            return (99, "Z")
+        try:
+            return (int(k[:-1]), k[-1])
+        except Exception:
+            return (98, k)
+
+    key_distribution = dict(sorted(key_counts.items(), key=_camelot_sort_key))
+
+    # Top 10 gêneros + Outros
+    sorted_genres = sorted(genre_counts.items(), key=lambda x: -x[1])
+    top_genres = dict(sorted_genres[:10])
+    if len(sorted_genres) > 10:
+        top_genres["Outros"] = sum(v for _, v in sorted_genres[10:])
+
+    # Décadas ordenadas
+    sorted_decades = dict(sorted(decade_counts.items(), key=lambda x: ("9999" if x[0] == "Sem Ano" else x[0])))
+
+    serato_playback = {"available": False}
+    try:
+        from serato_v4_engine import SeratoV4Engine
+        serato_playback = SeratoV4Engine(serato_dir or None).collect_playback_analytics()
+    except Exception:
+        pass
 
     resultado = {
         "sucesso": True,
         "total_faixas": total,
         "tamanho_gb": round(bytes_total / (1024 ** 3), 2),
+        "low_quality_gb": round(low_quality_bytes / (1024 ** 3), 2),
+        "total_duration_hours": round(total_duracao_seg / 3600.0, 1),
         "sem_bpm": sem_bpm,
         "sem_tom": sem_tom,
         "baixa_qualidade": baixa_qualidade,
         "limiar_kbps": LOW_BITRATE_KBPS,
         "sem_cues": sem_cues,
+        "bpm_ranges": bpm_ranges,
+        "duration_ranges": duration_ranges,
+        "key_distribution": key_distribution,
+        "genre_distribution": top_genres,
+        "decade_distribution": sorted_decades,
+        "bpm_key_matrix": bpm_key_matrix,
+        "format_distribution": dict(sorted(format_counts.items(), key=lambda x: -x[1])),
+        "bitrate_distribution": bitrate_ranges,
+        "journal_stats": _collect_journal_stats(),
+        "serato_playback": serato_playback,
     }
     if serato_dir:
         refs = check_crate_references(serato_dir, max_missing_listed=0)
+        crates_list = refs.get("crates", [])
+        top_crates = sorted(crates_list, key=lambda c: -c.get("total", 0))[:12]
         resultado["crates"] = refs["crates_verificadas"]
         resultado["referencias_quebradas"] = refs["referencias_quebradas"]
+        resultado["total_crate_tracks"] = sum(c.get("total", 0) for c in crates_list)
+        resultado["top_crates"] = [
+            {"nome": c["nome"], "total": c["total"], "faltando": c["faltando"]}
+            for c in top_crates
+        ]
     return resultado
 
 
@@ -455,7 +681,7 @@ def generate_html_report(mp3_folder, serato_dir=None, out_html_path=None):
 <div class="container">
   <header>
     <div>
-      <h1>🎧 Serato 4 Sync Manager Pro</h1>
+      <h1>🎧 Serato 5 Sync Manager Pro</h1>
       <div class="meta-sub">Diagnóstico Executivo da Biblioteca • Gerado em {data_hora}</div>
     </div>
     <button class="btn-print" onclick="window.print()">Imprimir / Salvar PDF</button>
@@ -769,7 +995,7 @@ def scan_new_files(mp3_folder):
 # CLI
 # ------------------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Ferramentas de biblioteca")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Ferramentas de biblioteca")
     parser.add_argument("--serato", type=str, default="", help="Pasta _Serato_")
     parser.add_argument("--mp3", type=str, default="", help="Pasta MP3 da biblioteca")
     parser.add_argument("--check-refs", action="store_true")

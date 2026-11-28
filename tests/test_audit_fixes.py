@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SUÍTE DE TESTES DE REGRESSÃO - AUDITORIA TÉCNICA DO SERATO 4 SYNC MANAGER PRO
+SUÍTE DE TESTES DE REGRESSÃO - AUDITORIA TÉCNICA DO SERATO 5 SYNC MANAGER PRO
 ================================================================================
 Cobre os 14 requisitos de auditoria:
 1. Persistência e detecção de caminhos

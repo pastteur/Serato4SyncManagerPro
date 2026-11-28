@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - JOURNAL DE ALTERAÇÕES (journal.py)
+SERATO 5 SYNC MANAGER PRO - JOURNAL DE ALTERAÇÕES (journal.py)
 ================================================================================
 Registro único de operações que gravam tags em MP3, com desfazer (undo).
 
@@ -430,7 +430,7 @@ def undo_operation(op_id=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Journal de alterações")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Journal de alterações")
     parser.add_argument("--list", action="store_true", help="Lista operações registradas")
     parser.add_argument("--limit", type=int, default=200)
     parser.add_argument("--undo", nargs="?", const="__last__", default=None, help="Desfaz a última ou um ID específico")

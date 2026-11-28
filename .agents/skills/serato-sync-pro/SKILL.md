@@ -1,15 +1,15 @@
 ---
 name: serato-sync-pro
 description: >-
-  Guia arquitetural, operacional e de engenharia reversa para o Serato 4 Sync Manager Pro.
+  Guia arquitetural, operacional e de engenharia reversa para o Serato 5 Sync Manager Pro.
   Use ao analisar, manter ou estender a sincronização de biblioteca do Serato DJ, manipulação
   binária de arquivos .crate, normalização de tags ID3v2.3, cálculo e auditoria de marcadores
   Serato Markers2 (Auto-Cue), matching com validação de hash/duração e IPC Tauri v2 + Python 3.12.
 ---
 
-# Serato 4 Sync Manager Pro — Architectural & Operational Skill
+# Serato 5 Sync Manager Pro — Architectural & Operational Skill
 
-Este documento é o guia definitivo de engenharia, arquitetura e processos do **Serato 4 Sync Manager Pro**, uma suíte profissional de gerenciamento, sincronização, normalização e automação de bibliotecas para DJs no ecossistema macOS e Serato DJ Pro.
+Este documento é o guia definitivo de engenharia, arquitetura e processos do **Serato 5 Sync Manager Pro**, uma suíte profissional de gerenciamento, sincronização, normalização e automação de bibliotecas para DJs no ecossistema macOS e Serato DJ Pro.
 
 ---
 
@@ -152,7 +152,7 @@ Calcula os pontos com base na duração total e no BPM identificado:
 
 ### Resolução de Scripts Python no macOS Bundle
 A função `find_python_script(app, script_name)` localiza os motores em Python na seguinte ordem de prioridade:
-1. `Contents/Resources/<script>` (dentro de `Serato4SyncPro.app`).
+1. `Contents/Resources/<script>` (dentro de `Serato5SyncPro.app`).
 2. `Contents/Resources/_up_/<script>` (estrutura de symlink do Tauri).
 3. Diretório de recursos da API Tauri `handle.path().resource_dir()`.
 4. Diretórios do usuário (`~/SeratoSync`, `~/pasync`).
@@ -179,12 +179,12 @@ bun run build
 cd /Users/pastteur/SeratoSync
 bun run tauri build --bundles app
 ```
-*Saída gerada:* `src-tauri/target/release/bundle/macos/Serato4SyncPro.app`
+*Saída gerada:* `src-tauri/target/release/bundle/macos/Serato5SyncPro.app`
 
 ### 5.3. Instalação e Deploy no Sistema
 ```bash
-rm -rf /Applications/Serato4SyncPro.app
-cp -R src-tauri/target/release/bundle/macos/Serato4SyncPro.app /Applications/
+rm -rf /Applications/Serato5SyncPro.app
+cp -R src-tauri/target/release/bundle/macos/Serato5SyncPro.app /Applications/
 ```
 
 ### 5.4. Teste Direto de Scripts de Backend

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TRACK MATCHER ENGINE (track_matcher.py)
+SERATO 5 SYNC MANAGER PRO - TRACK MATCHER ENGINE (track_matcher.py)
 macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Cruzamento de playlists (Spotify, YouTube Music, M3U, CSV ou Texto) contra as
@@ -777,8 +777,21 @@ def replace_track_with_upgrade(incoming_path_str: str, destination_path_str: str
                         new_id3 = ID3(str(temp_dest))
                     except Exception:
                         new_id3 = ID3()
-                    # Preserva estritamente Hot Cues/Beatgrid do DJ sobre qualquer tag do arquivo novo
-                    for tag_key in ['GEOB:Serato Markers2', 'GEOB:Serato Markers_', 'GEOB:Serato BeatGrid']:
+                    # Preserva estritamente Hot Cues, Beatgrid, Stems, Tempo Map e Ratings do DJ (Serato 4/5)
+                    serato_geob_keys = [
+                        'GEOB:Serato Markers2',
+                        'GEOB:Serato Markers_',
+                        'GEOB:Serato BeatGrid',
+                        'GEOB:Serato Tempo Map',
+                        'GEOB:Serato Stems',
+                        'GEOB:Serato Rating Emoji',
+                        'GEOB:Serato Analysis Flags',
+                        'GEOB:Serato Import ID',
+                        'GEOB:Serato Autotags',
+                        'GEOB:Serato Overview',
+                        'GEOB:Serato VidAssoc',
+                    ]
+                    for tag_key in serato_geob_keys:
                         if tag_key in old_id3:
                             new_id3[tag_key] = old_id3[tag_key]
                     for tag_key in ['TBPM', 'TKEY']:
@@ -896,7 +909,7 @@ def integrate_new_tracks_to_crate(tracks_list: list, target_crate_folder: str) -
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Track Matcher")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Track Matcher")
     parser.add_argument("--match-text", type=str, default="", help="Conteúdo de texto com faixas")
     parser.add_argument("--match-file", type=str, default="", help="Arquivo CSV ou M3U para cruzamento")
     parser.add_argument("--match-folder", type=str, default="", help="Pasta local contendo novos arquivos de áudio")

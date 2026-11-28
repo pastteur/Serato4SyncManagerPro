@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - BEATSHIFT SCANNER & KICK ALIGNMENT
+SERATO 5 SYNC MANAGER PRO - BEATSHIFT SCANNER & KICK ALIGNMENT
 ================================================================================
 Detecta e corrige faixas cujo primeiro beat (downbeat / kick) está deslocado
 por meio tempo, 1/4 de tempo ou por milissegundos de silêncio inicial.

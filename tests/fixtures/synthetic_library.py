@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 tests/fixtures/synthetic_library.py
-Pure Python High-Speed Synthetic MP3 & Serato .crate Generator for Serato 4 Sync Pro.
+Pure Python High-Speed Synthetic MP3 & Serato .crate Generator for Serato 5 Sync Pro.
 
 Generates:
 1. Valid MPEG-1 Layer 3 audio frames (417 bytes/frame, 128kbps, 44.1kHz, ~26.12ms).

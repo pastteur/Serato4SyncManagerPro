@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    serato4_sync_pro_lib::run()
+    serato5_sync_pro_lib::run()
 }

@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Serato4SyncPro",
-  "version": "1.0.0",
-  "identifier": "com.pastteur.serato4syncpro",
+  "productName": "Serato5SyncPro",
+  "version": "5.0.0",
+  "identifier": "com.pastteur.serato5syncpro",
   "build": {
     "beforeDevCommand": "bun run dev",
     "devUrl": "http://localhost:5173",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Serato 4 Sync Manager Pro",
+        "title": "Serato 5 Sync Manager Pro",
         "width": 1080,
         "height": 740,
         "minWidth": 860,

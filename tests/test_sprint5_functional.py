@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TESTES SPRINT 5 (CORREÇÕES FUNCIONAIS)
+SERATO 5 SYNC MANAGER PRO - TESTES SPRINT 5 (CORREÇÕES FUNCIONAIS)
 ================================================================================
 Validação automatizada das correções funcionais de:
 1. Pioneer USB Exporter (Quick Hash, detecção confiável de desatualizados, cópia atômica)

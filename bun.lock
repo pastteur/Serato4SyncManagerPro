@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "serato4-sync-manager-pro",
+      "name": "serato5-sync-manager-pro",
       "dependencies": {
         "@tauri-apps/api": "^2.2.0",
         "@tauri-apps/plugin-dialog": "^2.2.0",

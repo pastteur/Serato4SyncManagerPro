@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - APPLE MUSIC / ITUNES LIBRARY HELPER
+SERATO 5 SYNC MANAGER PRO - APPLE MUSIC / ITUNES LIBRARY HELPER
 ================================================================================
 Integração nativa com a iTunesLibrary.framework no macOS para extração da
 biblioteca do Apple Music (faixas, playlists e metadados) sem abrir a interface.

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - TESTES DE INTEGRIDADE E PROTEÇÃO DE DADOS (SPRINT 1)
+SERATO 5 SYNC MANAGER PRO - TESTES DE INTEGRIDADE E PROTEÇÃO DE DADOS (SPRINT 1)
 ================================================================================
 Testa rigorosamente:
 1. crate_ops:

@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - AUTO-CUE GENERATOR & REPAIR (auto_cue.py)
+SERATO 5 SYNC MANAGER PRO - AUTO-CUE GENERATOR & REPAIR (auto_cue.py)
 macOS Tahoe / Apple Silicon & Intel
 ================================================================================
 Gera, grava e repara marcadores oficiais de Hot Cues para o Serato DJ Pro 4
@@ -1397,7 +1397,7 @@ def batch_apply_crate_cues(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Serato 4 Sync Manager Pro - Auto-Cue Generator & Repair")
+    parser = argparse.ArgumentParser(description="Serato 5 Sync Manager Pro - Auto-Cue Generator & Repair")
     parser.add_argument("--preview", type=str, default="", help="Calcula prévia dos cues de uma música")
     parser.add_argument("--apply", type=str, default="", help="Grava Hot Cues no arquivo")
     parser.add_argument("--repair-file", type=str, default="", help="Repara tags de Serato Markers2 em um arquivo")

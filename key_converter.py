@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ================================================================================
-SERATO 4 SYNC MANAGER PRO - HARMONIC KEY CONVERTER (key_converter.py)
+SERATO 5 SYNC MANAGER PRO - HARMONIC KEY CONVERTER (key_converter.py)
 ================================================================================
 Conversor bidirecional entre sistemas de notação harmônica para DJs:
   - Camelot (1A..12A, 1B..12B)

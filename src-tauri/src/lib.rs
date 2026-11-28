@@ -4137,17 +4137,29 @@ mod commands {
         param: Option<String>
     ) -> Result<String, String> {
         let _guard = bloqueio_serato_e_concorrencia(Some(&app), "aplicar receita de organização de tags")?;
-        let mut args = vec!["--recipe".into(), recipe_name, "--files".into()];
-        for f in files {
-            args.push(f);
-        }
+        let mut args = vec!["--recipe".into(), recipe_name];
         if let Some(p) = param {
             if !p.trim().is_empty() {
                 args.push("--param".into());
                 args.push(p);
             }
         }
-        run_py_json(&app, "recipe_engine.py", &args)
+        if files.len() > 30 {
+            let tmp_path = std::env::temp_dir().join(format!("recipe_files_{}.json", generate_operacao_id()));
+            let json_str = serde_json::to_string(&files).map_err(|e| e.to_string())?;
+            std::fs::write(&tmp_path, json_str).map_err(|e| format!("Falha ao gravar arquivo temporário: {}", e))?;
+            args.push("--files-file".into());
+            args.push(tmp_path.to_string_lossy().to_string());
+            let res = run_py_json(&app, "recipe_engine.py", &args);
+            let _ = std::fs::remove_file(&tmp_path);
+            res
+        } else {
+            args.push("--files".into());
+            for f in files {
+                args.push(f);
+            }
+            run_py_json(&app, "recipe_engine.py", &args)
+        }
     }
 
     #[tauri::command]
@@ -4197,6 +4209,18 @@ mod commands {
         }
         if let Some(pts) = paths {
             if !pts.is_empty() {
+                if pts.len() > 30 {
+                    let tmp_path = std::env::temp_dir().join(format!("crate_paths_{}.json", generate_operacao_id()));
+                    if let Ok(json_str) = serde_json::to_string(&pts) {
+                        if std::fs::write(&tmp_path, json_str).is_ok() {
+                            args.push("--paths-file".into());
+                            args.push(tmp_path.to_string_lossy().to_string());
+                            let res = run_py_json(&app, "crate_ops.py", &args);
+                            let _ = std::fs::remove_file(&tmp_path);
+                            return res;
+                        }
+                    }
+                }
                 args.push("--paths".into());
                 args.extend(pts);
             }
