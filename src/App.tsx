@@ -25,25 +25,25 @@ import { Terminal, Copy, FolderTree, BookOpen, Sparkles, Shield, Music, History,
 type TabId = 'logs' | 'analytics' | 'duplicates' | 'tree' | 'library' | 'matcher' | 'soundSeal' | 'tagDoctor' | 'health' | 'autoCue' | 'backups' | 'lexiconSuite';
 
 const TAB_META: Record<TabId, { label: string; subtitle: string; icon: React.ComponentType<{ className?: string }>; iconClass: string }> = {
-  logs: { label: 'Terminal & Sync', subtitle: 'Sincronização segura de Crates', icon: Terminal, iconClass: '' },
-  analytics: { label: 'Analytics & Gráficos', subtitle: 'Saúde, BPM, Keys e performance', icon: BarChart3, iconClass: 'text-serato-cyan' },
-  duplicates: { label: 'Duplicados', subtitle: 'Detecção por hash e título', icon: Copy, iconClass: '' },
-  tree: { label: 'Estrutura de Crates', subtitle: 'Árvore visual de playlists', icon: FolderTree, iconClass: '' },
-  library: { label: 'Biblioteca', subtitle: 'Explorar faixas e metadados', icon: Library, iconClass: '' },
-  matcher: { label: 'Track Matcher', subtitle: 'Upgrade preservando Cues/Stems', icon: Music, iconClass: '' },
-  soundSeal: { label: 'Sound Seal & Relocate', subtitle: 'Assinatura SHA-256 e realocação', icon: Shield, iconClass: '' },
-  lexiconSuite: { label: 'Universal DJ Tools', subtitle: 'Rekordbox, Traktor e USB', icon: Zap, iconClass: 'text-amber-400' },
-  tagDoctor: { label: 'Tag Doctor', subtitle: 'Normalização ID3v2.3 e limpeza', icon: Sparkles, iconClass: '' },
-  health: { label: 'Audio Health', subtitle: 'Auditoria de clipping e bitrate', icon: Activity, iconClass: '' },
-  autoCue: { label: 'Auto-Cue', subtitle: 'Hot Cues inteligentes por frase', icon: Target, iconClass: '' },
-  backups: { label: 'Backups', subtitle: 'Quarentena e restauração', icon: History, iconClass: '' },
+  logs: { label: 'Início & Sync', subtitle: 'Analisar e atualizar Serato', icon: Terminal, iconClass: 'text-emerald-400' },
+  analytics: { label: 'Gráficos & Resumo', subtitle: 'Gêneros, BPM, tons e mais tocadas', icon: BarChart3, iconClass: 'text-sky-400' },
+  tree: { label: 'Minhas Crates', subtitle: 'Organizar pastas e playlists', icon: FolderTree, iconClass: 'text-amber-400' },
+  duplicates: { label: 'Músicas Repetidas', subtitle: 'Encontrar cópias duplicadas', icon: Copy, iconClass: 'text-rose-400' },
+  library: { label: 'Todas as Músicas', subtitle: 'Explorar, filtrar e ouvir faixas', icon: Library, iconClass: 'text-serato-cyan' },
+  matcher: { label: 'Trocar Arquivo', subtitle: 'Melhorar qualidade sem perder cues', icon: Music, iconClass: 'text-purple-400' },
+  soundSeal: { label: 'Encontrar Perdidas', subtitle: 'Reconectar arquivos movidos', icon: Shield, iconClass: 'text-emerald-400' },
+  lexiconSuite: { label: 'Exportar & USB', subtitle: 'Rekordbox, Traktor e pendrive', icon: Zap, iconClass: 'text-amber-400' },
+  tagDoctor: { label: 'Corrigir Nomes', subtitle: 'Limpar títulos, artistas e tags', icon: Sparkles, iconClass: 'text-pink-400' },
+  health: { label: 'Qualidade do Som', subtitle: 'Detectar arquivos ruins ou cortados', icon: Activity, iconClass: 'text-teal-400' },
+  autoCue: { label: 'Pontos Auto-Cue', subtitle: 'Criar hot cues automáticos', icon: Target, iconClass: 'text-orange-400' },
+  backups: { label: 'Backups Seguros', subtitle: 'Restaurar crates e arquivos', icon: History, iconClass: 'text-indigo-400' },
 };
 
 const TAB_GROUPS: { label: string; tabs: TabId[] }[] = [
-  { label: 'Comando & Sync', tabs: ['logs', 'analytics', 'tree', 'duplicates'] },
-  { label: 'Biblioteca & Upgrades', tabs: ['library', 'matcher', 'soundSeal', 'lexiconSuite'] },
-  { label: 'Áudio & Tags (Serato 5)', tabs: ['autoCue', 'tagDoctor', 'health'] },
-  { label: 'Proteção', tabs: ['backups'] },
+  { label: 'Principal', tabs: ['logs', 'analytics', 'tree', 'duplicates'] },
+  { label: 'Sua Biblioteca', tabs: ['library', 'soundSeal', 'matcher', 'lexiconSuite'] },
+  { label: 'Limpeza & Áudio', tabs: ['tagDoctor', 'health', 'autoCue'] },
+  { label: 'Segurança', tabs: ['backups'] },
 ];
 
 // Tauri API dynamic loader
@@ -919,6 +919,7 @@ export const App: React.FC = () => {
               <AnalyticsDashboard
                 mp3Path={mp3Path}
                 seratoPath={seratoPath}
+                isActive={activeTab === 'analytics'}
                 onAddLog={addLog}
               />
             </div>

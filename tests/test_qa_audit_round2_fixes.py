@@ -476,3 +476,36 @@ def test_dry_run_plan_invalidation_with_large_track_fast_fingerprint(tmp_path, m
     assert res_exec["plan_invalidated"] is True
 
 
+def test_crate_ops_master_target_sort_prefix_and_capitalize(tmp_path):
+    import crate_ops
+
+    serato_dir = tmp_path / "_Serato_"
+    subcrates = serato_dir / "Subcrates"
+    subcrates.mkdir(parents=True)
+
+    c1 = subcrates / "black%%flashback.crate"
+    c2 = subcrates / "black%%atuais.crate"
+    crate_ops.write_crate_atomic(c1, ["Music/MP3/black/z.mp3", "Music/MP3/black/a.mp3"])
+    crate_ops.write_crate_atomic(c2, ["Music/MP3/black/m.mp3", "Music/MP3/black/b.mp3"])
+
+    # Ordenar todas as subcrates do grupo Master "black"
+    res_sort = crate_ops.sort_crate_tracks(str(serato_dir), "black", sort_mode="az", target="master")
+    assert res_sort["sucesso"] is True
+    assert res_sort["crates_atualizadas"] == 2
+    _, tracks_c1, _ = crate_ops.read_and_validate_crate(c1)
+    assert tracks_c1 == ["Music/MP3/black/a.mp3", "Music/MP3/black/z.mp3"]
+
+    # Capitalizar apenas a parte Master
+    res_cap = crate_ops.capitalize_crate(str(serato_dir), "black", target="master")
+    assert res_cap["sucesso"] is True
+    assert (subcrates / "Black%%flashback.crate").exists()
+    assert (subcrates / "Black%%atuais.crate").exists()
+
+    # Prefixar grupo Master
+    res_pre = crate_ops.prefix_crate(str(serato_dir), "Black", "01.", target="master")
+    assert res_pre["sucesso"] is True
+    assert (subcrates / "01. Black%%flashback.crate").exists()
+    assert (subcrates / "01. Black%%atuais.crate").exists()
+
+
+

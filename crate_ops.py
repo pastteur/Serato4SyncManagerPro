@@ -496,42 +496,78 @@ def add_paths_to_crate(serato_dir: str, crate_name: str, abs_paths: List[str]) -
     return res
 
 
-def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az") -> Dict[str, Any]:
+def _resolve_target_crate_paths(subcrates: Path, crate_name: str, target: str = "subcrate") -> List[Path]:
     """
-    Ordena as faixas dentro de uma crate e reescreve o binário com validação integral.
+    Resolve os arquivos .crate alvo de uma operação.
+    Quando target='master' (ou quando o nome informado representa um grupo Master sem arquivo .crate isolado),
+    inclui <master>.crate (se existir) e todas as subcrates <master>%%*.crate.
+    """
+    direct = get_crate_path(subcrates, crate_name)
+    clean = direct.stem
+    if target == "master" or (not direct.exists() and "%%" not in clean):
+        matches: List[Path] = []
+        if direct.exists():
+            matches.append(direct)
+        prefix_pattern = f"{clean}%%*.crate"
+        for sub_path in sorted(subcrates.glob(prefix_pattern)):
+            if sub_path.is_file() and not sub_path.name.startswith("._") and sub_path not in matches:
+                matches.append(sub_path)
+        return matches
+    return [direct] if direct.exists() else []
+
+
+def sort_crate_tracks(serato_dir: str, crate_name: str, sort_mode: str = "az", target: str = "subcrate") -> Dict[str, Any]:
+    """
+    Ordena as faixas dentro de uma crate (ou grupo Master) e reescreve o binário com validação integral.
     sort_mode: 'az' (A-Z pelo nome do arquivo), 'za' (Z-A), 'shuffle' (aleatório).
     """
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
     subcrates = serato / "Subcrates"
-    crate_path = get_crate_path(subcrates, crate_name)
+    crate_paths = _resolve_target_crate_paths(subcrates, crate_name, target=target)
 
-    if not crate_path.exists():
+    if not crate_paths:
         return {"sucesso": False, "erro": f"Crate não encontrada: {crate_name}"}
 
-    try:
-        header_antigo, existentes, outros_blocos = read_and_validate_crate(crate_path)
-    except Exception as e:
-        return {"sucesso": False, "erro": f"Erro ao ler crate [{crate_name}]: {e}"}
-
-    if not existentes:
-        return {"sucesso": True, "crate": crate_name, "total": 0, "mensagem": "Crate vazia."}
-
-    sorted_tracks = list(existentes)
-    if sort_mode == "az":
-        sorted_tracks.sort(key=lambda p: Path(p).name.lower())
-    elif sort_mode == "za":
-        sorted_tracks.sort(key=lambda p: Path(p).name.lower(), reverse=True)
-    elif sort_mode == "shuffle":
-        random.shuffle(sorted_tracks)
-    elif sort_mode == "path":
-        sorted_tracks.sort(key=lambda p: p.lower())
-    else:
+    if sort_mode not in ("az", "za", "shuffle", "path"):
         return {"sucesso": False, "erro": f"Modo de ordenação inválido: {sort_mode}"}
 
-    res = write_crate_atomic(crate_path, sorted_tracks, header_antigo, outros_blocos, action_name=f"sort_{sort_mode}")
-    if res["sucesso"]:
-        res["mensagem"] = f"Crate [{crate_name}] reordenada com sucesso ({sort_mode.upper()} - {len(sorted_tracks)} faixas)."
-    return res
+    updated_crates = 0
+    total_tracks_sorted = 0
+    for crate_path in crate_paths:
+        try:
+            header_antigo, existentes, outros_blocos = read_and_validate_crate(crate_path)
+        except Exception as e:
+            return {"sucesso": False, "erro": f"Erro ao ler crate [{crate_path.stem}]: {e}"}
+
+        if not existentes:
+            continue
+
+        sorted_tracks = list(existentes)
+        if sort_mode == "az":
+            sorted_tracks.sort(key=lambda p: Path(p).name.lower())
+        elif sort_mode == "za":
+            sorted_tracks.sort(key=lambda p: Path(p).name.lower(), reverse=True)
+        elif sort_mode == "shuffle":
+            random.shuffle(sorted_tracks)
+        elif sort_mode == "path":
+            sorted_tracks.sort(key=lambda p: p.lower())
+
+        res = write_crate_atomic(crate_path, sorted_tracks, header_antigo, outros_blocos, action_name=f"sort_{sort_mode}")
+        if not res.get("sucesso"):
+            return res
+        updated_crates += 1
+        total_tracks_sorted += len(sorted_tracks)
+
+    if updated_crates == 0:
+        return {"sucesso": True, "crate": crate_name, "total": 0, "mensagem": "Crate vazia."}
+
+    return {
+        "sucesso": True,
+        "crate": crate_name,
+        "crates_atualizadas": updated_crates,
+        "total": total_tracks_sorted,
+        "mensagem": f"Crate [{crate_name}] reordenada com sucesso ({sort_mode.upper()} - {total_tracks_sorted} faixas em {updated_crates} crate(s)).",
+    }
 
 
 def _update_neworder_pref_crate_name(serato: Path, old_clean_name: str, new_clean_name: str) -> None:
@@ -588,113 +624,145 @@ def _update_neworder_pref_crate_name(serato: Path, old_clean_name: str, new_clea
 
 def prefix_crate(serato_dir: str, crate_name: str, prefix: str, target: str = "subcrate") -> Dict[str, Any]:
     """
-    Adiciona um prefixo no nome da crate ou subcrate.
+    Adiciona um prefixo no nome da crate ou subcrate (ou em todo o grupo Master).
     Ex: 'Sertanejo%%41' com prefixo '01. ' e target='subcrate' -> 'Sertanejo%%01. 41.crate'.
     """
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
     subcrates = serato / "Subcrates"
-    old_crate_path = get_crate_path(subcrates, crate_name)
+    crate_paths = _resolve_target_crate_paths(subcrates, crate_name, target=target)
 
-    if not old_crate_path.exists():
+    if not crate_paths:
         return {"sucesso": False, "erro": f"Crate original não encontrada: {crate_name}"}
 
-    clean_name = old_crate_path.stem
-    parts = clean_name.split('%%')
+    # Planeja todos os novos nomes e valida colisões antes de mover qualquer arquivo
+    rename_plan = []
+    for old_crate_path in crate_paths:
+        clean_name = old_crate_path.stem
+        parts = clean_name.split('%%')
+        if target == "master" or len(parts) == 1:
+            parts[0] = f"{prefix.strip()} {parts[0]}".strip()
+        else:
+            parts[-1] = f"{prefix.strip()} {parts[-1]}".strip()
+        new_clean_name = '%%'.join(parts)
+        new_crate_path = subcrates / f"{new_clean_name}.crate"
+        if new_crate_path.exists() and not (
+            new_crate_path == old_crate_path
+            or (old_crate_path.exists() and os.path.samefile(new_crate_path, old_crate_path))
+        ):
+            return {"sucesso": False, "erro": f"Já existe uma crate com o nome de destino: {new_clean_name}"}
+        rename_plan.append((old_crate_path, clean_name, new_crate_path, new_clean_name))
 
-    if target == "master" or len(parts) == 1:
-        parts[0] = f"{prefix.strip()} {parts[0]}".strip()
-    else:
-        parts[-1] = f"{prefix.strip()} {parts[-1]}".strip()
-
-    new_clean_name = '%%'.join(parts)
-    new_crate_path = subcrates / f"{new_clean_name}.crate"
-
-    if new_crate_path.exists() and new_crate_path != old_crate_path:
-        return {"sucesso": False, "erro": f"Já existe uma crate com o nome de destino: {new_clean_name}"}
-
+    last_old, last_new, last_path = "", "", ""
     try:
-        orig_hash = calc_crate_sha256(old_crate_path)
-        bak = old_crate_path.with_suffix('.bak')
-        shutil.copy2(old_crate_path, bak)
-        if calc_crate_sha256(bak) != orig_hash:
-            return {"sucesso": False, "erro": "Falha ao validar backup SHA-256 antes de renomear crate."}
-        _, tracks_cur, _ = read_and_validate_crate(old_crate_path)
-        shutil.move(old_crate_path, new_crate_path)
-        _update_neworder_pref_crate_name(serato, clean_name, new_clean_name)
-        try:
-            import journal
-            journal.record_crate_operation(
-                crate_path=str(new_crate_path),
-                acao="prefix_crate",
-                hash_anterior=orig_hash,
-                hash_posterior=calc_crate_sha256(new_crate_path),
-                backup_path=str(bak),
-                total_tracks=len(tracks_cur),
-            )
-        except Exception:
-            pass
+        for old_crate_path, clean_name, new_crate_path, new_clean_name in rename_plan:
+            orig_hash = calc_crate_sha256(old_crate_path)
+            bak = old_crate_path.with_suffix('.bak')
+            shutil.copy2(old_crate_path, bak)
+            if calc_crate_sha256(bak) != orig_hash:
+                return {"sucesso": False, "erro": f"Falha ao validar backup SHA-256 antes de renomear {clean_name}."}
+            _, tracks_cur, _ = read_and_validate_crate(old_crate_path)
+            shutil.move(old_crate_path, new_crate_path)
+            _update_neworder_pref_crate_name(serato, clean_name, new_clean_name)
+            try:
+                import journal
+                journal.record_crate_operation(
+                    crate_path=str(new_crate_path),
+                    acao="prefix_crate",
+                    hash_anterior=orig_hash,
+                    hash_posterior=calc_crate_sha256(new_crate_path),
+                    backup_path=str(bak),
+                    total_tracks=len(tracks_cur),
+                )
+            except Exception:
+                pass
+            last_old, last_new, last_path = clean_name, new_clean_name, str(new_crate_path)
     except Exception as e:
         return {"sucesso": False, "erro": f"Falha ao renomear crate: {e}"}
 
+    msg = (
+        f"Grupo Master [{crate_name}] prefixado em {len(rename_plan)} crate(s)."
+        if len(rename_plan) > 1
+        else f"Crate renomeada de [{last_old}] para [{last_new}]."
+    )
     return {
         "sucesso": True,
-        "old_name": clean_name,
-        "new_name": new_clean_name,
-        "caminho": str(new_crate_path),
-        "mensagem": f"Crate renomeada de [{clean_name}] para [{new_clean_name}]."
+        "old_name": last_old,
+        "new_name": last_new,
+        "caminho": last_path,
+        "crates_atualizadas": len(rename_plan),
+        "mensagem": msg,
     }
 
 
-def capitalize_crate(serato_dir: str, crate_name: str) -> Dict[str, Any]:
-    """Capitaliza (Title Case) as partes do nome da crate e renomeia o arquivo."""
+def capitalize_crate(serato_dir: str, crate_name: str, target: str = "subcrate") -> Dict[str, Any]:
+    """Capitaliza (Title Case) as partes do nome da crate (ou grupo Master) e renomeia o(s) arquivo(s)."""
     serato = Path(os.path.expanduser(str(serato_dir))).resolve()
     subcrates = serato / "Subcrates"
-    old_crate_path = get_crate_path(subcrates, crate_name)
+    crate_paths = _resolve_target_crate_paths(subcrates, crate_name, target=target)
 
-    if not old_crate_path.exists():
+    if not crate_paths:
         return {"sucesso": False, "erro": f"Crate não encontrada: {crate_name}"}
 
-    clean_name = old_crate_path.stem
-    parts = clean_name.split('%%')
-    capitalized_parts = [p.strip().title() for p in parts]
-    new_clean_name = '%%'.join(capitalized_parts)
-    new_crate_path = subcrates / f"{new_clean_name}.crate"
+    rename_plan = []
+    for old_crate_path in crate_paths:
+        clean_name = old_crate_path.stem
+        parts = clean_name.split('%%')
+        if target == "master" and len(parts) > 1:
+            parts[0] = parts[0].strip().title()
+            new_clean_name = '%%'.join(parts)
+        else:
+            new_clean_name = '%%'.join(p.strip().title() for p in parts)
+        if new_clean_name == clean_name:
+            continue
+        new_crate_path = subcrates / f"{new_clean_name}.crate"
+        if new_crate_path.exists() and not (
+            new_crate_path == old_crate_path
+            or (old_crate_path.exists() and os.path.samefile(new_crate_path, old_crate_path))
+        ):
+            return {"sucesso": False, "erro": f"Já existe uma crate com o nome: {new_clean_name}"}
+        rename_plan.append((old_crate_path, clean_name, new_crate_path, new_clean_name))
 
-    if new_clean_name == clean_name:
-        return {"sucesso": True, "old_name": clean_name, "new_name": new_clean_name, "mensagem": "Nome já estava capitalizado."}
+    if not rename_plan:
+        return {"sucesso": True, "old_name": crate_name, "new_name": crate_name, "mensagem": "Nome já estava capitalizado."}
 
-    if new_crate_path.exists() and new_crate_path != old_crate_path:
-        return {"sucesso": False, "erro": f"Já existe uma crate com o nome: {new_clean_name}"}
-
+    last_old, last_new = "", ""
     try:
-        orig_hash = calc_crate_sha256(old_crate_path)
-        bak = old_crate_path.with_suffix('.bak')
-        shutil.copy2(old_crate_path, bak)
-        if calc_crate_sha256(bak) != orig_hash:
-            return {"sucesso": False, "erro": "Falha ao validar backup SHA-256 antes de capitalizar crate."}
-        _, tracks_cur, _ = read_and_validate_crate(old_crate_path)
-        shutil.move(old_crate_path, new_crate_path)
-        _update_neworder_pref_crate_name(serato, clean_name, new_clean_name)
-        try:
-            import journal
-            journal.record_crate_operation(
-                crate_path=str(new_crate_path),
-                acao="capitalize_crate",
-                hash_anterior=orig_hash,
-                hash_posterior=calc_crate_sha256(new_crate_path),
-                backup_path=str(bak),
-                total_tracks=len(tracks_cur),
-            )
-        except Exception:
-            pass
+        for old_crate_path, clean_name, new_crate_path, new_clean_name in rename_plan:
+            orig_hash = calc_crate_sha256(old_crate_path)
+            bak = old_crate_path.with_suffix('.bak')
+            shutil.copy2(old_crate_path, bak)
+            if calc_crate_sha256(bak) != orig_hash:
+                return {"sucesso": False, "erro": f"Falha ao validar backup SHA-256 antes de capitalizar {clean_name}."}
+            _, tracks_cur, _ = read_and_validate_crate(old_crate_path)
+            shutil.move(old_crate_path, new_crate_path)
+            _update_neworder_pref_crate_name(serato, clean_name, new_clean_name)
+            try:
+                import journal
+                journal.record_crate_operation(
+                    crate_path=str(new_crate_path),
+                    acao="capitalize_crate",
+                    hash_anterior=orig_hash,
+                    hash_posterior=calc_crate_sha256(new_crate_path),
+                    backup_path=str(bak),
+                    total_tracks=len(tracks_cur),
+                )
+            except Exception:
+                pass
+            last_old, last_new = clean_name, new_clean_name
     except Exception as e:
         return {"sucesso": False, "erro": f"Falha ao capitalizar crate: {e}"}
 
+    msg = (
+        f"Grupo Master [{crate_name}] capitalizado em {len(rename_plan)} crate(s)."
+        if len(rename_plan) > 1
+        else f"Crate [{last_old}] capitalizada para [{last_new}]."
+    )
     return {
         "sucesso": True,
-        "old_name": clean_name,
-        "new_name": new_clean_name,
-        "mensagem": f"Crate [{clean_name}] capitalizada para [{new_clean_name}]."
+        "old_name": last_old,
+        "new_name": last_new,
+        "crates_atualizadas": len(rename_plan),
+        "mensagem": msg,
     }
 
 
@@ -873,11 +941,11 @@ def main():
     elif args.action == "add_paths":
         res = add_paths_to_crate(args.serato, args.crate, paths_list)
     elif args.action == "sort":
-        res = sort_crate_tracks(args.serato, args.crate, args.sort_mode)
+        res = sort_crate_tracks(args.serato, args.crate, args.sort_mode, args.target)
     elif args.action == "prefix":
         res = prefix_crate(args.serato, args.crate, args.prefix, args.target)
     elif args.action == "capitalize":
-        res = capitalize_crate(args.serato, args.crate)
+        res = capitalize_crate(args.serato, args.crate, args.target)
     elif args.action == "merge":
         res = merge_crates(args.serato, args.sources, args.crate)
     elif args.action == "rewrite_order":
