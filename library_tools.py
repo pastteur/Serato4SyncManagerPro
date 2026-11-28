@@ -24,6 +24,8 @@ import json
 import uuid
 import hashlib
 import argparse
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
@@ -45,22 +47,20 @@ except ImportError:
 from music_analysis import CAMELOT_MAJOR, CAMELOT_MINOR, PITCH_NAMES
 from serato_macos_app import ler_faixas_crate_binaria
 from track_matcher import export_matched_to_serato_crate
+from crate_ops import library_root_for
+
+try:
+    from auto_cue import extract_cues_from_raw_tag as _extract_cues_from_raw_tag
+except Exception:
+    _extract_cues_from_raw_tag = None
+
+_WATCH_STATE_LOCK = threading.Lock()
 
 AUDIO_EXTENSIONS = ('.mp3', '.flac', '.wav', '.aif', '.aiff', '.m4a', '.mp4', '.aac', '.ogg')
 LOW_BITRATE_KBPS = 192
 SMART_RULES_PATH = Path.home() / ".serato_sync_smart_crates.json"
 WATCH_STATE_PATH = Path.home() / ".serato_sync_watch_state.json"
 EXPORTS_DIR = Path.home() / "SeratoSync" / "exports"
-
-
-
-
-def library_root_for(serato_dir):
-    """Raiz usada pelo Serato para caminhos relativos (mesma regra de sincronização)."""
-    p = Path(os.path.expanduser(str(serato_dir))).resolve()
-    if str(p).startswith("/Volumes/"):
-        return p.parent
-    return Path.home()
 
 
 def _iter_audio(folder):
@@ -225,9 +225,8 @@ def read_track_meta(filepath):
             pass
         try:
             m2 = tags.get("GEOB:Serato Markers2")
-            if m2 is not None and hasattr(m2, "data"):
-                from auto_cue import extract_cues_from_raw_tag
-                meta["tem_cues"] = bool(extract_cues_from_raw_tag(m2.data))
+            if m2 is not None and hasattr(m2, "data") and _extract_cues_from_raw_tag is not None:
+                meta["tem_cues"] = bool(_extract_cues_from_raw_tag(m2.data))
         except Exception:
             pass
     return meta
@@ -302,24 +301,47 @@ for _t, _c in CAMELOT_MINOR.items():
 # ------------------------------------------------------------------------------
 # Saúde da biblioteca
 # ------------------------------------------------------------------------------
+def _inspect_health_track(p):
+    """Lê tamanho em disco e metadados de uma faixa para o relatório de saúde."""
+    try:
+        sz = p.stat().st_size
+    except OSError:
+        sz = 0
+    return sz, read_track_meta(p)
+
+
 def library_health(mp3_folder, serato_dir=None):
-    total = sem_bpm = sem_tom = baixa_qualidade = sem_cues = 0
+    paths = list(_iter_audio(mp3_folder))
+    total = len(paths)
+    sem_bpm = sem_tom = baixa_qualidade = sem_cues = 0
     bytes_total = 0
-    for p in _iter_audio(mp3_folder):
-        total += 1
-        try:
-            bytes_total += p.stat().st_size
-        except OSError:
-            pass
-        m = read_track_meta(p)
-        if m["bpm"] is None:
-            sem_bpm += 1
-        if not m["camelot"]:
-            sem_tom += 1
-        if 0 < m["bitrate_kbps"] < LOW_BITRATE_KBPS:
-            baixa_qualidade += 1
-        if not m["tem_cues"]:
-            sem_cues += 1
+
+    if total > 32:
+        max_workers = min(8, max(2, os.cpu_count() or 4))
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            results = pool.map(_inspect_health_track, paths, chunksize=16)
+            for sz, m in results:
+                bytes_total += sz
+                if m["bpm"] is None:
+                    sem_bpm += 1
+                if not m["camelot"]:
+                    sem_tom += 1
+                if 0 < m["bitrate_kbps"] < LOW_BITRATE_KBPS:
+                    baixa_qualidade += 1
+                if not m["tem_cues"]:
+                    sem_cues += 1
+    else:
+        for p in paths:
+            sz, m = _inspect_health_track(p)
+            bytes_total += sz
+            if m["bpm"] is None:
+                sem_bpm += 1
+            if not m["camelot"]:
+                sem_tom += 1
+            if 0 < m["bitrate_kbps"] < LOW_BITRATE_KBPS:
+                baixa_qualidade += 1
+            if not m["tem_cues"]:
+                sem_cues += 1
 
     resultado = {
         "sucesso": True,
@@ -710,17 +732,27 @@ def scan_new_files(mp3_folder):
         except OSError:
             continue
 
-    estado = {}
-    if WATCH_STATE_PATH.exists():
-        try:
-            estado = json.loads(WATCH_STATE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            estado = {}
+    with _WATCH_STATE_LOCK:
+        estado = {}
+        if WATCH_STATE_PATH.exists():
+            try:
+                estado = json.loads(WATCH_STATE_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                estado = {}
 
-    anterior = estado.get(root)
-    WATCH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    estado[root] = atual
-    WATCH_STATE_PATH.write_text(json.dumps(estado, ensure_ascii=False), encoding="utf-8")
+        anterior = estado.get(root)
+        WATCH_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        estado[root] = atual
+        tmp_watch = WATCH_STATE_PATH.with_name(f".tmp_watch_{uuid.uuid4().hex[:8]}.json")
+        try:
+            tmp_watch.write_text(json.dumps(estado, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp_watch, WATCH_STATE_PATH)
+        finally:
+            if tmp_watch.exists():
+                try:
+                    tmp_watch.unlink()
+                except Exception:
+                    pass
 
     if anterior is None:
         return {"sucesso": True, "linha_base": True, "novos": [], "removidos": 0,

@@ -26,8 +26,9 @@ import hashlib
 import uuid
 import base64
 import threading
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-
 # Garante flushing imediato de logs em stdout/stderr para captura em tempo real
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(line_buffering=True)
@@ -293,52 +294,102 @@ def ler_faixas_crate_binaria(caminho_crate: Path):
     return set(), [], [], None
 
 
-def parse_neworder_pref(data: bytes):
+def parse_neworder_pref(data: bytes, strict: bool = False):
     """
-    Analisa o arquivo neworder.pref extraindo a ordem configurada das crates
-    e preservando quaisquer blocos desconhecidos.
+    Analisa estruturalmente o arquivo neworder.pref extraindo a ordem configurada
+    das crates e preservando quaisquer blocos desconhecidos válidos.
+    Rejeita cabeçalhos inválidos, blocos truncados, TLVs malformados e bytes residuais.
     Retorna (header_bytes, ordered_crate_names, outros_blocos).
     """
-    if len(data) < 8 or not data.startswith(b'vrsn'):
+    def _fail(msg: str):
+        if strict:
+            raise ValueError(msg)
         return None, [], []
+
+    if not data or len(data) < 8 or not data.startswith(b'vrsn'):
+        return _fail("Cabeçalho vrsn ausente ou inválido em neworder.pref.")
 
     try:
         vrsn_len = struct.unpack('>I', data[4:8])[0]
         header_end = 8 + vrsn_len
-        if header_end > len(data):
-            return None, [], []
+        if vrsn_len == 0 or header_end > len(data):
+            return _fail(
+                f"Cabeçalho vrsn inválido ou truncado em neworder.pref "
+                f"(vrsn_len={vrsn_len}, arquivo={len(data)} bytes)."
+            )
         header = data[:header_end]
-    except Exception:
-        return None, [], []
+    except Exception as e:
+        return _fail(f"Falha ao decodificar cabeçalho vrsn de neworder.pref: {e}")
 
     ordered_crates = []
     outros_blocos = []
     idx = header_end
     total_len = len(data)
 
-    while idx + 8 <= total_len:
+    while idx < total_len:
+        if idx + 8 > total_len:
+            return _fail(
+                f"Bytes residuais não interpretáveis no final de neworder.pref "
+                f"({total_len - idx} bytes)."
+            )
+
         tag = data[idx:idx+4]
+        if not all(32 <= b <= 126 for b in tag):
+            return _fail(f"Tag de bloco inválida em neworder.pref no offset {idx}.")
+
         try:
             block_len = struct.unpack('>I', data[idx+4:idx+8])[0]
-        except Exception:
-            break
+        except Exception as e:
+            return _fail(f"Falha ao ler tamanho do bloco em neworder.pref: {e}")
+
         block_end = idx + 8 + block_len
         if block_end > total_len:
-            break
+            return _fail(
+                f"Bloco '{tag.decode('ascii', errors='replace')}' truncado em neworder.pref "
+                f"(esperado até {block_end}, arquivo tem {total_len} bytes)."
+            )
+
         raw_block = data[idx:block_end]
 
         if tag == b'nior':
             nior_payload = data[idx+8:block_end]
-            if len(nior_payload) >= 8 and nior_payload[:4] == b'tvcn':
+            if len(nior_payload) < 8:
+                return _fail("Bloco 'nior' truncado ou vazio em neworder.pref.")
+
+            p_idx = 0
+            found_tvcn = False
+            while p_idx < len(nior_payload):
+                if p_idx + 8 > len(nior_payload):
+                    return _fail("Sub-bloco interno de 'nior' truncado ou com bytes residuais em neworder.pref.")
+                p_tag = nior_payload[p_idx:p_idx+4]
+                if not all(32 <= b <= 126 for b in p_tag):
+                    return _fail("Sub-tag inválida dentro de bloco 'nior' em neworder.pref.")
                 try:
-                    tvcn_len = struct.unpack('>I', nior_payload[4:8])[0]
-                    if 8 + tvcn_len <= len(nior_payload):
-                        c_name = nior_payload[8:8+tvcn_len].decode('utf-16-be')
-                        ordered_crates.append(normalizar_nfc(c_name))
-                        idx = block_end
-                        continue
-                except Exception:
-                    pass
+                    p_len = struct.unpack('>I', nior_payload[p_idx+4:p_idx+8])[0]
+                except Exception as e:
+                    return _fail(f"Falha ao ler tamanho de sub-bloco em 'nior': {e}")
+                p_end = p_idx + 8 + p_len
+                if p_end > len(nior_payload):
+                    return _fail(
+                        f"Sub-bloco '{p_tag.decode('ascii', errors='replace')}' truncado dentro de 'nior'."
+                    )
+                if p_tag == b'tvcn':
+                    raw_tvcn = nior_payload[p_idx+8:p_end]
+                    if len(raw_tvcn) % 2 != 0:
+                        return _fail("Payload 'tvcn' com comprimento ímpar inválido para UTF-16-BE.")
+                    try:
+                        c_name = raw_tvcn.decode('utf-16-be')
+                    except UnicodeDecodeError as e:
+                        return _fail(f"Nome de crate 'tvcn' inválido em UTF-16-BE: {e}")
+                    ordered_crates.append(normalizar_nfc(c_name))
+                    found_tvcn = True
+                p_idx = p_end
+
+            if not found_tvcn:
+                return _fail("Bloco 'nior' sem sub-bloco 'tvcn' válido em neworder.pref.")
+            idx = block_end
+            continue
+
         outros_blocos.append(raw_block)
         idx = block_end
 
@@ -444,10 +495,25 @@ def _build_plan_hash(plan_payload: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _compute_sha256_batch(paths: list) -> dict:
+    """Calcula SHA-256 integral de uma lista de caminhos em paralelo preservando exatidão."""
+    if not paths:
+        return {}
+    if len(paths) <= 16:
+        return {p: _sha256_file(p) for p in paths}
+    max_workers = min(8, max(2, os.cpu_count() or 4))
+    results = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        for p, digest in zip(paths, pool.map(_sha256_file, paths, chunksize=16)):
+            results[p] = digest
+    return results
+
+
 def _scan_audio_files_snapshot(path_mp3: Path) -> tuple:
     """Coleta snapshot determinístico dos arquivos de áudio atuais (abs_path, size, mtime_ns, sha256)."""
     snapshot = {}
     erros = []
+    pending_paths = []
 
     def _on_err(os_err):
         erros.append(str(os_err))
@@ -471,10 +537,17 @@ def _scan_audio_files_snapshot(path_mp3: Path) -> tuple:
                     "abs_path": abs_str,
                     "size": st.st_size,
                     "mtime_ns": getattr(st, 'st_mtime_ns', int(st.st_mtime * 1e9)),
-                    "sha256": _sha256_file(caminho_completo),
+                    "sha256": "",
                 }
+                pending_paths.append((abs_str, caminho_completo))
             except OSError as e:
                 erros.append(f"{caminho_completo}: {e}")
+
+    if pending_paths:
+        digests = _compute_sha256_batch([p for _, p in pending_paths])
+        for abs_str, p in pending_paths:
+            snapshot[abs_str]["sha256"] = digests.get(p, "")
+
     return snapshot, erros
 
 
@@ -834,7 +907,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
                             "rel_path": relativo_str,
                             "size": tamanho,
                             "mtime_ns": mtime_ns,
-                            "sha256": _sha256_file(caminho_completo),
+                            "_path_obj": caminho_completo,
                         })
 
                     # Auditoria precisa de duplicidades
@@ -987,6 +1060,15 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
         # ==========================================================================
         # FASE 2: PLANEJAMENTO
         # ==========================================================================
+        if dry_run and arquivos_plan_records and not varredura_incompleta:
+            plan_digests = _compute_sha256_batch([rec["_path_obj"] for rec in arquivos_plan_records])
+            for rec in arquivos_plan_records:
+                p_obj = rec.pop("_path_obj", None)
+                rec["sha256"] = plan_digests.get(p_obj, "") if p_obj is not None else ""
+        else:
+            for rec in arquivos_plan_records:
+                rec.pop("_path_obj", None)
+
         if varredura_incompleta:
             _log_fase("varredura", "falha", f"{len(erros_leitura)} erro(s) de leitura")
             _log_fase("planejamento", "cancelado", "Varredura incompleta")
@@ -1014,6 +1096,19 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     # ==========================================================================
     # FASE 3: VALIDAÇÃO PRÉVIA
     # ==========================================================================
+    neworder_pre_check_file = path_serato / "neworder.pref"
+    if not erros_gravacao and neworder_pre_check_file.exists():
+        try:
+            pref_check_bytes = neworder_pre_check_file.read_bytes()
+            parse_neworder_pref(pref_check_bytes, strict=True)
+        except Exception as e_pref_pre:
+            err_pref_pre = (
+                f"neworder.pref inválido ou corrompido (arquivo original preservado, "
+                f"sobrescrita bloqueada): {e_pref_pre}"
+            )
+            erros_gravacao.append(err_pref_pre)
+            print(f"\n❌ [VALIDAÇÃO neworder.pref] {err_pref_pre}", file=sys.stderr, flush=True)
+
     validacao_previa_ok = (not varredura_incompleta) and (not erros_gravacao)
     if validacao_previa_ok and not dry_run:
         try:
@@ -1256,21 +1351,28 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
     print("\n🧹 Verificando preferências de exibição de crates (neworder.pref)...", flush=True)
     neworder_file = path_serato / "neworder.pref"
 
-    # Lê ordenação pré-existente
+    # Lê ordenação pré-existente com validação estrita; jamais reconstrói arquivo inválido
     ordem_existente = []
     header_pref = None
     outros_pref_blocos = []
+    pref_invalido = False
     if neworder_file.exists():
         try:
             pref_existed_before = True
             pref_orig_bytes = neworder_file.read_bytes()
-            h_p, ord_p, out_p = parse_neworder_pref(pref_orig_bytes)
-            if h_p is not None:
-                header_pref = h_p
-                ordem_existente = ord_p
-                outros_pref_blocos = out_p
-        except Exception:
-            pass
+            h_p, ord_p, out_p = parse_neworder_pref(pref_orig_bytes, strict=True)
+            header_pref = h_p
+            ordem_existente = ord_p
+            outros_pref_blocos = out_p
+        except Exception as e_pref_parse:
+            pref_invalido = True
+            err_pref_parse = (
+                f"neworder.pref inválido ou corrompido (arquivo original preservado, "
+                f"sobrescrita bloqueada): {e_pref_parse}"
+            )
+            if err_pref_parse not in erros_gravacao:
+                erros_gravacao.append(err_pref_parse)
+            print(f"   ❌ {err_pref_parse}", file=sys.stderr, flush=True)
 
     # Mantém a ordem original do DJ para crates existentes, remove excluídas, adiciona novas ao final
     conjunto_crates_atuais = set()
@@ -1294,7 +1396,7 @@ def sincronizar_biblioteca(mp3_dir_str: str, serato_dir_str: str, logs_dir_str: 
             if item not in lista_pref_final:
                 lista_pref_final.append(item)
 
-    if not dry_run and not varredura_incompleta and not erros_gravacao:
+    if not dry_run and not varredura_incompleta and not erros_gravacao and not pref_invalido:
         blocos_nior = []
         for item in lista_pref_final:
             item_limpo = item.replace("[", "").replace("]", "").replace("'", "").replace('"', "")

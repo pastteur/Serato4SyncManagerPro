@@ -290,11 +290,12 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
           filepath: trackPath
         });
         const data = JSON.parse(resJson);
-        if (data.sucesso) {
-          setCuePreview(data);
-          onAddLog(`✅ Hot Cues calculados (${data.bpm || 'Auto'} BPM · ${roundSec(data.duracao)}s).`);
+        setCuePreview(data);
+        if (data.sucesso && data.confiavel) {
+          const confPct = Math.round((data.confianca ?? 0) * 100);
+          onAddLog(`✅ Hot Cues calculados (${data.bpm || 'Auto'} BPM · ${roundSec(data.duracao)}s · Confiança ${confPct}%).`);
         } else {
-          onAddLog(`❌ Erro no cálculo: ${data.erro}`);
+          onAddLog(`⚠️ Análise inconclusiva (${Math.round((data.confianca ?? 0) * 100)}%): ${data.erro || data.motivo || 'transiente não confiável'}`);
         }
       }
     } catch (e) {
@@ -929,8 +930,8 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                 <button
                   type="button"
                   onClick={handleApplySingle}
-                  disabled={isApplying}
-                  className="px-3 py-1 rounded bg-serato-neonGreen hover:bg-emerald-400 text-black text-xs font-bold transition cursor-pointer flex items-center gap-1"
+                  disabled={isApplying || !cuePreview.sucesso || !cuePreview.confiavel || !cuePreview.cues?.length}
+                  className="px-3 py-1 rounded bg-serato-neonGreen hover:bg-emerald-400 text-black text-xs font-bold transition cursor-pointer flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5" />
                   <span>{isApplying ? 'Gravando...' : 'Gravar Cues'}</span>
@@ -944,11 +945,23 @@ export const AutoCueGenerator: React.FC<AutoCueGeneratorProps> = ({
                 <p className="font-semibold text-slate-400">Nenhuma faixa selecionada para prévia.</p>
                 <p className="text-[11px] text-slate-600 mt-1">Clique em qualquer faixa na lista à esquerda para calcular a métrica de Hot Cues.</p>
               </div>
+            ) : !cuePreview.confiavel || !cuePreview.cues?.length ? (
+              <div className="space-y-3 pt-4">
+                <div className="text-xs text-slate-300 font-mono">
+                  Faixa: <b className="text-white truncate block">{selectedFile.split('/').pop()}</b>
+                  Duração: <b className="text-serato-cyan">{roundSec(cuePreview.duracao)}s</b> | BPM: <b className="text-serato-gold">{cuePreview.bpm || 'Auto'}</b> | Confiança:{' '}
+                  <b className="text-amber-400">{Math.round((cuePreview.confianca ?? 0) * 100)}% (Inconclusiva)</b>
+                </div>
+                <div className="bg-amber-950/50 border border-amber-600/60 text-amber-200 rounded-lg p-3 text-xs">
+                  ⚠️ Análise de transientes inconclusiva ({cuePreview.motivo || 'baixa confiança'}). Nenhum Hot Cue foi gerado para evitar marcações imprecisas.
+                </div>
+              </div>
             ) : (
               <div className="space-y-3 pt-2">
                 <div className="text-xs text-slate-300 font-mono">
                   Faixa: <b className="text-white truncate block">{selectedFile.split('/').pop()}</b>
-                  Duração: <b className="text-serato-cyan">{roundSec(cuePreview.duracao)}s</b> | BPM: <b className="text-serato-gold">{cuePreview.bpm || 'Auto'}</b>
+                  Duração: <b className="text-serato-cyan">{roundSec(cuePreview.duracao)}s</b> | BPM: <b className="text-serato-gold">{cuePreview.bpm || 'Auto'}</b> | Confiança:{' '}
+                  <b className="text-emerald-400">{Math.round((cuePreview.confianca ?? 0) * 100)}%</b>
                 </div>
 
                 {/* Linha do Tempo */}

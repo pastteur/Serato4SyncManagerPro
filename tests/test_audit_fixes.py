@@ -537,8 +537,9 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         if not auto_cue.mutagen:
             self.skipTest("mutagen não disponível")
 
+        from tests.fixtures.acoustic_fixtures import AcousticFixtureGenerator
         arquivo = self.mp3_dir / "cues.mp3"
-        self._create_long_dummy_mp3(arquivo, duration_sec=180.0)
+        AcousticFixtureGenerator.create_tagged_transient_mp3(arquivo, title="Cues Track", bpm="124.0", duration_sec=14.0)
 
         home_original = auto_cue.BACKUP_DB_PATH
         auto_cue.BACKUP_DB_PATH = self.root_path / "cues_backup.sqlite"
@@ -572,6 +573,7 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         if not auto_cue.mutagen:
             self.skipTest("mutagen não disponível")
 
+        from tests.fixtures.acoustic_fixtures import AcousticFixtureGenerator
         home_original = auto_cue.BACKUP_DB_PATH
         auto_cue.BACKUP_DB_PATH = self.root_path / "cues_backup.sqlite"
         journal_original = journal.JOURNAL_PATH
@@ -579,8 +581,9 @@ class TestSeratoSyncProAuditFixes(unittest.TestCase):
         try:
             for nome in ("Alvo.mp3", "Outro.mp3"):
                 arquivo = self.mp3_dir / nome
-                self._create_long_dummy_mp3(arquivo, duration_sec=180.0)
-                auto_cue.generate_and_save_serato_cues(str(arquivo))
+                AcousticFixtureGenerator.create_tagged_transient_mp3(arquivo, title=nome, bpm="124.0", duration_sec=14.0)
+                res = auto_cue.generate_and_save_serato_cues(str(arquivo))
+                self.assertTrue(res.get("sucesso"), res)
 
             filtrado = auto_cue.list_cue_backups(search="Alvo")
             self.assertEqual(filtrado["total"], 1)

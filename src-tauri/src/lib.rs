@@ -1731,7 +1731,12 @@ mod commands {
                 Ok(status) => {
                     let code = status.code().unwrap_or(-1);
                     if status.success() {
-                        (true, code, "Sincronização concluída com sucesso.".into())
+                        let ok_msg = if dry_run {
+                            "Pré-avaliação (Modo Análise) concluída com sucesso. Nenhuma alteração gravada no HD."
+                        } else {
+                            "Sincronização concluída com sucesso."
+                        };
+                        (true, code, ok_msg.into())
                     } else {
                         let err_detail = if !stderr_output.trim().is_empty() {
                             format!("Erro no motor Python (código {}): {}", code, stderr_output.trim())
@@ -2373,8 +2378,13 @@ mod commands {
         Err(format!("{}: {}", exec_err_prefix, detail))
     }
 
-    /// Executa um script Python e devolve a resposta JSON de forma robusta e resiliente.
-    fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
+    /// Executa um script Python e devolve a resposta JSON com timeout configurável.
+    fn run_py_json_with_timeout(
+        app: &AppHandle,
+        script: &str,
+        args: &[String],
+        timeout_secs: u64,
+    ) -> Result<String, String> {
         let path = match find_canonical_python_script(Some(app), script) {
             Ok(p) => p,
             Err(e) => {
@@ -2466,7 +2476,7 @@ mod commands {
             err
         });
 
-        let timeout = Duration::from_secs(120);
+        let timeout = Duration::from_secs(timeout_secs);
         let start_time = std::time::Instant::now();
         let exit_status = loop {
             match child.try_wait() {
@@ -2481,8 +2491,8 @@ mod commands {
                         let _ = err_thread.join();
                         return Err(format_structured_error(
                             "PYTHON_TIMEOUT",
-                            &format!("Tempo limite de 120s excedido ao executar {}", script),
-                            serde_json::json!({ "script": script, "timeout_seconds": 120 }),
+                            &format!("Tempo limite de {}s excedido ao executar {}", timeout_secs, script),
+                            serde_json::json!({ "script": script, "timeout_seconds": timeout_secs }),
                         ));
                     }
                     std::thread::sleep(Duration::from_millis(50));
@@ -2503,6 +2513,11 @@ mod commands {
         let stdout = out_thread.join().unwrap_or_default();
         let stderr = err_thread.join().unwrap_or_default();
         evaluate_python_json_output(script, exit_status.code(), exit_status.success(), &stdout, &stderr)
+    }
+
+    /// Executa um script Python e devolve a resposta JSON de forma robusta e resiliente (timeout padrão 120s).
+    fn run_py_json(app: &AppHandle, script: &str, args: &[String]) -> Result<String, String> {
+        run_py_json_with_timeout(app, script, args, 120)
     }
 
     pub(crate) fn evaluate_python_json_output(
@@ -2775,21 +2790,48 @@ mod commands {
 
     #[tauri::command]
     pub async fn check_crate_references(app: AppHandle, serato_path: String) -> Result<String, String> {
-        run_py_json(&app, "library_tools.py", &["--check-refs".into(), "--serato".into(), serato_path])
+        tauri::async_runtime::spawn_blocking(move || {
+            run_py_json_with_timeout(
+                &app,
+                "library_tools.py",
+                &["--check-refs".into(), "--serato".into(), serato_path],
+                300,
+            )
+        })
+        .await
+        .map_err(|e| format!("Falha na thread de verificação de referências: {}", e))?
     }
 
     #[tauri::command]
     pub async fn library_health(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
-        run_py_json(&app, "library_tools.py", &[
-            "--health".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
-        ])
+        tauri::async_runtime::spawn_blocking(move || {
+            run_py_json_with_timeout(
+                &app,
+                "library_tools.py",
+                &[
+                    "--health".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
+                ],
+                600,
+            )
+        })
+        .await
+        .map_err(|e| format!("Falha na thread de saúde da biblioteca: {}", e))?
     }
 
     #[tauri::command]
     pub async fn export_html_report(app: AppHandle, mp3_path: String, serato_path: String) -> Result<String, String> {
-        run_py_json(&app, "library_tools.py", &[
-            "--export-html-report".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
-        ])
+        tauri::async_runtime::spawn_blocking(move || {
+            run_py_json_with_timeout(
+                &app,
+                "library_tools.py",
+                &[
+                    "--export-html-report".into(), "--mp3".into(), mp3_path, "--serato".into(), serato_path,
+                ],
+                600,
+            )
+        })
+        .await
+        .map_err(|e| format!("Falha na thread de relatório HTML: {}", e))?
     }
 
     #[tauri::command]
@@ -2855,7 +2897,16 @@ mod commands {
 
     #[tauri::command]
     pub async fn scan_new_tracks(app: AppHandle, mp3_path: String) -> Result<String, String> {
-        run_py_json(&app, "library_tools.py", &["--scan-new".into(), "--mp3".into(), mp3_path])
+        tauri::async_runtime::spawn_blocking(move || {
+            run_py_json_with_timeout(
+                &app,
+                "library_tools.py",
+                &["--scan-new".into(), "--mp3".into(), mp3_path],
+                300,
+            )
+        })
+        .await
+        .map_err(|e| format!("Falha na thread de busca por novas faixas: {}", e))?
     }
 
     #[tauri::command]
@@ -3474,7 +3525,7 @@ mod commands {
         let mut cmd = find_python_cmd(Some(&app), "auto_cue.py")?;
         cmd.arg("--preview");
         cmd.arg(&filepath);
-        run_python_output_checked(cmd, "Falha ao calcular Hot Cues", "Erro ao calcular Hot Cues")
+        run_python_json_allow_domain_error(cmd, "Falha ao calcular Hot Cues", "Erro ao calcular Hot Cues")
     }
 
     #[tauri::command]
@@ -4139,6 +4190,86 @@ mod commands {
         run_py_json(&app, "crate_ops.py", &args)
     }
 
+    pub(crate) fn evaluate_energy_batch_output(
+        exit_code: Option<i32>,
+        exit_success: bool,
+        final_json: &str,
+        stderr: &str,
+    ) -> Result<String, String> {
+        if !exit_success {
+            let code = exit_code.unwrap_or(-1);
+            let detail = if stderr.trim().is_empty() {
+                format!("Análise de energia falhou (código {})", code)
+            } else {
+                format!("Análise de energia falhou: {}", stderr.trim())
+            };
+            return Err(format_structured_error(
+                "ENERGY_BATCH_FAILED",
+                &detail,
+                serde_json::json!({
+                    "exit_code": code,
+                    "stderr": stderr.trim()
+                }),
+            ));
+        }
+
+        let trimmed = final_json.trim();
+        if trimmed.is_empty() {
+            return Err(format_structured_error(
+                "ENERGY_MISSING_FINAL_RESULT",
+                "Análise de energia concluiu sem emitir o resultado JSON final estruturado (execução não confirmada).",
+                serde_json::json!({
+                    "exit_code": exit_code,
+                    "stderr": stderr.trim()
+                }),
+            ));
+        }
+
+        let val: serde_json::Value = serde_json::from_str(trimmed).map_err(|e| {
+            format_structured_error(
+                "ENERGY_INVALID_FINAL_RESULT",
+                &format!("Resultado final da análise de energia inválido: {}", e),
+                serde_json::json!({ "raw": trimmed }),
+            )
+        })?;
+
+        let tipo_ok = val.get("tipo").and_then(|v| v.as_str()) == Some("fim");
+        let sucesso_opt = val.get("sucesso").and_then(|v| v.as_bool());
+        if !tipo_ok || sucesso_opt.is_none() {
+            return Err(format_structured_error(
+                "ENERGY_MALFORMED_FINAL_RESULT",
+                "Payload final da análise de energia não segue o contrato esperado ('tipo': 'fim', 'sucesso': bool).",
+                serde_json::json!({ "payload": val }),
+            ));
+        }
+
+        if sucesso_opt == Some(false) {
+            let msg = val
+                .get("erro")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Análise de energia retornou falha sem detalhe adicional.");
+            return Err(format_structured_error(
+                "ENERGY_DOMAIN_ERROR",
+                msg,
+                serde_json::json!({ "payload": val }),
+            ));
+        }
+
+        let has_metrics = val.get("total").and_then(|v| v.as_u64()).is_some()
+            && val.get("analisadas").and_then(|v| v.as_u64()).is_some()
+            && val.get("gravadas").and_then(|v| v.as_u64()).is_some()
+            && val.get("erros").and_then(|v| v.as_u64()).is_some();
+        if !has_metrics {
+            return Err(format_structured_error(
+                "ENERGY_INCOMPLETE_FINAL_RESULT",
+                "Payload final da análise de energia não contém os contadores estruturados obrigatórios.",
+                serde_json::json!({ "payload": val }),
+            ));
+        }
+
+        Ok(val.to_string())
+    }
+
     #[tauri::command]
     #[allow(clippy::too_many_arguments)]
     pub async fn analyze_energy_batch(
@@ -4189,29 +4320,23 @@ mod commands {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let trimmed = line.trim();
                 if trimmed.starts_with('{') {
-                    if trimmed.contains("\"tipo\": \"progresso\"") || trimmed.contains("\"tipo\":\"progresso\"") {
-                        let _ = window.emit("energy-progress", trimmed);
-                    } else if trimmed.contains("\"tipo\": \"fim\"") || trimmed.contains("\"tipo\":\"fim\"") {
-                        final_json = trimmed.to_string();
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                        match val.get("tipo").and_then(|v| v.as_str()) {
+                            Some("progresso") => {
+                                let _ = window.emit("energy-progress", trimmed);
+                            }
+                            Some("fim") => {
+                                final_json = trimmed.to_string();
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
         }
         let stderr_output = err_drain.join().unwrap_or_default();
         let status = child.wait().map_err(|e| format!("Falha ao aguardar análise de energia: {}", e))?;
-        if !status.success() {
-            let detail = if stderr_output.trim().is_empty() {
-                format!("Análise de energia falhou (código {:?})", status.code())
-            } else {
-                format!("Análise de energia falhou: {}", stderr_output.trim())
-            };
-            return Err(detail);
-        }
-        if final_json.is_empty() {
-            Ok("{\"sucesso\": true}".into())
-        } else {
-            Ok(final_json)
-        }
+        evaluate_energy_batch_output(status.code(), status.success(), &final_json, &stderr_output)
     }
 
     #[tauri::command]
@@ -4867,5 +4992,52 @@ mod tests {
         assert!(crash_err.contains("Traceback fatal"));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn test_qa006_evaluate_energy_batch_output_contract() {
+        // Exit 0 sem payload final estruturado deve falhar explicitamente
+        let missing_err = commands::evaluate_energy_batch_output(Some(0), true, "", "").unwrap_err();
+        assert!(missing_err.contains("ENERGY_MISSING_FINAL_RESULT"));
+
+        // JSON sem tipo=fim ou sem métricas obrigatórias deve falhar
+        let malformed = commands::evaluate_energy_batch_output(
+            Some(0),
+            true,
+            r#"{"sucesso":true}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(malformed.contains("ENERGY_MALFORMED_FINAL_RESULT"));
+
+        let incomplete = commands::evaluate_energy_batch_output(
+            Some(0),
+            true,
+            r#"{"tipo":"fim","sucesso":true}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(incomplete.contains("ENERGY_INCOMPLETE_FINAL_RESULT"));
+
+        // Domain error com sucesso=false deve falhar
+        let domain_err = commands::evaluate_energy_batch_output(
+            Some(0),
+            true,
+            r#"{"tipo":"fim","sucesso":false,"erro":"Crate não encontrada"}"#,
+            "",
+        )
+        .unwrap_err();
+        assert!(domain_err.contains("ENERGY_DOMAIN_ERROR"));
+        assert!(domain_err.contains("Crate não encontrada"));
+
+        // Payload completo e válido deve ser aceito
+        let valid = commands::evaluate_energy_batch_output(
+            Some(0),
+            true,
+            r#"{"tipo":"fim","sucesso":true,"total":3,"analisadas":3,"gravadas":2,"erros":0,"resultados":[]}"#,
+            "",
+        )
+        .unwrap();
+        assert!(valid.contains("\"gravadas\":2"));
     }
 }

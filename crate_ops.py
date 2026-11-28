@@ -26,6 +26,7 @@ import shutil
 import struct
 import hashlib
 import argparse
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -42,11 +43,16 @@ from serato_macos_app import (
 
 
 def library_root_for(serato_dir):
+    """Resolve de forma unificada a raiz relativa usada pelo Serato para faixas."""
     p = Path(os.path.expanduser(str(serato_dir))).resolve()
     if str(p).startswith("/Volumes/"):
         return p.parent
-    if p.parent == Path.home() or p.parent.parent == Path.home():
-        return Path.home()
+    try:
+        home = Path.home().resolve()
+        if p == home or p.is_relative_to(home):
+            return home
+    except Exception:
+        pass
     return p.parent
 
 
@@ -65,6 +71,28 @@ def calc_crate_sha256(filepath: Path) -> str:
         while chunk := f.read(65536):
             h.update(chunk)
     return h.hexdigest()
+
+
+def read_and_validate_crate_full(crate_path: Path) -> Tuple[bytes, List[str], List[Tuple[str, bytes]], List[bytes]]:
+    """
+    Lê e valida estruturalmente um arquivo binário .crate existente,
+    retornando também os blocos 'otrk' originais completos para preservação de sub-blocos.
+    """
+    if not crate_path.exists():
+        raise FileNotFoundError(f"Crate não encontrada: {crate_path.name}")
+    try:
+        data = crate_path.read_bytes()
+    except Exception as e:
+        raise IOError(f"Falha de I/O ao ler crate [{crate_path.name}]: {e}")
+
+    if len(data) == 0:
+        raise ValueError(f"Crate corrompida: arquivo vazio (0 bytes) [{crate_path.name}]")
+
+    header, tracks, blocos_otrk, outros_blocos = parse_crate_binary(data, strict=True)
+    if header is None:
+        raise ValueError(f"Crate corrompida ou estrutura inválida (vrsn ausente/inválido) [{crate_path.name}]")
+
+    return header, tracks, blocos_otrk, outros_blocos
 
 
 def read_and_validate_crate(crate_path: Path) -> Tuple[bytes, List[str], List[bytes]]:
@@ -88,6 +116,60 @@ def read_and_validate_crate(crate_path: Path) -> Tuple[bytes, List[str], List[by
         raise ValueError(f"Crate corrompida ou estrutura inválida (vrsn ausente/inválido) [{crate_path.name}]")
 
     return header, tracks, outros_blocos
+
+
+def _build_otrk_preserving_subblocks(rel: str, raw_otrk_block: Optional[bytes] = None) -> bytes:
+    """
+    Constrói um bloco 'otrk' para a faixa `rel` preservando integralmente quaisquer
+    sub-blocos adicionais (além de 'ptrk') presentes no bloco `otrk` original.
+    """
+    if not raw_otrk_block or len(raw_otrk_block) < 8 or raw_otrk_block[:4] != b'otrk':
+        ptrk = criar_tag_tlv('ptrk', rel)
+        return b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
+
+    try:
+        otrk_len = struct.unpack('>I', raw_otrk_block[4:8])[0]
+        if 8 + otrk_len != len(raw_otrk_block):
+            ptrk = criar_tag_tlv('ptrk', rel)
+            return b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
+
+        payload = raw_otrk_block[8:]
+        expected_ptrk_bytes = rel.encode('utf-16-be')
+        p_idx = 0
+        rebuilt_parts = []
+        replaced_ptrk = False
+
+        while p_idx < len(payload):
+            if p_idx + 8 > len(payload):
+                ptrk = criar_tag_tlv('ptrk', rel)
+                return b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
+            p_tag = payload[p_idx:p_idx+4]
+            p_len = struct.unpack('>I', payload[p_idx+4:p_idx+8])[0]
+            p_end = p_idx + 8 + p_len
+            if p_end > len(payload):
+                ptrk = criar_tag_tlv('ptrk', rel)
+                return b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
+            sub_raw = payload[p_idx:p_end]
+            if p_tag == b'ptrk' and not replaced_ptrk:
+                if payload[p_idx+8:p_end] == expected_ptrk_bytes and len(rebuilt_parts) == 0 and p_end == len(payload):
+                    return raw_otrk_block
+                if payload[p_idx+8:p_end] == expected_ptrk_bytes:
+                    rebuilt_parts.append(sub_raw)
+                else:
+                    rebuilt_parts.append(criar_tag_tlv('ptrk', rel))
+                replaced_ptrk = True
+            else:
+                rebuilt_parts.append(sub_raw)
+            p_idx = p_end
+
+        if not replaced_ptrk:
+            rebuilt_parts.insert(0, criar_tag_tlv('ptrk', rel))
+
+        new_payload = b''.join(rebuilt_parts)
+        return b'otrk' + struct.pack('>I', len(new_payload)) + new_payload
+    except Exception:
+        ptrk = criar_tag_tlv('ptrk', rel)
+        return b'otrk' + struct.pack('>I', len(ptrk)) + ptrk
 
 
 def restore_crate_from_backup_atomic(crate_path: Path, backup_path: Path, expected_hash: Optional[str] = None) -> Tuple[bool, str]:
@@ -175,16 +257,19 @@ def restore_crate_from_backup_atomic(crate_path: Path, backup_path: Path, expect
 def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                        header_antigo: Optional[bytes] = None,
                        outros_blocos: Optional[List[bytes]] = None,
-                       action_name: str = "write_crate") -> Dict[str, Any]:
+                       action_name: str = "write_crate",
+                       track_blocks: Optional[List[Tuple[str, bytes]]] = None) -> Dict[str, Any]:
     """
     Grava uma lista de caminhos relativos em arquivo binário .crate com substituição
-    atômica (UUID temp), fsync, backup validado por SHA-256, journal e rollback automático.
+    atômica (UUID temp), fsync, backup validado por SHA-256, journal e rollback automático,
+    preservando blocos desconhecidos no nível raiz e sub-blocos internos de 'otrk'.
     """
     crate_path.parent.mkdir(parents=True, exist_ok=True)
     crate_ja_existia = crate_path.exists()
     bak = crate_path.with_suffix('.bak')
     versioned_bak = None
     orig_hash = None
+    otrk_check: List[Tuple[str, bytes]] = []
 
     if crate_ja_existia:
         # 1. Valida se a crate original é íntegra antes de qualquer alteração
@@ -195,7 +280,7 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                     "sucesso": False,
                     "erro": f"Crate original [{crate_path.name}] está vazia (0 bytes / inválida). Substituição silenciosa cancelada."
                 }
-            h_check, _, _, ob_check = parse_crate_binary(orig_data)
+            h_check, _, otrk_check, ob_check = parse_crate_binary(orig_data)
             if h_check is None:
                 return {
                     "sucesso": False,
@@ -233,6 +318,16 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
                 "erro": f"Impossível criar backup seguro da crate antes da alteração: {e_bak}"
             }
 
+    # Monta mapa de preservação de blocos 'otrk' originais por caminho normalizado
+    otrk_map: Dict[str, deque] = {}
+    for src_blocks in (track_blocks or [], otrk_check):
+        for b_path, b_raw in src_blocks:
+            norm_k = normalizar_nfc(b_path)
+            if norm_k not in otrk_map:
+                otrk_map[norm_k] = deque([b_raw])
+            elif b_raw not in otrk_map[norm_k]:
+                otrk_map[norm_k].append(b_raw)
+
     outros_blocos = outros_blocos or []
     tmp = crate_path.with_name(f".tmp_{crate_path.name}_{uuid.uuid4().hex[:8]}")
 
@@ -243,8 +338,11 @@ def write_crate_atomic(crate_path: Path, track_rel_list: List[str],
             for b in outros_blocos:
                 f.write(b)
             for rel in track_rel_list:
-                ptrk = criar_tag_tlv('ptrk', rel)
-                f.write(b'otrk' + struct.pack('>I', len(ptrk)) + ptrk)
+                norm_rel = normalizar_nfc(rel)
+                raw_otrk = None
+                if norm_rel in otrk_map and otrk_map[norm_rel]:
+                    raw_otrk = otrk_map[norm_rel].popleft()
+                f.write(_build_otrk_preserving_subblocks(rel, raw_otrk))
             f.flush()
             os.fsync(f.fileno())
 
@@ -443,7 +541,7 @@ def _update_neworder_pref_crate_name(serato: Path, old_clean_name: str, new_clea
         return
     try:
         raw = pref_path.read_bytes()
-        header, ordered_crates, outros_blocos = parse_neworder_pref(raw)
+        header, ordered_crates, outros_blocos = parse_neworder_pref(raw, strict=True)
         if header is None:
             return
 
@@ -614,14 +712,16 @@ def merge_crates(serato_dir: str, source_crates: List[str], target_crate: str) -
         return {"sucesso": False, "erro": "Nenhuma crate de origem informada para fusão."}
 
     all_tracks = []
+    collected_otrk_blocks: List[Tuple[str, bytes]] = []
     header_antigo = None
     outros_blocos = []
 
     # 1. Lê faixas já existentes na target (se houver). Se target for ilegível, aborta!
     if target_path.exists():
         try:
-            header_antigo, existentes, outros_blocos = read_and_validate_crate(target_path)
+            header_antigo, existentes, tgt_otrk, outros_blocos = read_and_validate_crate_full(target_path)
             all_tracks.extend(existentes)
+            collected_otrk_blocks.extend(tgt_otrk)
         except Exception as e_tgt:
             return {
                 "sucesso": False,
@@ -632,17 +732,28 @@ def merge_crates(serato_dir: str, source_crates: List[str], target_crate: str) -
     for sc_name in source_crates:
         sc_path = get_crate_path(subcrates, sc_name)
         try:
-            _, sc_tracks, _ = read_and_validate_crate(sc_path)
+            _, sc_tracks, sc_otrk, _ = read_and_validate_crate_full(sc_path)
         except Exception as e_sc:
             return {
                 "sucesso": False,
                 "erro": f"Operação de fusão cancelada: crate de origem [{sc_name}] não pôde ser interpretada ({e_sc}). Nenhuma alteração foi realizada."
             }
+        otrk_by_sc_track = {normalizar_nfc(p): b for p, b in sc_otrk}
         for t in sc_tracks:
             if t not in all_tracks:
                 all_tracks.append(t)
+                norm_t = normalizar_nfc(t)
+                if norm_t in otrk_by_sc_track:
+                    collected_otrk_blocks.append((norm_t, otrk_by_sc_track[norm_t]))
 
-    res = write_crate_atomic(target_path, all_tracks, header_antigo, outros_blocos, action_name="merge_crates")
+    res = write_crate_atomic(
+        target_path,
+        all_tracks,
+        header_antigo,
+        outros_blocos,
+        action_name="merge_crates",
+        track_blocks=collected_otrk_blocks,
+    )
     if res["sucesso"]:
         res["mensagem"] = f"{len(source_crates)} crate(s) fundida(s) em [{target_crate}] com sucesso ({len(all_tracks)} faixas)."
     return res

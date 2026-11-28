@@ -278,7 +278,7 @@ class TestTier1FeatureCoverage(E2ESandboxTestCase):
     def test_auto_cue_01_preview_cues(self):
         """calculate_smart_cues calculates 5 hot cues (Intro, Drop 1, Break, Drop 2, Outro)."""
         track_path = self.mp3_dir / "preview_cue.mp3"
-        self.create_synthetic_mp3(track_path, bpm="128.0", duration_frames=500)
+        self.create_synthetic_mp3(track_path, bpm="128.0", duration_frames=500, acoustic=True)
 
         cues = auto_cue.calculate_smart_cues(duration_sec=180.0, bpm_float=128.0, filepath_str=str(track_path))
         self.assertIsInstance(cues, list)
@@ -293,7 +293,7 @@ class TestTier1FeatureCoverage(E2ESandboxTestCase):
     def test_auto_cue_02_apply_and_verify_markers2(self):
         """generate_and_save_serato_cues embeds GEOB:Serato Markers2 tag into MP3."""
         track_path = self.mp3_dir / "markers2_test.mp3"
-        self.create_synthetic_mp3(track_path, bpm="125.0", duration_frames=500)
+        self.create_synthetic_mp3(track_path, bpm="125.0", duration_frames=500, acoustic=True)
 
         res = auto_cue.generate_and_save_serato_cues(str(track_path), overwrite_existing=True)
         self.assertTrue(res.get("sucesso"), res)
@@ -306,8 +306,8 @@ class TestTier1FeatureCoverage(E2ESandboxTestCase):
         """audit_crate_cues_detailed audits crate tracks and reports cue status breakdown."""
         crate_folder = self.mp3_dir / "House"
         crate_folder.mkdir(parents=True)
-        p1 = self.create_synthetic_mp3(crate_folder / "Track_1.mp3", bpm="124.0", duration_frames=500)
-        p2 = self.create_synthetic_mp3(crate_folder / "Track_2.mp3", bpm="124.0", duration_frames=500)
+        p1 = self.create_synthetic_mp3(crate_folder / "Track_1.mp3", bpm="124.0", duration_frames=500, acoustic=True)
+        p2 = self.create_synthetic_mp3(crate_folder / "Track_2.mp3", bpm="124.0", duration_frames=500, acoustic=True)
         auto_cue.generate_and_save_serato_cues(str(p1), overwrite_existing=True)
 
         res = auto_cue.audit_crate_cues_detailed(
@@ -325,7 +325,7 @@ class TestTier1FeatureCoverage(E2ESandboxTestCase):
         crate_folder = self.mp3_dir / "Techno"
         crate_folder.mkdir(parents=True)
         for i in range(4):
-            self.create_synthetic_mp3(crate_folder / f"Techno_{i}.mp3", bpm="130.0", duration_frames=500)
+            self.create_synthetic_mp3(crate_folder / f"Techno_{i}.mp3", bpm="130.0", duration_frames=500, acoustic=True)
 
         auto_cue.batch_apply_crate_cues(
             mp3_base_dir=str(self.mp3_dir),
@@ -343,7 +343,7 @@ class TestTier1FeatureCoverage(E2ESandboxTestCase):
     def test_auto_cue_05_backup_and_restore_cues(self):
         """restore_track_cues restores previously saved cue state from SQLite backup."""
         track_path = self.mp3_dir / "cue_restore.mp3"
-        self.create_synthetic_mp3(track_path, bpm="120.0", duration_frames=500)
+        self.create_synthetic_mp3(track_path, bpm="120.0", duration_frames=500, acoustic=True)
 
         # Apply cues (creates backup)
         auto_cue.generate_and_save_serato_cues(str(track_path), overwrite_existing=True)

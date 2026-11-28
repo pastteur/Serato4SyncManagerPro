@@ -183,7 +183,7 @@ class TestTier3CrossFeatureCombinations(E2ESandboxTestCase):
         """Auto-Cue marks track with Serato Markers2, Crate Ops adds it to crate, and Library Tools validates references."""
         crate_name = "Festival House"
         track_path = self.mp3_dir / "festival_track.mp3"
-        self.create_synthetic_mp3(track_path, bpm="128.0", duration_frames=500)
+        self.create_synthetic_mp3(track_path, bpm="128.0", duration_frames=500, acoustic=True)
 
         # 1. Generate and save cues
         res_cue = auto_cue.generate_and_save_serato_cues(str(track_path), overwrite_existing=True)
@@ -212,8 +212,8 @@ class TestTier3CrossFeatureCombinations(E2ESandboxTestCase):
         """Auto-Cue marks tracks and audit confirms full cue coverage in newly created Crate."""
         crate_folder = self.mp3_dir / "TechHouse"
         crate_folder.mkdir(parents=True)
-        t1 = self.create_synthetic_mp3(crate_folder / "Tech1.mp3", bpm="126.0", duration_frames=500)
-        t2 = self.create_synthetic_mp3(crate_folder / "Tech2.mp3", bpm="126.0", duration_frames=500)
+        t1 = self.create_synthetic_mp3(crate_folder / "Tech1.mp3", bpm="126.0", duration_frames=500, acoustic=True)
+        t2 = self.create_synthetic_mp3(crate_folder / "Tech2.mp3", bpm="126.0", duration_frames=500, acoustic=True)
 
         # Apply cues to both tracks
         auto_cue.generate_and_save_serato_cues(str(t1), overwrite_existing=True)
@@ -236,7 +236,7 @@ class TestTier3CrossFeatureCombinations(E2ESandboxTestCase):
         lib_folder = self.mp3_dir / "House"
         lib_folder.mkdir(parents=True)
         original_track = lib_folder / "Artist - GreatTrack.mp3"
-        self.create_synthetic_mp3(original_track, artist="Artist", title="GreatTrack", bpm="124.0", duration_frames=1000)
+        self.create_synthetic_mp3(original_track, artist="Artist", title="GreatTrack", bpm="124.0", duration_frames=1000, acoustic=True)
         auto_cue.generate_and_save_serato_cues(str(original_track), overwrite_existing=True)
 
         # 1. Sound Seal scans library
@@ -441,7 +441,7 @@ class TestTier3CrossFeatureCombinations(E2ESandboxTestCase):
 
         # 2. Add new track
         new_track = self.mp3_dir / "NewDrop.mp3"
-        self.create_synthetic_mp3(new_track, bpm="125.0", duration_frames=500)
+        self.create_synthetic_mp3(new_track, bpm="125.0", duration_frames=500, acoustic=True)
 
         # 3. Incremental scan detects new track
         scan2 = library_tools.scan_new_files(str(self.mp3_dir))
@@ -462,8 +462,8 @@ class TestTier3CrossFeatureCombinations(E2ESandboxTestCase):
     def test_comb_13_audit_metrics_aggregation_across_engines(self):
         """Cross-checks library health metrics between audio_health, auto_cue, and library_tools."""
         # Create 2 healthy tracks with cues, and 1 track with missing cues
-        self.create_synthetic_mp3(self.mp3_dir / "T1.mp3", bpm="120.0", key="8A", duration_frames=500)
-        self.create_synthetic_mp3(self.mp3_dir / "T2.mp3", bpm="124.0", key="9A", duration_frames=500)
+        self.create_synthetic_mp3(self.mp3_dir / "T1.mp3", bpm="120.0", key="8A", duration_frames=500, acoustic=True)
+        self.create_synthetic_mp3(self.mp3_dir / "T2.mp3", bpm="124.0", key="9A", duration_frames=500, acoustic=True)
         self.create_synthetic_mp3(self.mp3_dir / "T3_no_bpm.mp3", bpm="0", key="", duration_frames=500)
 
         auto_cue.generate_and_save_serato_cues(str(self.mp3_dir / "T1.mp3"), overwrite_existing=True)

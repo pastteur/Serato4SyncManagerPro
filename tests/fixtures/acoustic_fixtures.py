@@ -30,6 +30,7 @@ from tests.fixtures.synthetic_library import (
     MPEG1_L3_128K_44K_HEADER,
     MPEG_PAYLOAD_SIZE,
     FRAME_DURATION_SEC,
+    build_id3v23_tag,
     create_crate_binary,
 )
 
@@ -169,6 +170,61 @@ class AcousticFixtureGenerator:
                 "-c:a", "libmp3lame", "-b:a", "320k", str(target)
             ]
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        return target
+
+    _TRANSIENT_MP3_CACHE: dict = {}
+
+    @classmethod
+    def create_tagged_transient_mp3(
+        cls,
+        out_path: Union[str, Path],
+        title: str = "Transient Track",
+        artist: str = "Serato Artist",
+        album: str = "Synthetic Library",
+        bpm: str = "124.0",
+        key: str = "8A",
+        duration_sec: float = 13.0,
+        silence_sec: float = 0.2,
+    ) -> Path:
+        """
+        Generates and caches a genuine FFmpeg-encoded transient MP3 (silence + 1000 Hz burst)
+        and writes it with clean ID3v2.3 metadata for Auto-Cue E2E tests.
+        """
+        import tempfile
+
+        key_cache = (round(float(duration_sec), 2), round(float(silence_sec), 2))
+        if key_cache not in cls._TRANSIENT_MP3_CACHE:
+            audio_sec = max(1.0, float(duration_sec) - float(silence_sec))
+            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+                tmp_mp3 = Path(tf.name)
+            try:
+                cls.generate_transient_audio(tmp_mp3, silence_sec=silence_sec, audio_sec=audio_sec)
+                raw = tmp_mp3.read_bytes()
+                # Strip any Xing/ID3 header emitted by ffmpeg so we control ID3v2.3 cleanly
+                if raw.startswith(b"ID3") and len(raw) >= 10:
+                    s_len = (
+                        ((raw[6] & 0x7F) << 21)
+                        | ((raw[7] & 0x7F) << 14)
+                        | ((raw[8] & 0x7F) << 7)
+                        | (raw[9] & 0x7F)
+                    )
+                    raw = raw[10 + s_len:]
+                cls._TRANSIENT_MP3_CACHE[key_cache] = raw
+            finally:
+                try:
+                    tmp_mp3.unlink()
+                except Exception:
+                    pass
+
+        target = Path(out_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        frames_dict = {"TIT2": title, "TPE1": artist, "TALB": album}
+        if bpm:
+            frames_dict["TBPM"] = str(bpm)
+        if key:
+            frames_dict["TKEY"] = str(key)
+        id3_bytes = build_id3v23_tag(frames_dict, encoding=3)
+        target.write_bytes(id3_bytes + cls._TRANSIENT_MP3_CACHE[key_cache])
         return target
 
 

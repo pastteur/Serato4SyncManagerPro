@@ -17,12 +17,14 @@ import os
 
 sys.dont_write_bytecode = True
 import json
+import math
 import base64
 import struct
 import sqlite3
 import shutil
 import subprocess
 import argparse
+from array import array
 from pathlib import Path
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -382,116 +384,256 @@ def get_ffmpeg_bin():
 
 def detect_audio_transients(filepath_str: str, duration_sec: float) -> dict:
     """
-    Analisa os transientes de áudio via ffmpeg para identificar o início exato
-    do primeiro beat audível e o alinhamento de fase de compassos.
-    Usa '-v info' para capturar com fidelidade os eventos de silencedetect.
+    Analisa os transientes reais de áudio (onsets) via decodificação PCM mono pelo FFmpeg,
+    separando claramente a detecção de silêncio da detecção de beat/onset e calculando
+    um score de confiança objetivo (0.0 a 1.0).
     """
+    if not filepath_str or not os.path.exists(filepath_str) or duration_sec < 1.0:
+        return {
+            "first_beat_ms": None,
+            "silence_end_ms": None,
+            "has_transient": False,
+            "confiavel": False,
+            "confianca": 0.0,
+            "motivo": "arquivo_ou_duracao_invalida",
+        }
+
     ffmpeg_bin = get_ffmpeg_bin()
-    if not ffmpeg_bin or not filepath_str or duration_sec < 1.0:
-        return {"first_beat_ms": 500, "has_transient": False, "confiavel": False}
+    if not ffmpeg_bin:
+        return {
+            "first_beat_ms": None,
+            "silence_end_ms": None,
+            "has_transient": False,
+            "confiavel": False,
+            "confianca": 0.0,
+            "motivo": "ffmpeg_indisponivel",
+        }
+
+    sr = 10000
+    hop = 100  # 10 ms exatos por quadro
+    window_sec = min(20.0, max(1.0, float(duration_sec)))
 
     try:
-        # Detecta silêncio inicial nos primeiros 15 segundos usando '-v info'
         cmd = [
             ffmpeg_bin,
-            "-v", "info",
+            "-v", "error",
             "-ss", "0",
-            "-t", "15",
+            "-t", f"{window_sec:.2f}",
             "-i", str(filepath_str),
-            "-af", "silencedetect=noise=-35dB:d=0.06",
-            "-f", "null", "-"
+            "-ac", "1",
+            "-ar", str(sr),
+            "-f", "s16le",
+            "-",
         ]
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4, text=True)
-        if proc.returncode != 0:
-            return {"first_beat_ms": 500, "has_transient": False, "confiavel": False, "erro": "ffmpeg falhou na leitura do áudio"}
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=8)
+        if proc.returncode != 0 or not isinstance(proc.stdout, (bytes, bytearray)) or len(proc.stdout) < hop * 2:
+            return {
+                "first_beat_ms": None,
+                "silence_end_ms": None,
+                "has_transient": False,
+                "confiavel": False,
+                "confianca": 0.0,
+                "motivo": "ffmpeg_falhou_decodificacao",
+            }
 
-        lines = proc.stderr.splitlines()
+        samples = array('h')
+        usable = len(proc.stdout) - (len(proc.stdout) % 2)
+        samples.frombytes(proc.stdout[:usable])
+        if sys.byteorder == 'big':
+            samples.byteswap()
 
-        first_silence_end = None
-        has_initial_silence = False
+        num_frames = len(samples) // hop
+        if num_frames < 5:
+            return {
+                "first_beat_ms": None,
+                "silence_end_ms": None,
+                "has_transient": False,
+                "confiavel": False,
+                "confianca": 0.0,
+                "motivo": "audio_insuficiente",
+            }
 
-        import re
-        start_re = re.compile(r"silence_start:\s*([0-9.]+)")
-        end_re = re.compile(r"silence_end:\s*([0-9.]+)")
+        rms_list = []
+        db_list = []
+        log_e_list = []
+        for idx in range(num_frames):
+            start = idx * hop
+            seg = samples[start:start + hop]
+            mean_sq = sum(v * v for v in seg) / float(hop)
+            rms = math.sqrt(mean_sq)
+            db = 20.0 * math.log10(max(1e-6, rms / 32767.0))
+            rms_list.append(rms)
+            db_list.append(db)
+            log_e_list.append(math.log1p(mean_sq))
 
-        for line in lines:
-            m_start = start_re.search(line)
-            if m_start:
-                try:
-                    s_val = float(m_start.group(1))
-                    # Silêncio no início absoluto (primeiros 100ms)
-                    if s_val <= 0.10:
-                        has_initial_silence = True
-                except Exception:
-                    pass
+        # 1. Estágio separado: detecção de silêncio / piso de ruído
+        silence_db_threshold = -40.0
+        active_frames = [i for i, db in enumerate(db_list) if db > silence_db_threshold]
+        if not active_frames:
+            return {
+                "first_beat_ms": None,
+                "silence_end_ms": None,
+                "has_transient": False,
+                "confiavel": False,
+                "confianca": 0.0,
+                "motivo": "silencio_continuo",
+            }
 
-            m_end = end_re.search(line)
-            if m_end:
-                try:
-                    e_val = float(m_end.group(1))
-                    if first_silence_end is None and has_initial_silence:
-                        first_silence_end = e_val
-                except Exception:
-                    pass
+        has_initial_silence = db_list[0] <= silence_db_threshold
+        silence_end_ms = active_frames[0] * 10 if has_initial_silence else 0
 
-        # 1. Silêncio inicial detectado e finalizado dentro da janela (primeiro beat encontrado)
-        if has_initial_silence and first_silence_end is not None:
-            beat_ms = max(50, int(first_silence_end * 1000))
-            return {"first_beat_ms": beat_ms, "has_transient": True, "confiavel": True}
+        # 2. Estágio separado: detecção real de onset/transiente (salto brusco de energia)
+        # Rejeita fade-ins lentos, ruído plano ou fundo ambiente sem ataque percussivo.
+        best_onset_idx = None
+        best_onset_score = 0.0
 
-        # 2. Silêncio inicial contínuo por mais de 15s (sem transiente audível inicial)
-        if has_initial_silence and first_silence_end is None:
-            return {"first_beat_ms": 500, "has_transient": False, "confiavel": False, "motivo": "silencio_continuo"}
+        # Primeiro verifica se há ataque abrupto na janela de saltos (i >= 1)
+        for i in range(1, num_frames):
+            if db_list[i] < -30.0:
+                continue
+            pre_start = max(0, i - 5)  # 50 ms anteriores
+            pre_rms = sum(rms_list[pre_start:i]) / float(i - pre_start)
+            pre_log_e = sum(log_e_list[pre_start:i]) / float(i - pre_start)
 
-        # 3. Sem silêncio inicial: áudio se inicia imediatamente no tempo zero
-        if not has_initial_silence:
-            return {"first_beat_ms": 100, "has_transient": True, "confiavel": True}
+            log_jump = log_e_list[i] - pre_log_e
+            rms_ratio = rms_list[i] / max(1.0, pre_rms)
 
-    except Exception:
-        pass
+            if log_jump >= 2.0 and rms_ratio >= 2.5:
+                # Primeiro onset claro e forte encontrado após o silêncio/intro suave
+                best_onset_idx = i
+                best_onset_score = min(1.0, 0.55 + min(0.45, log_jump / 15.0))
+                break
 
-    return {"first_beat_ms": 500, "has_transient": False, "confiavel": False}
+        # Caso o áudio já comece com ataque forte imediato no quadro 0 (sem fade-in)
+        if best_onset_idx is None:
+            if not has_initial_silence and db_list[0] >= -26.0:
+                # Verifica que não é apenas ruído contínuo muito baixo e que mantém energia real
+                avg_early_db = sum(db_list[:min(5, num_frames)]) / float(min(5, num_frames))
+                if avg_early_db >= -26.0:
+                    conf = min(1.0, round(0.70 + max(0.0, (db_list[0] + 26.0) / 40.0), 3))
+                    return {
+                        "first_beat_ms": 100,
+                        "silence_end_ms": silence_end_ms,
+                        "has_transient": True,
+                        "confiavel": conf >= 0.60,
+                        "confianca": conf,
+                        "motivo": "ataque_imediato",
+                    }
+
+            return {
+                "first_beat_ms": None,
+                "silence_end_ms": silence_end_ms,
+                "has_transient": False,
+                "confiavel": False,
+                "confianca": 0.25 if active_frames else 0.0,
+                "motivo": "sem_transiente_confiavel",
+            }
+
+        onset_ms = best_onset_idx * 10
+        beat_ms = max(50, int(onset_ms))
+        conf = round(best_onset_score, 3)
+        return {
+            "first_beat_ms": beat_ms,
+            "silence_end_ms": silence_end_ms,
+            "has_transient": True,
+            "confiavel": conf >= 0.60,
+            "confianca": conf,
+            "motivo": "onset_detectado",
+        }
+
+    except Exception as e:
+        return {
+            "first_beat_ms": None,
+            "silence_end_ms": None,
+            "has_transient": False,
+            "confiavel": False,
+            "confianca": 0.0,
+            "motivo": f"erro_analise: {e}",
+        }
 
 
-def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0, filepath_str: str = ""):
+def calculate_smart_cues_detailed(duration_sec: float, bpm_float: float = 0.0, filepath_str: str = "") -> dict:
     """
-    Calcula os 5 pontos de Hot Cue ideais com base na métrica musical de DJs e detecção de transientes.
+    Calcula os 5 pontos de Hot Cue com validação estrita da confiança da análise de transientes.
+    Quando filepath_str é informado e a análise não for confiável, retorna sucesso=False e cues=[].
     """
-    duration_ms = duration_sec * 1000
+    duration_ms = float(duration_sec or 0.0) * 1000.0
+    if duration_ms <= 0:
+        return {
+            "sucesso": False,
+            "confiavel": False,
+            "confianca": 0.0,
+            "motivo": "duracao_invalida",
+            "transiente": None,
+            "cues": [],
+        }
 
     # Tempo por compasso (4 tempos)
     if bpm_float > 0:
         bar_ms = (60.0 / bpm_float) * 4 * 1000
     else:
-        bar_ms = 2000.0 # ~120 BPM padrão
+        bar_ms = 2000.0  # ~120 BPM padrão
 
-    first_beat_ms = 500
-    if filepath_str and os.path.exists(filepath_str):
+    trans = None
+    confiavel = True
+    confianca = 0.5
+    motivo = "estimativa_matematica_sem_arquivo"
+
+    if filepath_str:
         trans = detect_audio_transients(filepath_str, duration_sec)
-        first_beat_ms = trans.get("first_beat_ms", 500)
+        confiavel = bool(trans.get("confiavel", False))
+        confianca = float(trans.get("confianca", 0.0))
+        motivo = str(trans.get("motivo", "analise_inconclusiva"))
+        first_beat_ms = trans.get("first_beat_ms")
+        if not confiavel or not trans.get("has_transient") or first_beat_ms is None:
+            return {
+                "sucesso": False,
+                "confiavel": False,
+                "confianca": confianca,
+                "motivo": motivo,
+                "transiente": trans,
+                "cues": [],
+            }
+    else:
+        first_beat_ms = 500
 
     # 1. Intro: Primeiro beat real
-    pos_cue1 = int(first_beat_ms)
+    pos_cue1 = int(max(0, min(first_beat_ms, max(0, int(duration_ms) - 1000))))
+
+    # Espaçamento mínimo adaptativo (15s/10s em faixas longas, proporcional em faixas curtas >=10s)
+    usable_span = max(1000.0, duration_ms - pos_cue1)
+    min_gap_mid = min(15000.0, usable_span * 0.16)
+    min_gap_end = min(10000.0, usable_span * 0.12)
 
     # 2. Drop 1: 16 ou 32 compassos alinhados ao primeiro beat
     bars_for_drop1 = 16 if (bar_ms * 16) >= 20000 else 32
-    target_drop1 = first_beat_ms + (bar_ms * bars_for_drop1)
+    target_drop1 = pos_cue1 + (bar_ms * bars_for_drop1)
     if target_drop1 > duration_ms * 0.35:
-        target_drop1 = first_beat_ms + (bar_ms * 16)
-    pos_cue2 = int(min(target_drop1, duration_ms * 0.30))
+        target_drop1 = pos_cue1 + (bar_ms * 16)
+    pos_cue2 = int(max(pos_cue1 + min(500.0, usable_span * 0.08), min(target_drop1, duration_ms * 0.30)))
 
     # 3. Breakdown (Ponte): Alinhado a compasso próximo da metade
     half_time = duration_ms / 2.0
-    bars_to_half = max(1, round((half_time - first_beat_ms) / bar_ms))
-    pos_cue3 = int(max(pos_cue2 + 15000, first_beat_ms + ((bars_to_half - 4) * bar_ms)))
+    bars_to_half = max(1, round((half_time - pos_cue1) / bar_ms))
+    raw_cue3 = max(pos_cue2 + min_gap_mid, pos_cue1 + ((bars_to_half - 4) * bar_ms))
+    pos_cue3 = int(min(raw_cue3, duration_ms * 0.58))
+    if pos_cue3 <= pos_cue2:
+        pos_cue3 = int(pos_cue2 + max(250, int(usable_span * 0.12)))
 
     # 4. Drop 2 (Clímax): Meio da música + 8 compassos
-    pos_cue4 = int(min(duration_ms * 0.75, first_beat_ms + ((bars_to_half + 8) * bar_ms)))
+    raw_cue4 = pos_cue1 + ((bars_to_half + 8) * bar_ms)
+    pos_cue4 = int(min(duration_ms * 0.78, max(pos_cue3 + min_gap_mid * 0.5, raw_cue4)))
+    if pos_cue4 <= pos_cue3:
+        pos_cue4 = int(pos_cue3 + max(250, int(usable_span * 0.12)))
 
-    # 5. Outro (Mix-out): 16 compassos antes do fim alinhado ao grid
-    bars_total = max(1, int((duration_ms - first_beat_ms) / bar_ms))
+    # 5. Outro (Mix-out): 16 compassos antes do fim alinhado ao grid (sempre dentro da faixa)
+    bars_total = max(1, int((duration_ms - pos_cue1) / bar_ms))
     bars_outro = max(1, bars_total - 16)
-    pos_cue5 = int(max(pos_cue4 + 10000, first_beat_ms + (bars_outro * bar_ms)))
+    raw_cue5 = max(pos_cue4 + min_gap_end, pos_cue1 + (bars_outro * bar_ms))
+    max_cue5 = int(max(pos_cue4 + 200, duration_ms - min(500.0, duration_ms * 0.03)))
+    pos_cue5 = int(min(raw_cue5, max_cue5))
+    if pos_cue5 <= pos_cue4:
+        pos_cue5 = int(min(duration_ms - 50, pos_cue4 + max(200, int(usable_span * 0.10))))
 
     cues = [
         {"index": 0, "label": "Intro", "pos_ms": int(pos_cue1), "color": "red", "color_hex": "#cc0000"},
@@ -500,7 +642,23 @@ def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0, filepath_s
         {"index": 3, "label": "Drop 2", "pos_ms": int(pos_cue4), "color": "green", "color_hex": "#00cc00"},
         {"index": 4, "label": "Outro", "pos_ms": int(pos_cue5), "color": "orange", "color_hex": "#cc6600"},
     ]
-    return cues
+    return {
+        "sucesso": True,
+        "confiavel": confiavel,
+        "confianca": confianca,
+        "motivo": motivo,
+        "transiente": trans,
+        "cues": cues,
+    }
+
+
+def calculate_smart_cues(duration_sec: float, bpm_float: float = 0.0, filepath_str: str = ""):
+    """
+    Calcula os 5 pontos de Hot Cue ideais com base na métrica musical de DJs e detecção de transientes.
+    Retorna lista vazia ([]) se filepath_str for fornecido e a análise de transientes for inconclusiva.
+    """
+    res = calculate_smart_cues_detailed(duration_sec, bpm_float=bpm_float, filepath_str=filepath_str)
+    return res.get("cues", [])
 
 
 def repair_track_cues(filepath_str: str) -> dict:
@@ -526,13 +684,22 @@ def repair_track_cues(filepath_str: str) -> dict:
 
         existing_cues = extract_cues_from_raw_tag(raw_tag.data)
         if not existing_cues:
-            # Se não conseguiu extrair cues antigos, recalcula usando duração e BPM
+            # Se não conseguiu extrair cues antigos, recalcula usando duração e BPM apenas se análise for confiável
             duration = getattr(audio.info, 'length', 0.0)
             bpm_val = 0.0
             if 'TBPM' in audio:
                 try: bpm_val = float(str(audio['TBPM']).strip().replace(',', '.'))
                 except Exception: pass
-            existing_cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
+            cue_calc = calculate_smart_cues_detailed(duration, bpm_val, filepath_str=str(file_p))
+            if not cue_calc.get("sucesso") or not cue_calc.get("confiavel") or not cue_calc.get("cues"):
+                return {
+                    "sucesso": False,
+                    "confiavel": False,
+                    "confianca": cue_calc.get("confianca", 0.0),
+                    "motivo": cue_calc.get("motivo", "analise_inconclusiva"),
+                    "erro": f"Não foi possível reparar cues automaticamente: análise inconclusiva ({cue_calc.get('motivo', 'baixa confiança')}).",
+                }
+            existing_cues = cue_calc["cues"]
 
         # Salva backup de segurança obrigatório antes de qualquer alteração
         if not backup_track_cues(str(file_p), audio):
@@ -625,7 +792,21 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
             except Exception:
                 pass
 
-        cues = calculate_smart_cues(duration, bpm_val, filepath_str=str(file_p))
+        cue_calc = calculate_smart_cues_detailed(duration, bpm_val, filepath_str=str(file_p))
+        if not cue_calc.get("sucesso") or not cue_calc.get("confiavel") or not cue_calc.get("cues"):
+            return {
+                "sucesso": False,
+                "confiavel": bool(cue_calc.get("confiavel", False)),
+                "confianca": float(cue_calc.get("confianca", 0.0)),
+                "motivo": cue_calc.get("motivo", "analise_inconclusiva"),
+                "arquivo": file_p.name,
+                "cues": [],
+                "erro": (
+                    f"Análise de transientes inconclusiva ({cue_calc.get('motivo', 'baixa confiança')}, "
+                    f"confiança={cue_calc.get('confianca', 0.0):.2f}). Nenhum cue foi gerado ou gravado."
+                ),
+            }
+        cues = cue_calc["cues"]
 
         # Salva backup de segurança antes de alterar
         if not backup_track_cues(str(file_p), audio):
@@ -662,12 +843,66 @@ def generate_and_save_serato_cues(filepath_str: str, overwrite_existing: bool = 
 
         return {
             "sucesso": True,
+            "confiavel": bool(cue_calc.get("confiavel", True)),
+            "confianca": float(cue_calc.get("confianca", 1.0)),
             "arquivo": file_p.name,
             "cues": cues,
             "mensagem": f"5 Hot Cues oficiais gerados e mapeados para o Serato DJ Pro."
         }
     except Exception as e:
         return {"sucesso": False, "erro": str(e)}
+
+
+def _is_standard_autocue_set(cue_list: list, duration_sec: float = 0.0) -> bool:
+    """
+    Classifica criteriosamente se um conjunto de Hot Cues corresponde exatamente
+    ao padrão oficial gerado pelo Auto-Cue:
+    - Exatamente 5 marcadores nos índices únicos 0..4
+    - Rótulos oficiais por índice (Intro/Início, Drop 1, Break, Drop 2, Outro)
+    - Cores padrão exatas por índice (#cc0000, #0066cc, #cccc00, #00cc00, #cc6600)
+    - Posições válidas e estritamente crescentes ao longo da faixa
+    Qualquer divergência (cores personalizadas, rótulos próprios, índices extras/duplicados,
+    ordem/posições fora do padrão) identifica o conjunto como Personalizado DJ (Protegido).
+    """
+    if not isinstance(cue_list, list) or len(cue_list) != 5:
+        return False
+
+    standard_spec = {
+        0: {"labels": {"INTRO", "INÍCIO"}, "color": "#cc0000"},
+        1: {"labels": {"DROP 1"}, "color": "#0066cc"},
+        2: {"labels": {"BREAK"}, "color": "#cccc00"},
+        3: {"labels": {"DROP 2"}, "color": "#00cc00"},
+        4: {"labels": {"OUTRO"}, "color": "#cc6600"},
+    }
+
+    by_index = {}
+    for c in cue_list:
+        idx = c.get("index")
+        if not isinstance(idx, int) or idx not in standard_spec or idx in by_index:
+            return False
+        lbl = (c.get("label") or "").strip().upper()
+        col = (c.get("color") or "").strip().lower()
+        pos_ms = c.get("pos_ms")
+        if not lbl or lbl not in standard_spec[idx]["labels"]:
+            return False
+        if col != standard_spec[idx]["color"]:
+            return False
+        if not isinstance(pos_ms, int) or pos_ms < 0:
+            return False
+        by_index[idx] = pos_ms
+
+    if set(by_index.keys()) != {0, 1, 2, 3, 4}:
+        return False
+
+    positions = [by_index[i] for i in range(5)]
+    for i in range(4):
+        if positions[i] >= positions[i + 1]:
+            return False
+
+    if duration_sec > 0 and positions[4] > (duration_sec * 1000.0 + 500.0):
+        return False
+
+    return True
 
 
 def audit_crate_cues_detailed(
@@ -678,10 +913,28 @@ def audit_crate_cues_detailed(
 ):
     """
     Realiza uma auditoria aprofundada de todas as faixas da Crate ou Subcrate,
-    detectando Hot Cues gravados, identificando se são os Auto-Cues padrão ou Hot Cues manuais de DJ,
+    detectando Hot Cues gravados, identificando se são os Auto-Cues padrão ou Hot Cues manuais de DJ
+    (considerando quantidade, índices únicos, rótulos, cores e posições),
     e listando o que já está implantado vs pendente sem qualquer limite de paginação.
-    Trata erros de leitura adequadamente e protege cues manuais do DJ.
+    Falha explicitamente quando Mutagen estiver ausente ou houver diretórios inacessíveis.
     """
+    if mutagen is None:
+        return {
+            "sucesso": False,
+            "erro": "Dependência obrigatória 'mutagen' indisponível; auditoria de cues cancelada.",
+            "dependencia_ausente": "mutagen",
+            "varredura_incompleta": True,
+            "erros_diretorio": 0,
+            "diretorios_inacessiveis": [],
+            "total": 0,
+            "gravadas": 0,
+            "pendentes": 0,
+            "personalizadas": 0,
+            "padrao_autocue": 0,
+            "erros_leitura": 0,
+            "items": []
+        }
+
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     if not base_path.exists():
         return {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
@@ -695,6 +948,9 @@ def audit_crate_cues_detailed(
     if not target_dir.exists():
         return {
             "sucesso": True,
+            "varredura_incompleta": False,
+            "erros_diretorio": 0,
+            "diretorios_inacessiveis": [],
             "total": 0,
             "gravadas": 0,
             "pendentes": 0,
@@ -710,11 +966,12 @@ def audit_crate_cues_detailed(
     total_padrao = 0
     total_erros = 0
     items = []
+    dir_errors = []
 
-    # O Auto-Cue padrão grava exatamente 5 cues nas posições calculadas com labels bem definidos
-    STANDARD_AUTO_CUE_LABELS = {"INTRO", "DROP 1", "BREAK", "DROP 2", "OUTRO", "INÍCIO"}
+    def _on_walk_error(os_err):
+        dir_errors.append(str(os_err))
 
-    for root, dirs, files in os.walk(str(target_dir)):
+    for root, dirs, files in os.walk(str(target_dir), onerror=_on_walk_error):
         if '/.' in root or '\\.' in root:
             continue
         if crate_raiz and not include_subcrates and not subcrate:
@@ -739,28 +996,27 @@ def audit_crate_cues_detailed(
                 tipo_cue = "Sem Cues"
                 erro_msg = None
 
-                if mutagen:
-                    try:
-                        audio = mutagen.File(str(full_p))
-                        if audio is not None:
-                            dur = getattr(audio.info, 'length', 0.0)
-                            if 'TBPM' in audio:
-                                try:
-                                    bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
-                                except Exception:
-                                    pass
-                            if 'GEOB:Serato Markers2' in audio:
-                                raw_m2 = audio['GEOB:Serato Markers2'].data
-                                cues_in = extract_cues_from_raw_tag(raw_m2)
-                                if cues_in:
-                                    has_cues = True
-                                    cue_list = cues_in
-                            elif 'GEOB:Serato Markers_' in audio:
+                try:
+                    audio = mutagen.File(str(full_p))
+                    if audio is not None:
+                        dur = getattr(audio.info, 'length', 0.0)
+                        if 'TBPM' in audio:
+                            try:
+                                bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
+                            except Exception:
+                                pass
+                        if 'GEOB:Serato Markers2' in audio:
+                            raw_m2 = audio['GEOB:Serato Markers2'].data
+                            cues_in = extract_cues_from_raw_tag(raw_m2)
+                            if cues_in:
                                 has_cues = True
-                        else:
-                            erro_msg = "Formato de arquivo incompatível ou corrompido"
-                    except Exception as e:
-                        erro_msg = str(e)
+                                cue_list = cues_in
+                        elif 'GEOB:Serato Markers_' in audio:
+                            has_cues = True
+                    else:
+                        erro_msg = "Formato de arquivo incompatível ou corrompido"
+                except Exception as e:
+                    erro_msg = str(e)
 
                 if erro_msg:
                     total_erros += 1
@@ -770,21 +1026,7 @@ def audit_crate_cues_detailed(
                     total_with_cues += 1
                     status_item = "Gravado"
 
-                    # Classificação criteriosa:
-                    # O Auto-Cue padrão tem exatamente 5 marcadores (índices 0 a 4) com os labels padrão.
-                    # Se tiver quantidade diferente de 5, qualquer índice > 4, cores manuais ou rótulos próprios de DJ,
-                    # é considerado Personalizado DJ (Protegido).
-                    is_custom = False
-                    if len(cue_list) != 5:
-                        is_custom = True
-                    else:
-                        for c in cue_list:
-                            lbl = (c.get("label") or "").strip().upper()
-                            idx = c.get("index", 0)
-                            if idx > 4 or (lbl and lbl not in STANDARD_AUTO_CUE_LABELS):
-                                is_custom = True
-                                break
-
+                    is_custom = not _is_standard_autocue_set(cue_list, duration_sec=dur)
                     if is_custom:
                         total_custom += 1
                         tipo_cue = "Personalizado DJ (Protegido)"
@@ -816,8 +1058,12 @@ def audit_crate_cues_detailed(
                 })
 
     pendentes_reais = total_tracks - total_with_cues - total_erros
-    return {
-        "sucesso": True,
+    varredura_incompleta = len(dir_errors) > 0
+    result = {
+        "sucesso": not varredura_incompleta,
+        "varredura_incompleta": varredura_incompleta,
+        "erros_diretorio": len(dir_errors),
+        "diretorios_inacessiveis": dir_errors[:20],
         "total": total_tracks,
         "gravadas": total_with_cues,
         "pendentes": max(0, pendentes_reais),
@@ -826,6 +1072,12 @@ def audit_crate_cues_detailed(
         "erros_leitura": total_erros,
         "items": items
     }
+    if varredura_incompleta:
+        result["erro"] = (
+            f"Varredura incompleta: {len(dir_errors)} diretório(s) inacessível(is) "
+            "durante a auditoria de cues."
+        )
+    return result
 
 
 def scan_crate_cues(
@@ -837,6 +1089,20 @@ def scan_crate_cues(
     offset: int = 0
 ):
     """Varre faixas da Crate ou Subcrate verificando existência de Hot Cues gravados."""
+    if mutagen is None:
+        return {
+            "sucesso": False,
+            "erro": "Dependência obrigatória 'mutagen' indisponível; varredura de cues cancelada.",
+            "dependencia_ausente": "mutagen",
+            "varredura_incompleta": True,
+            "erros_diretorio": 0,
+            "diretorios_inacessiveis": [],
+            "total": 0,
+            "gravadas": 0,
+            "pendentes": 0,
+            "items": []
+        }
+
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     if not base_path.exists():
         return {"sucesso": False, "erro": f"Pasta não encontrada: {base_path}"}
@@ -848,13 +1114,26 @@ def scan_crate_cues(
             target_dir = target_dir / subcrate
 
     if not target_dir.exists():
-        return {"sucesso": True, "total": 0, "gravadas": 0, "pendentes": 0, "items": []}
+        return {
+            "sucesso": True,
+            "varredura_incompleta": False,
+            "erros_diretorio": 0,
+            "diretorios_inacessiveis": [],
+            "total": 0,
+            "gravadas": 0,
+            "pendentes": 0,
+            "items": []
+        }
 
     total_tracks = 0
     total_with_cues = 0
     items = []
+    dir_errors = []
 
-    for root, dirs, files in os.walk(str(target_dir)):
+    def _on_walk_error(os_err):
+        dir_errors.append(str(os_err))
+
+    for root, dirs, files in os.walk(str(target_dir), onerror=_on_walk_error):
         if '/.' in root or '\\.' in root:
             continue
         if crate_raiz and not include_subcrates and not subcrate:
@@ -876,21 +1155,20 @@ def scan_crate_cues(
                 dur = 0.0
                 bpm = 0.0
 
-                if mutagen:
-                    try:
-                        audio = mutagen.File(str(full_p))
-                        if audio is not None:
-                            dur = getattr(audio.info, 'length', 0.0)
-                            if 'TBPM' in audio:
-                                try: bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
-                                except Exception: pass
-                            if 'GEOB:Serato Markers2' in audio:
-                                raw_m2 = audio['GEOB:Serato Markers2'].data
-                                cues_in = extract_cues_from_raw_tag(raw_m2)
-                                if cues_in:
-                                    has_cues = True
-                    except Exception:
-                        pass
+                try:
+                    audio = mutagen.File(str(full_p))
+                    if audio is not None:
+                        dur = getattr(audio.info, 'length', 0.0)
+                        if 'TBPM' in audio:
+                            try: bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
+                            except Exception: pass
+                        if 'GEOB:Serato Markers2' in audio:
+                            raw_m2 = audio['GEOB:Serato Markers2'].data
+                            cues_in = extract_cues_from_raw_tag(raw_m2)
+                            if cues_in:
+                                has_cues = True
+                except Exception:
+                    pass
 
                 if has_cues:
                     total_with_cues += 1
@@ -910,13 +1188,23 @@ def scan_crate_cues(
                         "status": "Gravado" if has_cues else "Pendente"
                     })
 
-    return {
-        "sucesso": True,
+    varredura_incompleta = len(dir_errors) > 0
+    result = {
+        "sucesso": not varredura_incompleta,
+        "varredura_incompleta": varredura_incompleta,
+        "erros_diretorio": len(dir_errors),
+        "diretorios_inacessiveis": dir_errors[:20],
         "total": total_tracks,
         "gravadas": total_with_cues,
         "pendentes": total_tracks - total_with_cues,
         "items": items
     }
+    if varredura_incompleta:
+        result["erro"] = (
+            f"Varredura incompleta: {len(dir_errors)} diretório(s) inacessível(is) "
+            "durante o escaneamento."
+        )
+    return result
 
 
 def batch_repair_crate_cues(
@@ -926,6 +1214,18 @@ def batch_repair_crate_cues(
     include_subcrates: bool = True
 ):
     """Varre e repara o layout binário Serato Markers2 de todas as faixas que possuem cues."""
+    if mutagen is None:
+        print(json.dumps({
+            "tipo": "fim",
+            "sucesso": False,
+            "erro": "Dependência obrigatória 'mutagen' indisponível.",
+            "dependencia_ausente": "mutagen",
+            "total": 0,
+            "atualizados": 0,
+            "erros": ["Mutagen não instalado"]
+        }, ensure_ascii=False), flush=True)
+        return
+
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     target_dir = base_path
     if crate_raiz:
@@ -934,7 +1234,12 @@ def batch_repair_crate_cues(
             target_dir = target_dir / subcrate
 
     files_to_process = []
-    for root, dirs, files in os.walk(str(target_dir)):
+    dir_errors = []
+
+    def _on_walk_error(os_err):
+        dir_errors.append(f"Diretório inacessível: {os_err}")
+
+    for root, dirs, files in os.walk(str(target_dir), onerror=_on_walk_error):
         if '/.' in root or '\\.' in root:
             continue
         if crate_raiz and not include_subcrates and not subcrate:
@@ -954,7 +1259,7 @@ def batch_repair_crate_cues(
     print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
 
     repaired_count = 0
-    errors = []
+    errors = list(dir_errors)
 
     for idx, full_p in enumerate(files_to_process, 1):
         try:
@@ -984,6 +1289,8 @@ def batch_repair_crate_cues(
         "tipo": "fim",
         "sucesso": not has_errors,
         "sucesso_parcial": (has_errors and repaired_count > 0),
+        "varredura_incompleta": len(dir_errors) > 0,
+        "erros_diretorio": len(dir_errors),
         "total": total,
         "atualizados": repaired_count,
         "erros": errors[:10]
@@ -999,6 +1306,18 @@ def batch_apply_crate_cues(
     overwrite_existing: bool = False
 ):
     """Gera e aplica Hot Cues para todas as faixas da Crate com streaming de progresso."""
+    if mutagen is None:
+        print(json.dumps({
+            "tipo": "fim",
+            "sucesso": False,
+            "erro": "Dependência obrigatória 'mutagen' indisponível.",
+            "dependencia_ausente": "mutagen",
+            "total": 0,
+            "atualizados": 0,
+            "erros": ["Mutagen não instalado"]
+        }, ensure_ascii=False), flush=True)
+        return
+
     base_path = Path(os.path.expanduser(mp3_base_dir)).resolve()
     target_dir = base_path
     if crate_raiz:
@@ -1007,7 +1326,12 @@ def batch_apply_crate_cues(
             target_dir = target_dir / subcrate
 
     files_to_process = []
-    for root, dirs, files in os.walk(str(target_dir)):
+    dir_errors = []
+
+    def _on_walk_error(os_err):
+        dir_errors.append(f"Diretório inacessível: {os_err}")
+
+    for root, dirs, files in os.walk(str(target_dir), onerror=_on_walk_error):
         if '/.' in root or '\\.' in root:
             continue
         if crate_raiz and not include_subcrates and not subcrate:
@@ -1027,7 +1351,7 @@ def batch_apply_crate_cues(
     print(json.dumps({"tipo": "inicio", "total": total}, ensure_ascii=False), flush=True)
 
     applied_count = 0
-    errors = []
+    errors = list(dir_errors)
 
     for idx, full_p in enumerate(files_to_process, 1):
         skipped = False
@@ -1064,6 +1388,8 @@ def batch_apply_crate_cues(
         "tipo": "fim",
         "sucesso": not has_errors,
         "sucesso_parcial": (has_errors and applied_count > 0),
+        "varredura_incompleta": len(dir_errors) > 0,
+        "erros_diretorio": len(dir_errors),
         "total": total,
         "atualizados": applied_count,
         "erros": errors[:10]
@@ -1096,9 +1422,12 @@ def main():
     mp3_dir = args.mp3 or str(Path.home() / "Music" / "MP3")
 
     if args.preview:
+        if mutagen is None:
+            print(json.dumps({"sucesso": False, "confiavel": False, "confianca": 0.0, "erro": "Mutagen não instalado"}, ensure_ascii=False), flush=True)
+            sys.exit(1)
         file_p = Path(args.preview)
         if not file_p.exists():
-            print(json.dumps({"sucesso": False, "erro": "Arquivo não encontrado"}, ensure_ascii=False), flush=True)
+            print(json.dumps({"sucesso": False, "confiavel": False, "confianca": 0.0, "erro": "Arquivo não encontrado"}, ensure_ascii=False), flush=True)
             sys.exit(1)
         try:
             audio = mutagen.File(str(file_p))
@@ -1106,11 +1435,26 @@ def main():
             bpm = 0.0
             if audio and 'TBPM' in audio:
                 bpm = float(str(audio['TBPM']).strip().replace(',', '.'))
-            cues = calculate_smart_cues(dur, bpm, filepath_str=str(file_p))
-            print(json.dumps({"sucesso": True, "duracao": dur, "bpm": bpm, "cues": cues}, ensure_ascii=False), flush=True)
-            sys.exit(0)
+            cue_calc = calculate_smart_cues_detailed(dur, bpm, filepath_str=str(file_p))
+            payload = {
+                "sucesso": bool(cue_calc.get("sucesso")),
+                "duracao": dur,
+                "bpm": bpm,
+                "confiavel": bool(cue_calc.get("confiavel")),
+                "confianca": float(cue_calc.get("confianca", 0.0)),
+                "motivo": cue_calc.get("motivo", ""),
+                "transiente": cue_calc.get("transiente"),
+                "cues": cue_calc.get("cues", []),
+            }
+            if not payload["sucesso"]:
+                payload["erro"] = (
+                    f"Análise de transientes inconclusiva ({payload['motivo']}, "
+                    f"confiança={payload['confianca']:.2f})."
+                )
+            print(json.dumps(payload, ensure_ascii=False), flush=True)
+            sys.exit(0 if payload["sucesso"] else 1)
         except Exception as e:
-            print(json.dumps({"sucesso": False, "erro": str(e)}, ensure_ascii=False), flush=True)
+            print(json.dumps({"sucesso": False, "confiavel": False, "confianca": 0.0, "erro": str(e)}, ensure_ascii=False), flush=True)
             sys.exit(1)
 
     if args.repair_file:
@@ -1189,7 +1533,7 @@ def main():
             offset=args.offset
         )
         print(json.dumps(res, ensure_ascii=False), flush=True)
-        sys.exit(0)
+        sys.exit(0 if res.get("sucesso") else 1)
 
     if args.batch_crate:
         batch_apply_crate_cues(

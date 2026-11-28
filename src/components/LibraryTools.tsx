@@ -79,6 +79,7 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
 
   // Crates
   const [refs, setRefs] = useState<any>(null);
+  const [busyRefs, setBusyRefs] = useState(false);
   const [m3uPath, setM3uPath] = useState<string>('');
   const [importName, setImportName] = useState<string>('');
 
@@ -108,6 +109,7 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
 
   // Novidades
   const [newFiles, setNewFiles] = useState<any>(null);
+  const [busyNewFiles, setBusyNewFiles] = useState(false);
 
   // Desfazer
   const [ops, setOps] = useState<any[]>([]);
@@ -210,13 +212,16 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
   };
 
   const runRefs = async () => {
-    if (!isTauri || !seratoPath) return;
+    if (!isTauri || !seratoPath || busyRefs) return;
+    setBusyRefs(true);
     try {
       const res = await call<any>('check_crate_references', { seratoPath });
       setRefs(res);
       onAddLog(`🔎 Referências verificadas: ${res.crates_verificadas} crates, ${res.referencias_quebradas} referências quebradas.`);
     } catch (e) {
       onAddLog(`❌ Verificação de crates: ${e}`);
+    } finally {
+      setBusyRefs(false);
     }
   };
 
@@ -330,12 +335,16 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
   };
 
   const runNewFiles = async () => {
+    if (!isTauri || !mp3Path || busyNewFiles) return;
+    setBusyNewFiles(true);
     try {
       const res = await call<any>('scan_new_tracks', { mp3Path });
       setNewFiles(res);
       onAddLog(res.linha_base ? `🛰️ ${res.mensagem}` : `🛰️ ${res.total_novos} faixa(s) nova(s) desde a última verificação.`);
     } catch (e) {
       onAddLog(`❌ Novas faixas: ${e}`);
+    } finally {
+      setBusyNewFiles(false);
     }
   };
 
@@ -401,9 +410,9 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
 
         {/* Novidades */}
         <Card title="Novas faixas" icon={<Radar className="w-4 h-4 text-serato-neonGreen" />} hint="compara com a última verificação">
-          <Btn onClick={runNewFiles} disabled={!ready}>
-            <Radar className="w-3.5 h-3.5" />
-            <span>Verificar novidades</span>
+          <Btn onClick={runNewFiles} disabled={!ready || busyNewFiles}>
+            <Radar className={`w-3.5 h-3.5 ${busyNewFiles ? 'animate-spin' : ''}`} />
+            <span>{busyNewFiles ? 'Verificando novidades...' : 'Verificar novidades'}</span>
           </Btn>
           {!newFiles ? (
             <EmptyState text="Na primeira verificação o app registra uma linha de base. Depois, mostra o que entrou na pasta." />
@@ -517,9 +526,9 @@ export const LibraryTools: React.FC<LibraryToolsProps> = ({ onAddLog, mp3Path, s
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
         {/* Crates: referências e M3U */}
         <Card title="Crates: referências e M3U" icon={<Layers className="w-4 h-4 text-serato-orange" />}>
-          <Btn onClick={runRefs} disabled={!seratoPath}>
-            <Eye className="w-3.5 h-3.5" />
-            <span>Verificar referências quebradas</span>
+          <Btn onClick={runRefs} disabled={!seratoPath || busyRefs}>
+            <Eye className={`w-3.5 h-3.5 ${busyRefs ? 'animate-pulse' : ''}`} />
+            <span>{busyRefs ? 'Verificando referências...' : 'Verificar referências quebradas'}</span>
           </Btn>
           {refs && (
             <div className="max-h-48 overflow-y-auto space-y-1.5">

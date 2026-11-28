@@ -129,10 +129,23 @@ class E2ESandboxTestCase(unittest.TestCase):
     ) -> Path:
         """
         Creates an MPEG 1 Layer 3 MP3 file with valid ID3v2.3 tags and valid MPEG frames.
+        Pass acoustic=True to generate real FFmpeg-encoded transient audio.
         """
         duration_sec = kwargs.get("duration_sec")
         if duration_sec is None:
             duration_sec = duration_frames * FRAME_DURATION_SEC
+
+        if kwargs.get("acoustic"):
+            return AcousticFixtureGenerator.create_tagged_transient_mp3(
+                filepath,
+                title=title,
+                artist=artist,
+                album=album,
+                bpm=str(bpm) if bpm is not None else "",
+                key=str(key) if key is not None else "",
+                duration_sec=max(12.0, float(duration_sec)),
+                silence_sec=float(kwargs.get("silence_sec", 0.2)),
+            )
 
         track = SyntheticTrack(
             title=title,

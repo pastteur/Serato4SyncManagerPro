@@ -709,7 +709,7 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
 
     try:
         data = crate_path.read_bytes()
-        header_antigo, existentes, _, outros_blocos = parse_crate_binary(data)
+        header_antigo, existentes, blocos_otrk, outros_blocos = parse_crate_binary(data)
     except Exception as e:
         return {"sucesso": False, "erro": f"Erro ao ler crate: {e}"}
 
@@ -886,7 +886,14 @@ def generate_curated_set(serato_dir: str, crate_name: str, profile: str = "warmu
         }
 
     # EXECUÇÃO FÍSICA
-    res = write_crate_atomic(new_crate_path, final_rel_paths, header_antigo, outros_blocos, action_name="ghost_curator")
+    res = write_crate_atomic(
+        new_crate_path,
+        final_rel_paths,
+        header_antigo,
+        outros_blocos,
+        action_name="ghost_curator",
+        track_blocks=blocos_otrk,
+    )
     if res["sucesso"]:
         res["operacao_id"] = operacao_id
         res["crate_name"] = new_crate_path.stem
@@ -932,7 +939,7 @@ def main():
         final = analyze_energy_batch(args.energy_batch, limit=args.limit, write=args.write,
                                      target_tag=args.target_tag, emit=True,
                                      serato_dir=args.serato, crate_name=args.crate)
-        sys.exit(0)
+        sys.exit(0 if final.get("sucesso") else 1)
 
     if args.analyze:
         res = analyze_file(args.analyze)
@@ -942,7 +949,7 @@ def main():
     if args.analyze_batch:
         final = analyze_batch(args.analyze_batch, limit=args.limit, write=args.write,
                               only_missing=not args.include_filled, emit=True)
-        sys.exit(0)
+        sys.exit(0 if final.get("sucesso") else 1)
 
     parser.print_help()
 

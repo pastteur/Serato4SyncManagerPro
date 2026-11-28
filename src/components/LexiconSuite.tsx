@@ -247,6 +247,9 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
         crateName: energyCrate || null
       });
       const data = JSON.parse(resJson);
+      if (!data.sucesso) {
+        throw new Error(data.erro || 'Análise de Energy não confirmada.');
+      }
       setEnergyPreview(data);
       if (onAddLog) {
         onAddLog(`🔍 Prévia de Energy gerada: ${data.total || 0} faixas analisadas. Aguardando aprovação explícita.`);
@@ -275,6 +278,9 @@ export const LexiconSuite: React.FC<LexiconSuiteProps> = ({
         crateName: energyCrate || null
       });
       const data = JSON.parse(resJson);
+      if (!data.sucesso) {
+        throw new Error(data.erro || 'Gravação de Energy não confirmada.');
+      }
       setEnergyResult(data);
       setEnergyPreview(null);
       if (onAddLog) {

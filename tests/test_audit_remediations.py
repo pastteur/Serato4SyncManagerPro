@@ -417,62 +417,74 @@ class TestAuditRemediations(unittest.TestCase):
         self.assertEqual(journal.calc_file_sha256(str(mp3)), h0)
 
     # =========================================================================
-    # H2 — auto_cue.py: Silencedetect com -v info e eliminação de fallback cego
+    # H2 — auto_cue.py: Detecção real de transientes/onsets e confiança
     # =========================================================================
 
-    def test_h2_silencedetect_captures_initial_silence_with_v_info(self):
-        """H2: ffmpeg com -v info detecta corretamente silêncio inicial e transiente."""
-        # Simula saída real do ffmpeg silencedetect emitida em stderr no nível info
-        fake_stderr = (
-            "[silencedetect @ 0x123] silence_start: 0\n"
-            "[silencedetect @ 0x123] silence_end: 1.45 | silence_duration: 1.45\n"
-        )
-        mock_proc = MagicMock(returncode=0, stderr=fake_stderr)
+    def _pcm_bytes_from_frames(self, frame_amplitudes):
+        """Gera PCM s16le a 10kHz (100 amostras = 10 ms por quadro)."""
+        import struct
+        buf = bytearray()
+        for amp in frame_amplitudes:
+            sample = max(-32767, min(32767, int(amp)))
+            buf.extend(struct.pack("<h", sample) * 100)
+        return bytes(buf)
 
+    def test_h2_silencedetect_captures_initial_silence_with_v_info(self):
+        """H2: Detecta silêncio inicial seguido de onset real e reporta confiavel=True."""
+        # 145 quadros (1450 ms) em silêncio + ataque forte (amp 12000)
+        pcm = self._pcm_bytes_from_frames([0] * 145 + [12000] * 55)
+        mock_proc = MagicMock(returncode=0, stdout=pcm, stderr=b"")
+
+        track = self._create_synthetic_mp3(self.mp3_dir / "onset_1450.mp3")
         with patch("auto_cue.get_ffmpeg_bin", return_value="/fake/ffmpeg"), \
              patch("subprocess.run", return_value=mock_proc):
-            res = auto_cue.detect_audio_transients("/fake/track.mp3", duration_sec=100.0)
+            res = auto_cue.detect_audio_transients(str(track), duration_sec=100.0)
 
         self.assertTrue(res["has_transient"])
         self.assertTrue(res["confiavel"])
         self.assertEqual(res["first_beat_ms"], 1450)
+        self.assertEqual(res["silence_end_ms"], 1450)
 
     def test_h2_continuous_silence_reports_no_transient_without_blind_fallback(self):
-        """H2: Arquivo em silêncio contínuo reporta has_transient=False em vez de 100ms cego."""
-        fake_stderr = "[silencedetect @ 0x123] silence_start: 0\n" # sem silence_end nos 15s
-        mock_proc = MagicMock(returncode=0, stderr=fake_stderr)
+        """H2: Arquivo em silêncio contínuo reporta has_transient=False, confiavel=False e first_beat_ms=None."""
+        pcm = self._pcm_bytes_from_frames([0] * 300)
+        mock_proc = MagicMock(returncode=0, stdout=pcm, stderr=b"")
 
+        track = self._create_synthetic_mp3(self.mp3_dir / "silent.mp3")
         with patch("auto_cue.get_ffmpeg_bin", return_value="/fake/ffmpeg"), \
              patch("subprocess.run", return_value=mock_proc):
-            res = auto_cue.detect_audio_transients("/fake/track.mp3", duration_sec=100.0)
+            res = auto_cue.detect_audio_transients(str(track), duration_sec=100.0)
 
         self.assertFalse(res["has_transient"])
         self.assertFalse(res["confiavel"])
-        self.assertEqual(res["first_beat_ms"], 500)
+        self.assertIsNone(res["first_beat_ms"])
 
     def test_h2_audio_without_initial_silence(self):
-        """H2: Áudio que inicia imediatamente sem silêncio inicial detecta transiente no início."""
-        fake_stderr = "[silencedetect @ 0x123] silence_start: 8.5\n" # silêncio só no meio
-        mock_proc = MagicMock(returncode=0, stderr=fake_stderr)
+        """H2: Áudio com ataque forte imediato no quadro 0 detecta transiente confiável."""
+        pcm = self._pcm_bytes_from_frames([12000] * 200)
+        mock_proc = MagicMock(returncode=0, stdout=pcm, stderr=b"")
 
+        track = self._create_synthetic_mp3(self.mp3_dir / "immediate.mp3")
         with patch("auto_cue.get_ffmpeg_bin", return_value="/fake/ffmpeg"), \
              patch("subprocess.run", return_value=mock_proc):
-            res = auto_cue.detect_audio_transients("/fake/track.mp3", duration_sec=100.0)
+            res = auto_cue.detect_audio_transients(str(track), duration_sec=100.0)
 
         self.assertTrue(res["has_transient"])
         self.assertTrue(res["confiavel"])
         self.assertEqual(res["first_beat_ms"], 100)
 
     def test_h2_invalid_audio_returns_unreliable(self):
-        """H2: Arquivo inválido ou falha de ffmpeg reporta has_transient=False."""
-        mock_proc = MagicMock(returncode=1, stderr="Invalid data found when processing input\n")
+        """H2: Arquivo inválido ou falha de ffmpeg reporta has_transient=False e confiavel=False."""
+        mock_proc = MagicMock(returncode=1, stdout=b"", stderr=b"Invalid data found when processing input\n")
 
+        track = self._create_synthetic_mp3(self.mp3_dir / "corrupt.mp3")
         with patch("auto_cue.get_ffmpeg_bin", return_value="/fake/ffmpeg"), \
              patch("subprocess.run", return_value=mock_proc):
-            res = auto_cue.detect_audio_transients("/fake/corrupt.mp3", duration_sec=100.0)
+            res = auto_cue.detect_audio_transients(str(track), duration_sec=100.0)
 
         self.assertFalse(res["has_transient"])
         self.assertFalse(res["confiavel"])
+        self.assertIsNone(res["first_beat_ms"])
 
     # =========================================================================
     # H4 — auto_cue.py: Restore de cues e bloqueio se backup falhar
@@ -483,8 +495,10 @@ class TestAuditRemediations(unittest.TestCase):
         track = self._create_synthetic_mp3(self.mp3_dir / "BackupFailTrack.mp3")
         orig_bytes = track.read_bytes()
 
-        # Injeta falha no banco de backup
-        with patch("auto_cue.backup_track_cues", return_value=False):
+        # Injeta falha no banco de backup (com transiente confiável)
+        reliable = {"first_beat_ms": 500, "has_transient": True, "confiavel": True, "confianca": 0.9, "motivo": "onset_detectado"}
+        with patch("auto_cue.detect_audio_transients", return_value=reliable), \
+             patch("auto_cue.backup_track_cues", return_value=False):
             res = auto_cue.generate_and_save_serato_cues(str(track), overwrite_existing=True)
 
         self.assertFalse(res["sucesso"])
@@ -493,15 +507,20 @@ class TestAuditRemediations(unittest.TestCase):
 
     def test_h4_track_without_tags_backs_up_and_restores_clean_state(self):
         """H4: Faixa sem tags prévias salva estado vazio e restore apaga os cues adicionados."""
+        from tests.fixtures.acoustic_fixtures import AcousticFixtureGenerator
         track = self.mp3_dir / "NoTagTrack.mp3"
-        frame = b'\xff\xfb\x90\x00' + b'\x00' * 413
-        track.write_bytes(frame * 450)
+        AcousticFixtureGenerator.generate_transient_audio(track, silence_sec=0.2, audio_sec=12.0)
+        # Garante remoção de quaisquer tags ID3 geradas pelo muxer
+        from mutagen.id3 import ID3, ID3NoHeaderError
+        try:
+            ID3(str(track)).delete(str(track))
+        except ID3NoHeaderError:
+            pass
 
         # Gera cues
         res = auto_cue.generate_and_save_serato_cues(str(track), overwrite_existing=True)
-        self.assertTrue(res["sucesso"])
+        self.assertTrue(res["sucesso"], res)
 
-        from mutagen.id3 import ID3
         id3_after = ID3(str(track))
         self.assertIn("GEOB:Serato Markers2", id3_after)
 
@@ -514,7 +533,9 @@ class TestAuditRemediations(unittest.TestCase):
 
     def test_h4_custom_dj_cues_are_preserved_and_restored(self):
         """H4: Cues manuais e personalizados de DJ são preservados e restaurados fielmente."""
-        track = self._create_synthetic_mp3(self.mp3_dir / "CustomCueTrack.mp3")
+        from tests.fixtures.acoustic_fixtures import AcousticFixtureGenerator
+        track = self.mp3_dir / "CustomCueTrack.mp3"
+        AcousticFixtureGenerator.create_tagged_transient_mp3(track, title="CustomCueTrack", duration_sec=13.0)
 
         # Insere marcador manual customizado
         custom_blob = b"\x01\x01CUSTOM_DJ_MARKERS2_DATA"
@@ -525,7 +546,7 @@ class TestAuditRemediations(unittest.TestCase):
 
         # Sobrescreve com flag forçada
         res = auto_cue.generate_and_save_serato_cues(str(track), overwrite_existing=True)
-        self.assertTrue(res["sucesso"])
+        self.assertTrue(res["sucesso"], res)
 
         # Restaura e comprova integridade byte a byte do marcador customizado
         res_rest = auto_cue.restore_track_cues(str(track))

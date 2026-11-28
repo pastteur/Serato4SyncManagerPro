@@ -391,14 +391,9 @@ def test_p1_p2_remediations_smoke(tmp_path, monkeypatch):
     monkeypatch.setattr(auto_cue, "BACKUP_DB_PATH", tmp_path / "cues.sqlite")
 
     # 1. Pioneer cue conversion + deterministic content_id (no duplicate djmdCue rows on re-export)
+    from tests.fixtures.acoustic_fixtures import AcousticFixtureGenerator
     mp3 = tmp_path / "Lib" / "Track.mp3"
-    mp3.parent.mkdir(parents=True, exist_ok=True)
-    # 1200 MPEG frames (~31s duration) so auto_cue duration check (>=10s) succeeds
-    mp3.write_bytes((b"\xff\xfb\x90\x00" + b"\x00" * 413) * 1200)
-    tags = ID3()
-    tags.add(TIT2(encoding=3, text="DJ Track"))
-    tags.add(TBPM(encoding=3, text="128.75"))
-    tags.save(str(mp3), v2_version=3)
+    AcousticFixtureGenerator.create_tagged_transient_mp3(mp3, title="DJ Track", bpm="128.75", duration_sec=14.0)
     res_cue = auto_cue.generate_and_save_serato_cues(str(mp3), overwrite_existing=True)
     assert res_cue["sucesso"] is True, res_cue
 

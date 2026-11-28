@@ -179,7 +179,8 @@ class TestTier4RealWorldScenarios(E2ESandboxTestCase):
                 title=f"[www.djpool.com] [Exclusive] Anthem{i} (Original Mix)",
                 artist=f"Artist{i}",
                 bpm="128.0",
-                duration_frames=500
+                duration_frames=500,
+                acoustic=True
             )
 
         # 1. Scan tags requiring cleanup
@@ -552,7 +553,8 @@ class TestTier4RealWorldScenarios(E2ESandboxTestCase):
             artist="DJ Test",
             bpm="0",
             key="",
-            duration_frames=500
+            duration_frames=500,
+            acoustic=True
         )
 
         # 1. Clean track tags
